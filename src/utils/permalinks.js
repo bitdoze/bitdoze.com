@@ -31,13 +31,13 @@ export const getPermalink = (slug = '', type = 'page') => {
 
 	switch (type) {
 		case 'category':
-			return createPath(basePathname, CATEGORY_BASE, _slug);
+			return createPath(basePathname, CATEGORY_BASE, _slug) + '/';
 
 		case 'tag':
-			return createPath(basePathname, TAG_BASE, _slug);
+			return createPath(basePathname, TAG_BASE, _slug) + '/';
 
 		case 'post':
-			return createPath(basePathname, POST_BASE, _slug);
+			return createPath(basePathname, POST_BASE, _slug) + '/';
 
 		case 'page':
 		default:
