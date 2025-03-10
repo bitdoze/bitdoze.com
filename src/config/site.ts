@@ -1,7 +1,7 @@
 // Site configuration
 export const siteConfig = {
   // Site details
-  name: "BitDoze",
+  name: "Bit Doze Website",
   description: "Providing valuable resources and tutorials for web developers and tech enthusiasts.",
   url: "https://bitdoze.com",
   
