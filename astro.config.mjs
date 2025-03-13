@@ -12,11 +12,12 @@ export default defineConfig({
   site: "https://www.bitdoze.com",
   redirects: {
     "/tools/": "https://bit-tools.com/tools",
-    "/tools/thumbnail-ideas/": "https://bit-tools.com/tools/ai-thumbnail-ideas",
+    "/tools/thumbnail-ideas/":
+      "https://bit-tools.com/tools/youtube-thumbnail-ideas-generator",
     "/tools/titles-generator/":
       "https://bit-tools.com/tools/ai-title-generator",
     "/tools/youtube-script-generator/":
-      "https://bit-tools.com/tools/ai-youtube-script-generator",
+      "https://bit-tools.com/tools/youtube-script-generator",
   },
   // Base path (set to '/' for most sites)
   base: "/",
