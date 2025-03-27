@@ -22,6 +22,11 @@ export default defineConfig({
   // Base path (set to '/' for most sites)
   base: "/",
 
+  // Enable experimental SVG components
+  experimental: {
+    svg: true,
+  },
+
   // Configure Vite plugins and server settings
   vite: {
     plugins: [tailwindcss()],
