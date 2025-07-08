@@ -1,0 +1,846 @@
+---
+date: 2025-07-08T00:00:00Z
+title: "Text-to-Speech with uv: Create Audio from Text in Python"
+description: "Learn how to build a powerful text-to-speech script using uv that supports multiple TTS engines, voice selection, and audio file saving."
+image: "@images/25/07/uv-text-to-speech.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["uv", "python", "text-to-speech", "audio", "scripts"]
+canonical: "https://www.bitdoze.com/uv-text-to-speech-script/"
+---
+
+Text-to-speech (TTS) technology has become increasingly accessible, and with `uv`, creating a powerful TTS script is easier than ever. In this comprehensive guide, we'll build a feature-rich text-to-speech application that supports multiple TTS engines, voice selection, speech rate control, and audio file saving—all without the hassle of managing virtual environments or dependencies.
+
+Our script will intelligently choose the best TTS engine available on your system, provide high-quality voice options, and offer both interactive and command-line usage modes. Whether you're creating audio content, building accessibility features, or just experimenting with speech synthesis, this guide has you covered.
+
+<Notice type="info" title="New to uv?">
+    If you're new to uv or want to learn how to set up full Python projects, start with our comprehensive guide [Getting Started with uv: Setting Up Your Python Project in 2025](https://www.bitdoze.com/uv-get-start/) before diving into this advanced script.
+</Notice>
+
+
+## What Makes This TTS Script Special?
+
+Unlike basic TTS implementations, our script offers enterprise-level features:
+
+- **Multiple TTS Engines**: Automatically tries pyttsx3, Google TTS, and system voices
+- **Smart Engine Selection**: Chooses the best available engine based on your platform
+- **Voice Selection**: Access to system voices like Alex, Samantha, and Victoria on macOS
+- **Speech Rate Control**: Adjust speaking speed from 50 to 300 words per minute
+- **Audio File Export**: Save speech as MP3 files for later use (requires ffmpeg)
+- **Interactive Mode**: Type and hear text in real-time
+- **File Input Support**: Convert entire documents to speech
+- **Cross-Platform**: Works on macOS, Windows, and Linux
+- **Error Handling**: Graceful fallbacks when engines fail
+
+**Note**: This updated version uses `ffmpeg` for MP3 conversion instead of `pydub`, providing better compatibility and eliminating Python dependency issues for audio format conversion.
+
+## The Complete Text-to-Speech Script
+
+Let's start with our comprehensive TTS script. Save this as `tts.py`:
+
+```python
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = [
+#     "pyttsx3",
+#     "pygame",
+#     "gtts",
+#     "requests",
+# ]
+# ///
+
+import pyttsx3
+import pygame
+import tempfile
+import os
+import argparse
+import sys
+import platform
+import subprocess
+import warnings
+from pathlib import Path
+from gtts import gTTS
+import requests
+
+# Suppress irrelevant warnings from pydub
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
+
+def text_to_speech(text, output_file=None, play=True, save_mp3=None, method="auto", voice=None, rate=150):
+    """
+    Convert text to speech with options to play and/or save as MP3.
+
+    This function orchestrates the TTS process, trying different methods based on
+    user preference and system capabilities.
+
+    Args:
+        text (str): The text to convert to speech.
+        output_file (str): Temporary WAV file path (optional).
+        play (bool): Whether to play the audio.
+        save_mp3 (str): Path to save the final MP3 file (optional).
+        method (str): TTS method to use ("auto", "pyttsx3", "gtts", "system").
+        voice (str): Voice to use (for system method on macOS).
+        rate (int): Speech rate in words per minute.
+    """
+    # If no output file is specified, create a temporary one.
+    # We will use a WAV file as the common format for pygame playback.
+    temp_dir = tempfile.gettempdir()
+    temp_wav_file = os.path.join(temp_dir, "temp_speech.wav")
+
+    success = False
+    used_method = ""
+
+    # --- Smart Method Selection ---
+    # Determine the order of TTS engines to try.
+    if method == "auto":
+        method_preference = []
+        if platform.system() == "Darwin":
+            # On macOS, the native 'say' command is the most reliable,
+            # especially if a specific voice is requested.
+            method_preference.extend(["system", "pyttsx3", "gtts"])
+        else:
+            # On other systems (Linux/Windows), pyttsx3 is a good local default.
+            method_preference.extend(["pyttsx3", "gtts", "system"])
+    else:
+        # If a specific method is requested, use only that one.
+        method_preference = [method]
+
+    # --- Attempt TTS Conversion ---
+    for m in method_preference:
+        print(f"🔧 Trying method: {m}...")
+        if m == "pyttsx3":
+            success = try_pyttsx3(text, temp_wav_file, rate)
+        elif m == "gtts":
+            success = try_gtts(text, temp_wav_file)
+        elif m == "system":
+            # The 'system' method is primarily for macOS's 'say' command.
+            if platform.system() == "Darwin":
+                success = try_system_say(text, temp_wav_file, voice, rate)
+
+        if success:
+            used_method = m
+            print(f"✅ Audio generated successfully using '{used_method}'!")
+            break
+        else:
+            print(f"⚠️  Method '{m}' failed.")
+
+    if not success:
+        print("❌ All TTS methods failed! Unable to generate audio.")
+        return False
+
+    # --- Post-Processing: Play and Save ---
+    try:
+        # Play the generated WAV file if requested.
+        if play:
+            play_audio(temp_wav_file)
+
+        # Convert the temporary WAV to MP3 if a save path is provided.
+        if save_mp3:
+            # Ensure the source file exists before trying to convert.
+            if os.path.exists(temp_wav_file):
+                 convert_to_mp3(temp_wav_file, save_mp3)
+            else:
+                 print(f"❌ Cannot save MP3. Temporary file '{temp_wav_file}' not found.")
+
+    except Exception as e:
+        print(f"❌ Error during post-processing (play/save): {e}")
+        return False
+    finally:
+        # Clean up the temporary WAV file.
+        if os.path.exists(temp_wav_file):
+            try:
+                os.remove(temp_wav_file)
+            except OSError as e:
+                print(f"⚠️  Could not remove temporary file: {e}")
+
+    return True
+
+def try_pyttsx3(text, output_file, rate=150):
+    """Try to use pyttsx3 for TTS, saving to a WAV file."""
+    try:
+        # --- Initialize Engine with Specific Driver ---
+        # Using the correct driver for the OS can prevent errors.
+        driver = None
+        if platform.system() == 'darwin':
+            driver = 'nsss'
+        elif platform.system() == 'win32':
+            driver = 'sapi5'
+        # For Linux, it will default to 'espeak', which is usually fine.
+        engine = pyttsx3.init(driverName=driver)
+
+        engine.setProperty('rate', rate)
+        engine.setProperty('volume', 0.9)
+
+        # Save the speech directly to the specified output file.
+        engine.save_to_file(text, output_file)
+        engine.runAndWait()
+
+        # Verify that the file was created and is not empty.
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise RuntimeError("pyttsx3 process completed but created an empty file.")
+
+        return True
+    except Exception as e:
+        print(f"⚠️  pyttsx3 error: {e}")
+        return False
+
+def try_gtts(text, output_wav_file):
+    """
+    Try to use Google Text-to-Speech.
+    gTTS creates an MP3, which must be converted to WAV for consistent playback.
+    """
+    try:
+        # Check for internet connection first.
+        requests.get("https://translate.google.com", timeout=5)
+    except requests.ConnectionError:
+        print("⚠️  No internet connection for Google TTS.")
+        return False
+
+    # Create a temporary file for the MP3 output from gTTS.
+    temp_mp3 = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+    try:
+        # Create gTTS object and save to the temporary MP3 file.
+        tts = gTTS(text=text, lang='en', slow=False)
+        tts.save(temp_mp3)
+
+        # Convert the MP3 to the target WAV file. This requires ffmpeg.
+        print("🔧 Converting gTTS MP3 output to WAV for playback...")
+        convert_mp3_to_wav(temp_mp3, output_wav_file)
+        return True
+    except Exception as e:
+        print(f"⚠️  Google TTS or conversion failed: {e}")
+        return False
+    finally:
+        # Clean up the temporary MP3 file.
+        if os.path.exists(temp_mp3):
+            os.remove(temp_mp3)
+
+def try_system_say(text, output_file, voice=None, rate=150):
+    """Use the native 'say' command on macOS to generate a WAV file."""
+    if platform.system() != "Darwin":
+        return False
+
+    try:
+        # Build the 'say' command arguments.
+        cmd = ['say']
+
+        # Add voice if specified.
+        if voice:
+            cmd.extend(['-v', voice])
+
+        # Add speech rate.
+        cmd.extend(['-r', str(rate)])
+
+        # Add the text to speak.
+        cmd.append(text)
+
+        # Specify the output file and a compatible audio format.
+        cmd.extend(['-o', output_file, '--file-format=WAVE', '--data-format=LEI16@22050'])
+
+        # Execute the command.
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except FileNotFoundError:
+        print("⚠️  'say' command not found on this system.")
+        return False
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️  System 'say' command failed: {e.stderr}")
+        return False
+
+def convert_mp3_to_wav(mp3_file, wav_file):
+    """Convert MP3 to WAV using the ffmpeg command-line tool."""
+    try:
+        cmd = [
+            'ffmpeg',
+            '-i', mp3_file,
+            '-acodec', 'pcm_s16le',  # Standard WAV format
+            '-ac', '1',              # Mono audio
+            '-ar', '22050',          # Sample rate for compatibility
+            '-y',                    # Overwrite output file if it exists
+            wav_file
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        print("❌ 'ffmpeg' command not found. MP3 conversion requires ffmpeg to be installed.")
+        print("💡 HINT: On macOS, run: brew install ffmpeg")
+        raise
+    except subprocess.CalledProcessError as e:
+        print(f"❌ ffmpeg failed to convert MP3 to WAV: {e.stderr}")
+        raise
+
+def convert_to_mp3(wav_file, mp3_file):
+    """Convert WAV file to MP3 using the ffmpeg command-line tool."""
+    try:
+        cmd = [
+            'ffmpeg',
+            '-i', wav_file,
+            '-acodec', 'libmp3lame', # Standard MP3 codec
+            '-q:a', '2',             # Good quality
+            '-y',                    # Overwrite output file if it exists
+            mp3_file
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(f"💾 MP3 saved successfully: {mp3_file}")
+    except FileNotFoundError:
+        print("❌ 'ffmpeg' command not found. MP3 conversion requires ffmpeg to be installed.")
+        print("💡 HINT: On macOS, run: brew install ffmpeg")
+        raise
+    except subprocess.CalledProcessError as e:
+        print(f"❌ ffmpeg failed to convert WAV to MP3: {e.stderr}")
+        raise
+
+def play_audio(file_path):
+    """Play an audio file using pygame, with a system fallback."""
+    print(f"🔊 Playing audio from: {file_path}")
+    try:
+        # Initialize pygame mixer with settings for better compatibility.
+        pygame.mixer.pre_init(frequency=22050, size=-16, channels=1, buffer=512)
+        pygame.mixer.init()
+
+        pygame.mixer.music.load(file_path)
+        pygame.mixer.music.play()
+
+        print("🎵 Playing... (Press Ctrl+C to stop)")
+        while pygame.mixer.music.get_busy():
+            pygame.time.wait(100)
+        print("✅ Playback finished!")
+
+    except pygame.error as e:
+        print(f"⚠️  Pygame playback error: {e}")
+        print("🔧 Falling back to system audio player...")
+        try_system_playback(file_path)
+    except KeyboardInterrupt:
+        pygame.mixer.music.stop()
+        print("\n⏹️  Playback stopped by user.")
+    finally:
+        pygame.mixer.quit()
+
+def try_system_playback(file_path):
+    """Fallback audio playback using system commands."""
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.run(['afplay', file_path], check=True)
+        elif system == "Linux":
+            # Look for a common audio player on Linux.
+            for player in ['paplay', 'aplay', 'mpg123', 'mplayer']:
+                if subprocess.run(['which', player], capture_output=True).returncode == 0:
+                    subprocess.run([player, file_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+            print("⚠️  No suitable command-line audio player found on Linux.")
+        elif system == "Windows":
+            os.startfile(file_path)
+        else:
+            print(f"⚠️  System playback not supported on platform: {system}")
+    except Exception as e:
+        print(f"⚠️  System playback failed: {e}")
+        print(f"💡 You can play the file manually: {file_path}")
+
+def list_voices():
+    """List available 'say' command voices on macOS."""
+    if platform.system() != "Darwin":
+        print("Voice listing is only available on macOS via the 'say' command.")
+        return
+    try:
+        result = subprocess.run(['say', '-v', '?'], capture_output=True, text=True, check=True)
+        print("Available macOS voices:")
+        print("-" * 50)
+        print(result.stdout)
+    except Exception as e:
+        print(f"❌ Error listing voices: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert text to speech with play and save options")
+    parser.add_argument("text", nargs="?", help="Text to convert to speech. If omitted, enters interactive mode.")
+    parser.add_argument("-f", "--file", help="Read text from a file.")
+    parser.add_argument("-s", "--save", help="Save output as an MP3 file at the specified path.")
+    parser.add_argument("-n", "--no-play", action="store_true", help="Do not play the audio.")
+    parser.add_argument("-r", "--rate", type=int, default=175, help="Speech rate in words per minute (default: 175).")
+    parser.add_argument("-m", "--method", choices=["auto", "pyttsx3", "gtts", "system"],
+                        default="auto", help="Specify the TTS engine to use.")
+    parser.add_argument("--voice", help="For macOS, specify the voice to use (e.g., 'Alex', 'Samantha'). See --list-voices.")
+    parser.add_argument("--list-voices", action="store_true", help="List available voices for macOS and exit.")
+
+    args = parser.parse_args()
+
+    if args.list_voices:
+        list_voices()
+        return 0
+
+    text_to_process = ""
+    if args.file:
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                text_to_process = f.read().strip()
+        except FileNotFoundError:
+            print(f"❌ Error: File not found at '{args.file}'")
+            return 1
+    elif args.text:
+        text_to_process = args.text
+    else:
+        # Interactive mode if no text or file is provided
+        try:
+            print("🎙️  Entering interactive TTS mode. Type text and press Enter.")
+            print("   (Type 'quit' or 'exit' to close)")
+            while True:
+                line = input("> ")
+                if line.lower() in ['quit', 'exit', 'q']:
+                    break
+                if line:
+                     text_to_speech(
+                        text=line,
+                        play=not args.no_play,
+                        save_mp3=None, # Saving is disabled in interactive mode for simplicity
+                        method=args.method,
+                        voice=args.voice,
+                        rate=args.rate
+                    )
+            return 0
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting interactive mode.")
+            return 0
+
+    if not text_to_process:
+        print("❌ Error: No text provided. Use a command-line argument, a file, or run in interactive mode.")
+        return 1
+
+    print(f"\n📝 Text: {text_to_process[:80]}{'...' if len(text_to_process) > 80 else ''}")
+    print(f"⚙️  Rate: {args.rate} WPM, Method: {args.method}, Play: {not args.no_play}")
+
+    success = text_to_speech(
+        text=text_to_process,
+        play=not args.no_play,
+        save_mp3=args.save,
+        method=args.method,
+        voice=args.voice,
+        rate=args.rate
+    )
+
+    return 0 if success else 1
+
+if __name__ == "__main__":
+    # Initialize pygame here to capture the "Hello" message once.
+    if "-n" not in sys.argv and "--no-play" not in sys.argv:
+        try:
+            # Hide the pygame support prompt
+            os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+            import pygame
+            pygame.init()
+            pygame.quit() # We just want the module loaded
+        except ImportError:
+            print("⚠️ Pygame not found, playback will rely on system commands.")
+
+    sys.exit(main())
+```
+
+## Running the Script
+
+The beauty of using `uv` is that you can run this script immediately without any setup. The updated script uses `ffmpeg` for MP3 conversion instead of `pydub`, which provides better compatibility and audio quality. Save the script as `tts.py` and try these commands:
+
+### Prerequisites
+
+For basic text-to-speech functionality, no additional software is needed. However, for MP3 export and Google TTS features, you'll need `ffmpeg`:
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# CentOS/RHEL
+sudo yum install ffmpeg
+
+# Windows
+# Download from https://ffmpeg.org/ and add to PATH
+```
+
+### Basic Usage
+
+```bash
+# Simple text-to-speech
+uv run tts.py "Hello, world!"
+
+# Read from a file
+uv run tts.py -f document.txt
+
+# Save as MP3 without playing
+uv run tts.py "Save this text" -s output.mp3 -n
+
+# Interactive mode
+uv run tts.py
+```
+
+### Advanced Voice Features
+
+#### 1. List Available Voices
+
+```bash
+uv run tts.py --list-voices
+```
+
+This will show you all available voices on your macOS system:
+
+```
+Available macOS voices:
+--------------------------------------------------
+Alex                en_US    # Most people recognize me by my voice.
+Samantha           en_US    # Hello, my name is Samantha. I am an English voice.
+Victoria           en_GB    # Isn't it nice to have a conversation with someone who has a different accent?
+Daniel             en_GB    # Hello, my name is Daniel. I am a British voice.
+Fiona              en_GB    # Hello, my name is Fiona. I am a Scottish voice.
+Karen              en_AU    # Hello, my name is Karen. I am an Australian voice.
+```
+
+#### 2. Choose a Specific Voice
+
+```bash
+# Use a specific voice
+uv run tts.py "Hello world" --voice "Samantha"
+
+# Try different voices
+uv run tts.py "Hello world" --voice "Alex"
+uv run tts.py "Hello world" --voice "Victoria"
+```
+
+#### 3. Adjust Speech Rate
+
+```bash
+# Slower speech (100 WPM)
+uv run tts.py "Hello world" -r 100
+
+# Faster speech (200 WPM)
+uv run tts.py "Hello world" -r 200
+
+# Very fast speech (300 WPM)
+uv run tts.py "Hello world" -r 300
+```
+
+#### 4. Force System Method for Better Quality
+
+```bash
+# Force using the system 'say' command with voice selection
+uv run tts.py "Hello world" -m system --voice "Samantha" -r 160
+
+# Best quality with custom voice and rate
+uv run tts.py "This is high quality speech" -m system --voice "Alex" -r 150
+```
+
+## Popular macOS Voices
+
+Here are some popular voices you can use:
+
+- **Samantha** - Clear, natural female voice
+- **Alex** - Default male voice, very clear
+- **Victoria** - British female voice
+- **Daniel** - British male voice
+- **Fiona** - Scottish female voice
+- **Karen** - Australian female voice
+- **Jorge** - Spanish male voice
+- **Paulina** - Spanish female voice
+
+## Advanced Usage Examples
+
+### Create Audio Books
+
+```bash
+# Convert an entire document to MP3
+uv run tts.py -f book.txt -s audiobook.mp3 --voice "Samantha" -r 160 -n
+
+# Multiple chapters
+uv run tts.py -f chapter1.txt -s chapter1.mp3 --voice "Alex" -r 150 -n
+uv run tts.py -f chapter2.txt -s chapter2.mp3 --voice "Alex" -r 150 -n
+```
+
+### Voice Comparison
+
+```bash
+# Compare different voices for the same text
+uv run tts.py "The quick brown fox jumps over the lazy dog" --voice "Alex" -s alex.mp3 -n
+uv run tts.py "The quick brown fox jumps over the lazy dog" --voice "Samantha" -s samantha.mp3 -n
+uv run tts.py "The quick brown fox jumps over the lazy dog" --voice "Victoria" -s victoria.mp3 -n
+```
+
+### Interactive Learning
+
+```bash
+# Start interactive mode with custom settings
+uv run tts.py --voice "Samantha" -r 140
+```
+
+Then type phrases and hear them instantly:
+```
+🎙️  Entering interactive TTS mode. Type text and press Enter.
+   (Type 'quit' or 'exit' to close)
+> Hello, how are you today?
+🔧 Trying method: system...
+✅ Audio generated successfully using 'system'!
+🔊 Playing audio...
+> The weather is beautiful today.
+🔧 Trying method: system...
+✅ Audio generated successfully using 'system'!
+🔊 Playing audio...
+> quit
+```
+
+## Understanding the Script Architecture
+
+### Smart Engine Selection
+
+The script uses intelligent engine selection based on your platform:
+
+1. **macOS**: Prefers `system` (say command) → `pyttsx3` → `gtts`
+2. **Windows/Linux**: Prefers `pyttsx3` → `gtts` → `system`
+
+### Engine Capabilities
+
+| Engine | Pros | Cons | Best For |
+|--------|------|------|----------|
+| **system** | Highest quality, native voices | macOS only | Quality over speed |
+| **pyttsx3** | Fast, offline, cross-platform | Limited voice options | Speed and reliability |
+| **gtts** | Natural sounding, many languages | Requires internet | Natural speech |
+
+### Error Handling
+
+The script includes comprehensive error handling:
+
+- **Network failures**: Falls back to offline engines
+- **Missing dependencies**: Provides installation hints
+- **File errors**: Clear error messages
+- **Audio playback issues**: Multiple fallback methods
+
+## Customization Options
+
+### Adding New Voices
+
+To add support for additional TTS engines:
+
+```python
+def try_custom_engine(text, output_file, rate=150):
+    """Add your custom TTS engine here."""
+    try:
+        # Your custom implementation
+        return True
+    except Exception as e:
+        print(f"⚠️  Custom engine failed: {e}")
+        return False
+
+# Add to the method_preference list in text_to_speech()
+```
+
+### Language Support
+
+Extend the script for multiple languages:
+
+```python
+def try_gtts_multilang(text, output_wav_file, lang='en'):
+    """Enhanced gTTS with language support."""
+    try:
+        tts = gTTS(text=text, lang=lang, slow=False)
+        # ... rest of implementation
+    except Exception as e:
+        print(f"⚠️  Multi-language TTS failed: {e}")
+        return False
+```
+
+## Common Use Cases
+
+### 1. Content Creation
+
+```bash
+# Create podcast intros
+uv run tts.py "Welcome to our podcast" --voice "Alex" -s intro.mp3 -n
+
+# Generate voice-overs
+uv run tts.py -f script.txt -s voiceover.mp3 --voice "Samantha" -r 160 -n
+```
+
+### 2. Accessibility
+
+```bash
+# Read web content aloud
+uv run tts.py "$(curl -s https://example.com | grep -o '<p>[^<]*' | sed 's/<p>//')" --voice "Alex"
+
+# Convert emails to speech
+uv run tts.py -f email.txt --voice "Samantha" -r 140
+```
+
+### 3. Language Learning
+
+```bash
+# Practice pronunciation
+uv run tts.py "Hello, my name is John" --voice "Alex" -r 120
+uv run tts.py "Bonjour, je m'appelle Jean" -m gtts # Different language
+```
+
+### 4. Automation
+
+```bash
+# System notifications
+uv run tts.py "Backup completed successfully" --voice "Alex" -r 180 -n
+
+# Reminder system
+uv run tts.py "Time for your meeting" --voice "Samantha"
+```
+
+## System Requirements
+
+### macOS
+- Built-in `say` command (included)
+- **Required for MP3 export**: `ffmpeg` (`brew install ffmpeg`)
+
+### Windows
+- Windows Speech API (usually included)
+- **Required for MP3 export**: `ffmpeg` (download from https://ffmpeg.org/)
+
+### Linux
+- `espeak` or `espeak-ng` package
+- **Required for MP3 export**: `ffmpeg` (`sudo apt install ffmpeg`)
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"'ffmpeg' command not found"**
+   - **This is required for MP3 export and Google TTS conversion**
+   ```bash
+   # macOS
+   brew install ffmpeg
+   
+   # Ubuntu/Debian
+   sudo apt install ffmpeg
+   
+   # CentOS/RHEL
+   sudo yum install ffmpeg
+   
+   # Windows
+   # Download from https://ffmpeg.org/ and add to PATH
+   ```
+
+2. **"pygame not found"**
+   - The script will fall back to system audio players
+   - Audio playback should still work
+
+3. **"Internet connection required"**
+   - Google TTS needs internet connectivity
+   - Use `--method pyttsx3` or `--method system` for offline operation
+
+4. **Voice not found**
+   - Run `uv run tts.py --list-voices` to see available voices
+   - Check spelling and capitalization
+
+5. **"ffmpeg failed to convert"**
+   - Ensure ffmpeg is properly installed and in your PATH
+   - Try running `ffmpeg -version` to verify installation
+
+### Performance Tips
+
+1. **For fastest performance**: Use `--method pyttsx3`
+2. **For best quality**: Use `--method system --voice "Samantha"`
+3. **For natural speech**: Use `--method gtts` (requires internet and ffmpeg)
+4. **For batch processing**: Use `-n` flag to skip playback
+5. **For offline use**: Avoid `gtts` method and MP3 export if ffmpeg is not available
+
+## Advanced Features
+
+### Batch Processing Script
+
+Create a batch processing script:
+
+```python
+# batch_tts.py
+import os
+import subprocess
+
+texts = [
+    "Hello world",
+    "This is a test",
+    "Goodbye world"
+]
+
+for i, text in enumerate(texts, 1):
+    subprocess.run([
+        "uv", "run", "tts.py", text,
+        "-s", f"output_{i}.mp3",
+        "--voice", "Samantha",
+        "-r", "150",
+        "-n"
+    ])
+```
+
+### Integration with Other Scripts
+
+The script can be easily integrated into other applications:
+
+```python
+# integration_example.py
+import subprocess
+
+def speak_text(text, voice="Alex", rate=150):
+    """Wrapper function for the TTS script."""
+    subprocess.run([
+        "uv", "run", "tts.py", text,
+        "--voice", voice,
+        "-r", str(rate)
+    ])
+
+# Usage
+speak_text("Hello from my application!")
+```
+
+## Why Use uv for TTS Scripts?
+
+Our text-to-speech script demonstrates several advantages of using `uv`:
+
+1. **Zero Setup**: No virtual environment management needed
+2. **Dependency Isolation**: Each script runs in its own environment
+3. **Fast Execution**: Dependencies are cached and reused
+4. **Cross-Platform**: Works identically on macOS, Windows, and Linux
+5. **Reproducible**: PEP 723 metadata ensures consistent behavior
+6. **Simplified Dependencies**: Uses fewer Python packages by leveraging system tools like ffmpeg
+
+<Notice type="info" title="Learn More About uv Scripts">
+    Want to understand more about running scripts with uv? Check out our detailed guide [Running Test Scripts with uv: No Dependencies Management Required](https://www.bitdoze.com/uv-run-scripts-guide/) for comprehensive script execution techniques.
+</Notice>
+
+## Conclusion
+
+Text-to-speech functionality is now more accessible than ever with `uv`. Our comprehensive script provides enterprise-level features while maintaining simplicity and ease of use. Whether you're creating audio content, building accessibility features, or experimenting with voice synthesis, this script provides a solid foundation.
+
+The combination of multiple TTS engines, intelligent fallbacks, voice selection, and audio export makes this script suitable for both personal projects and professional applications. The fact that it runs with a single `uv run` command makes it incredibly convenient for quick text-to-speech tasks.
+
+Key takeaways:
+- **Multiple engines** - Automatic selection of the best available TTS engine
+- **Voice control** - Access to system voices with customization options
+- **Cross-platform** - Works consistently across different operating systems
+- **Easy to use** - Simple command-line interface with powerful features
+- **Extensible** - Easy to modify and extend for specific needs
+
+Ready to start converting text to speech? Save the script and start experimenting with different voices and settings!
+
+## Related Articles
+
+- **Getting Started**: New to uv? Learn the basics in our guide [Getting Started with uv: Setting Up Your Python Project in 2025](https://www.bitdoze.com/uv-get-start/)
+- **Script Execution**: Master advanced script techniques with [Running Test Scripts with uv: No Dependencies Management Required](https://www.bitdoze.com/uv-run-scripts-guide/)
+
+### Try the Script Now
+
+```bash
+# Save the script as tts.py and try these commands:
+
+# Basic usage
+uv run tts.py "Hello, world!"
+
+# List available voices
+uv run tts.py --list-voices
+
+# Use a specific voice
+uv run tts.py "Hello world" --voice "Samantha"
+
+# Save as MP3
+uv run tts.py "Save this text" -s output.mp3
+
+# Interactive mode
+uv run tts.py
+```
+
+The script will automatically install all required dependencies (`pyttsx3`, `pygame`, `gtts`, `requests`) and provide you with a powerful text-to-speech system ready for immediate use! Note that MP3 conversion requires `ffmpeg` to be installed separately on your system.
