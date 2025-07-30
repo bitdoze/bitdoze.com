@@ -39,6 +39,8 @@ export default defineConfig({
     },
   },
 
+  // Configure image settings for external domains
+
   // Configure Astro integrations
   integrations: [mdx(), icon(), sitemap()],
 });
