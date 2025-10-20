@@ -1,3 +1,5 @@
+import config from './config.json';
+
 // Site configuration
 export const siteConfig = {
   // Site details
@@ -17,4 +19,17 @@ export const siteConfig = {
   
   // Default social image
   defaultImage: "/images/default-og.jpg",
+};
+
+// View Transitions configuration
+export const viewTransitionsConfig = {
+  enabled: config.viewTransitions?.enabled ?? true,
+  animations: {
+    postImages: config.viewTransitions?.animations?.postImages ?? 'fade',
+    postTitles: config.viewTransitions?.animations?.postTitles ?? 'fade',
+    youtubeVideos: config.viewTransitions?.animations?.youtubeVideos ?? 'fade',
+    resourceCards: config.viewTransitions?.animations?.resourceCards ?? 'slide',
+  },
+  duration: config.viewTransitions?.duration ?? '0.3s',
+  fallback: config.viewTransitions?.fallback ?? 'instant',
 };
