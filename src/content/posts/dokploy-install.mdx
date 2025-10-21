@@ -1,5 +1,5 @@
 ---
-date: 2024-06-11T00:00:00Z
+date: 2025-10-21T00:00:00Z
 title: "Dokploy Install - Ditch Vercel, Heroku and Self-Host Your SaaS"
 description: "Dokploy install and presentation an alternative to serverless like Vercel, Heroku, etc"
 image: "../../assets/images/24/05/dokploy-install.jpeg"
@@ -48,7 +48,119 @@ In the video, we go into detail about how you can do that on Hetzner. You can ch
 <Button link="https://go.bitdoze.com/hetzner" text="Hetzner €⁠20 Free" />
 
 ```sh
-ssh username@your_vps_ip
+ssh root@your_vps_ip
+```
+
+### Update System Packages
+
+Before proceeding with the installation, it's crucial to update your system packages to the latest versions to ensure security and stability:
+
+```sh
+sudo apt update && sudo apt upgrade -y
+```
+
+This command will update the package lists and upgrade all installed packages to their latest versions.
+
+### Create a Sudo User for SSH Access
+
+For security reasons, it's recommended to use a dedicated user account instead of root for daily operations. Let's create a user named `dragos` with sudo privileges:
+
+```sh
+# Create the new user
+adduser dragos
+
+# Add the user to the sudo group
+usermod -aG sudo dragos
+```
+
+Follow the prompts to set a password and optionally fill in user information.
+
+### Configure Passwordless Sudo
+
+To allow the `dragos` user to execute sudo commands without entering a password (since you're using SSH key authentication), add the user to the sudoers file:
+
+```sh
+# Add dragos to sudoers with NOPASSWD
+echo "dragos ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/dragos
+
+# Set proper permissions on the sudoers file
+sudo chmod 0440 /etc/sudoers.d/dragos
+```
+
+This allows you to run sudo commands without password prompts when authenticated via SSH key.
+
+### Copy SSH Key from Root to New User
+
+To enable SSH key authentication for the new user, copy the authorized keys from root:
+
+```sh
+# Create .ssh directory for the new user
+mkdir -p /home/dragos/.ssh
+
+# Copy the authorized keys
+cp /root/.ssh/authorized_keys /home/dragos/.ssh/
+
+# Set proper ownership and permissions
+chown -R dragos:dragos /home/dragos/.ssh
+chmod 700 /home/dragos/.ssh
+chmod 600 /home/dragos/.ssh/authorized_keys
+```
+
+### Test SSH Connection with New User
+
+Before disabling root access, verify that you can connect with the new user. Open a **new terminal window** (keep your current session open) and test:
+
+```sh
+ssh dragos@your_vps_ip
+```
+
+Once connected, verify sudo access:
+
+```sh
+sudo whoami
+```
+
+This should return `root`, confirming sudo privileges work correctly. **Important:** Do not close your root session until you've confirmed the new user works!
+
+### Disable Root SSH Access
+
+Once you've confirmed the new user can connect and has sudo privileges, disable root SSH access for enhanced security:
+
+```sh
+sudo nano /etc/ssh/sshd_config
+```
+
+Find and modify the following line:
+
+```
+PermitRootLogin no
+```
+
+Save the file (Ctrl+X, then Y, then Enter) and restart the SSH service:
+
+```sh
+sudo systemctl restart ssh
+```
+
+### Limit SSH Session Timeout
+
+To enhance security for idle SSH sessions, especially useful for development environments, set a 15-minute timeout:
+
+```sh
+sudo nano /etc/ssh/sshd_config
+```
+
+Add or modify these lines:
+
+```
+ClientAliveInterval 900
+ClientAliveCountMax 0
+```
+
+This will disconnect idle sessions after 15 minutes (900 seconds). Restart SSH to apply:
+
+```sh
+sudo systemctl restart ssh
 ```
 
 ### Add SWAP
@@ -63,9 +175,154 @@ sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
+### Secure Server with CrowdSec
+
+CrowdSec is an open-source security solution that protects your server from brute-force attacks, port scans, and other malicious activities. It's particularly effective at protecting SSH access.
+
+#### Install CrowdSec
+
+Add the CrowdSec repository and install the package:
+
+```sh
+curl -s https://install.crowdsec.net | sudo sh
+sudo apt update && sudo apt install crowdsec
+```
+
+#### Install Firewall Bouncer with iptables
+
+The firewall bouncer uses iptables to automatically block malicious IPs detected by CrowdSec. This will also ensure iptables is installed:
+
+```sh
+sudo apt install crowdsec-firewall-bouncer-iptables -y
+```
+
+After installation, verify that CrowdSec has created its iptables chains:
+
+```sh
+sudo iptables -L
+```
+
+You should see output showing the `CROWDSEC_CHAIN` has been created and is active:
+
+```
+Chain INPUT (policy ACCEPT)
+target     prot opt source               destination
+CROWDSEC_CHAIN  all  --  anywhere             anywhere
+
+Chain CROWDSEC_CHAIN (1 references)
+target     prot opt source               destination
+DROP       all  --  anywhere             anywhere             match-set crowdsec-blacklists src
+```
+
+#### Configure Firewall Rules
+
+Now that CrowdSec is installed and managing its chain, configure iptables to allow only essential services. We'll allow SSH (22), HTTP (80), HTTPS (443), and Dokploy (3000):
+
+```sh
+# Allow established connections
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow loopback
+sudo iptables -A INPUT -i lo -j ACCEPT
+
+# Allow SSH (port 22)
+sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Allow HTTP (port 80)
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+
+# Allow HTTPS (port 443)
+sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+
+# Allow Dokploy (port 3000)
+sudo iptables -A INPUT -p tcp --dport 3000 -j ACCEPT
+
+# Drop all other incoming traffic
+sudo iptables -P INPUT DROP
+```
+
+**Note:** We use `-P INPUT DROP` to set the default policy rather than adding a DROP rule at the end. This ensures CrowdSec's chain remains at the top and processes traffic first.
+
+#### Make Firewall Rules Persistent
+
+To ensure your firewall rules persist after reboot, install `iptables-persistent`:
+
+```sh
+# Install iptables-persistent
+sudo apt install iptables-persistent -y
+```
+
+During installation, you'll be asked if you want to save current IPv4 and IPv6 rules. Select **Yes** for both.
+
+After installation, save the current rules:
+
+```sh
+# Save current rules
+sudo netfilter-persistent save
+```
+
+To update rules in the future, use:
+
+```sh
+# After making changes to iptables
+sudo netfilter-persistent save
+sudo netfilter-persistent reload
+```
+
+#### Verify CrowdSec Installation
+
+Check that CrowdSec is running and monitoring your SSH service:
+
+```sh
+# Check CrowdSec status
+sudo systemctl status crowdsec
+
+# List active collections (should include crowdsecurity/sshd)
+sudo cscli collections list
+
+# Verify the firewall bouncer is active
+sudo cscli bouncers list
+```
+
+The `crowdsecurity/sshd` collection is automatically installed and will monitor your SSH logs for suspicious activity.
+
+#### Test CrowdSec Protection
+
+To verify CrowdSec is actively protecting your server, you can check the iptables rules it manages:
+
+```sh
+# View CrowdSec managed rules
+sudo iptables -L crowdsec-chain -n -v
+
+# View all firewall rules
+sudo iptables -L -n -v
+```
+
+When CrowdSec blocks an IP, it will appear in these chains automatically.
+
+#### Useful CrowdSec Commands
+
+Monitor CrowdSec activity with these helpful commands:
+
+```sh
+# View active blocks/bans
+sudo cscli decisions list
+
+# Check recent security alerts
+sudo cscli alerts list
+
+# View security metrics
+sudo cscli metrics
+
+# Monitor logs in real-time
+sudo tail -f /var/log/crowdsec.log
+```
+
+CrowdSec will now actively protect your server from SSH brute-force attacks and other malicious activities by automatically blocking offending IP addresses.
+
 ### Install Dokploy
 
-Once your VPS is set up and swap space is added, you can install Dokploy using the following command:
+Once your VPS is secured, swap space is added, and CrowdSec is protecting your server, you can install Dokploy using the following command:
 
 ```sh
 curl -sSL https://dokploy.com/install.sh | sh
@@ -101,4 +358,11 @@ With Dokploy installed and your domain configured, you can start deploying appli
 
 ### Conclusions
 
-Dokploy offers a powerful and flexible solution for developers looking to self-host their applications. By leveraging Docker and Traefik, Dokploy simplifies the deployment process while providing robust features for application and database management. Whether you're working on personal projects or managing large-scale applications, Dokploy provides the tools you need to streamline your deployment workflow.
+Dokploy offers a powerful and flexible solution for developers looking to self-host their applications. By following this guide, you've not only set up Dokploy but also implemented crucial security measures including:
+
+- **System Updates**: Keeping your server patched and secure
+- **User Management**: Using a dedicated sudo user instead of root
+- **SSH Hardening**: Disabling root access and implementing session timeouts
+- **CrowdSec Protection**: Actively monitoring and blocking malicious activities
+
+By leveraging Docker and Traefik, Dokploy simplifies the deployment process while providing robust features for application and database management. Combined with proper security practices, you now have a production-ready platform for self-hosting your applications safely and efficiently.
