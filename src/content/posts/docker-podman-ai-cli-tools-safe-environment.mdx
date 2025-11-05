@@ -1,0 +1,1399 @@
+---
+date: 2025-11-05T00:00:00Z
+title: "How to Use Docker or Podman to Create Safe Environments for AI CLI Tools"
+description: "Learn how to set up isolated Docker or Podman containers to safely run AI coding agents like Amp, Factory.ai, Claude CLI, and more without affecting your host system."
+image: "../../assets/images/docker-podman-ai-cli-safe.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["docker", "ai-tools"]
+canonical: "https://www.bitdoze.com/docker-podman-ai-cli-tools-safe-environment/"
+---
+
+
+<Notice type="info" title="Why Containerize AI CLI Tools?">
+Running AI coding agents in containers provides isolation, prevents system conflicts, and allows you to manage multiple projects with different configurations safely. You can experiment with various AI tools without worrying about breaking your host system.
+</Notice>
+
+AI coding assistants like Amp, Factory.ai, Claude CLI, Gemini CLI, and OpenCode CLI are powerful tools that can transform your development workflow. However, installing multiple CLI tools directly on your host system can lead to dependency conflicts, permission issues, and potential security concerns. This guide shows you how to create safe, isolated environments using Docker or Podman.
+
+## Why Use Containers for AI CLI Tools?
+
+<ListCheck>
+- **Isolation**: Keep AI tools separate from your host system and other projects
+- **Reproducibility**: Share identical development environments across teams
+- **Safety**: Test experimental tools without risking your main system
+- **Flexibility**: Run multiple configurations simultaneously with different API keys
+- **Easy cleanup**: Remove containers without leaving traces on your host
+- **Version control**: Manage different tool versions independently
+- **IDE integration**: Edit files on your host while tools run in containers
+</ListCheck>
+
+## Prerequisites
+
+Before starting, ensure you have one of the following installed:
+
+<Tabs>
+<Tab name="Docker">
+
+**Docker Desktop** (recommended for beginners):
+- **macOS**: [Download Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)
+- **Windows**: [Download Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)
+- **Linux**: [Install Docker Engine](https://docs.docker.com/engine/install/)
+
+After installation, verify:
+```bash
+docker --version
+docker compose version
+```
+
+</Tab>
+<Tab name="Podman">
+
+**Podman Desktop** (Docker alternative):
+- **macOS**: [Download Podman Desktop for Mac](https://podman-desktop.io/downloads)
+- **Windows**: [Download Podman Desktop for Windows](https://podman-desktop.io/downloads)
+- **Linux**: Install via package manager
+
+```bash
+# Fedora/RHEL/CentOS
+sudo dnf install podman podman-compose
+
+# Ubuntu/Debian
+sudo apt install podman podman-compose
+
+# macOS (via Homebrew)
+brew install podman podman-compose
+```
+
+For macOS/Windows, initialize the Podman machine:
+```bash
+podman machine init
+podman machine start
+```
+
+Verify installation:
+```bash
+podman --version
+podman compose version
+```
+
+</Tab>
+</Tabs>
+
+## Container Architecture Overview
+
+Our setup uses the **nikolaik/python-nodejs** base image, which provides:
+
+<ListCheck>
+- **Node.js 25** with npm, yarn (via Corepack)
+- **Python 3.14** with pip, pipenv, poetry, and uv
+- **Non-root user** (`pn`) for security
+- **Starship prompt** for better terminal experience
+- **Auto-seeding** of configuration files on first run
+</ListCheck>
+
+## Step 1: Create Project Structure
+
+First, create the necessary directories:
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+mkdir -p ~/docker-ai-tools ~/dev-home ~/websites
+cd ~/docker-ai-tools
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+mkdir -p ~/podman-ai-tools ~/dev-home ~/websites
+cd ~/podman-ai-tools
+```
+
+</Tab>
+</Tabs>
+
+**Directory explanation**:
+- `~/docker-ai-tools` or `~/podman-ai-tools`: Container configuration files
+- `~/dev-home`: Persistent home directory for the container user (configs, CLI tools)
+- `~/websites`: Your project files (bind-mounted into container)
+
+<Notice type="warning" title="Important: Directory Permissions">
+Ensure these directories have proper permissions. On Linux, you may need to adjust ownership:
+
+```bash
+chmod 777 ~/dev-home ~/websites
+```
+
+On macOS and Windows, Docker/Podman Desktop handles permissions automatically.
+</Notice>
+
+## Step 2: Create the Containerfile/Dockerfile
+
+<Tabs>
+<Tab name="Docker">
+
+Create a file named `Dockerfile` in `~/docker-ai-tools/`:
+
+```dockerfile
+# Dockerfile
+# Base image with Node.js 25, Python 3.14, and package managers
+FROM nikolaik/python-nodejs:python3.14-nodejs25-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+# The image already has a non-root user "pn"
+USER root
+
+# Install system dependencies first
+RUN apt-get update && apt-get install -y \
+    git \
+    jq \
+    curl \
+    vim \
+    nano \
+    htop \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+# This works even when /home/pn is bind-mounted from host
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# Create minimal Bash configuration with Starship
+RUN cat > /opt/skeleton/.bashrc <<'BRC'
+# Bash initialized for pn user
+# Enable Node Corepack and Yarn
+corepack enable >/dev/null 2>&1 || true
+corepack prepare yarn@stable --activate >/dev/null 2>&1 || true
+
+# Quality of life alias
+alias python=python3
+
+# Initialize Starship prompt
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+fi
+BRC
+
+# Entrypoint script to seed dotfiles on first run
+RUN cat > /usr/local/bin/boot.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Seed ~/.bashrc if missing (e.g., empty bind-mounted /home/pn)
+if [ ! -f "/home/pn/.bashrc" ]; then
+  cp /opt/skeleton/.bashrc /home/pn/.bashrc
+fi
+
+# Seed Starship config if missing
+mkdir -p /home/pn/.config
+if [ ! -f "/home/pn/.config/starship.toml" ]; then
+  cp /opt/skeleton/.config/starship.toml /home/pn/.config/starship.toml
+fi
+
+# Default to interactive bash if no command provided
+if [ $# -eq 0 ]; then
+  set -- bash
+fi
+exec "$@"
+SH
+RUN chmod +x /usr/local/bin/boot.sh
+
+# Switch to non-root user
+USER pn
+WORKDIR /home/pn/app
+
+ENTRYPOINT ["/usr/local/bin/boot.sh"]
+CMD ["bash"]
+```
+
+</Tab>
+<Tab name="Podman">
+
+Create a file named `Containerfile` in `~/podman-ai-tools/`:
+
+```dockerfile
+# Containerfile
+# Base image with Node.js 25, Python 3.14, and package managers
+FROM nikolaik/python-nodejs:python3.14-nodejs25-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+# The image already has a non-root user "pn"
+USER root
+
+# Install system dependencies first
+RUN apt-get update && apt-get install -y \
+    git \
+    jq \
+    curl \
+    vim \
+    nano \
+    htop \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+# This works even when /home/pn is bind-mounted from host
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# Create minimal Bash configuration with Starship
+RUN cat > /opt/skeleton/.bashrc <<'BRC'
+# Bash initialized for pn user
+# Enable Node Corepack and Yarn
+corepack enable >/dev/null 2>&1 || true
+corepack prepare yarn@stable --activate >/dev/null 2>&1 || true
+
+# Quality of life alias
+alias python=python3
+
+# Initialize Starship prompt
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+fi
+BRC
+
+# Entrypoint script to seed dotfiles on first run
+RUN cat > /usr/local/bin/boot.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Seed ~/.bashrc if missing (e.g., empty bind-mounted /home/pn)
+if [ ! -f "/home/pn/.bashrc" ]; then
+  cp /opt/skeleton/.bashrc /home/pn/.bashrc
+fi
+
+# Seed Starship config if missing
+mkdir -p /home/pn/.config
+if [ ! -f "/home/pn/.config/starship.toml" ]; then
+  cp /opt/skeleton/.config/starship.toml /home/pn/.config/starship.toml
+fi
+
+# Default to interactive bash if no command provided
+if [ $# -eq 0 ]; then
+  set -- bash
+fi
+exec "$@"
+SH
+RUN chmod +x /usr/local/bin/boot.sh
+
+# Switch to non-root user
+USER pn
+WORKDIR /home/pn/app
+
+ENTRYPOINT ["/usr/local/bin/boot.sh"]
+CMD ["bash"]
+```
+
+</Tab>
+</Tabs>
+
+### What This Containerfile Does
+
+<ListCheck>
+- **Starts from nikolaik/python-nodejs**: Pre-configured with Node.js and Python
+- **Installs essential tools**: git, jq, curl, vim, and build tools
+- **Installs Starship**: Modern, customizable shell prompt
+- **Creates skeleton configs**: Auto-seeds dotfiles on first container start
+- **Runs as non-root**: Uses the `pn` user for better security
+- **Persistent home**: Your configs persist across container restarts
+</ListCheck>
+
+## Step 3: Create Compose Configuration
+
+<Tabs>
+<Tab name="Docker">
+
+Create `docker-compose.yml` in `~/docker-ai-tools/`:
+
+```yaml
+services:
+  ai-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-tools
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      - TZ=America/New_York  # Change to your timezone
+    volumes:
+      - ${HOME}/dev-home:/home/pn:rw
+      - ${HOME}/websites:/home/pn/app/websites:rw
+    # Add ports only if needed for OAuth or local servers
+    # ports:
+    #   - "3000:3000"
+```
+
+</Tab>
+<Tab name="Podman">
+
+Create `podman-compose.yml` in `~/podman-ai-tools/`:
+
+```yaml
+services:
+  ai-tools:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: ai-tools
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      - TZ=America/New_York  # Change to your timezone
+    volumes:
+      - ${HOME}/dev-home:/home/pn:z
+      - ${HOME}/websites:/home/pn/app/websites:z
+    # Add ports only if needed for OAuth or local servers
+    # ports:
+    #   - "3000:3000"
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="info" title="Volume Mounting Explained">
+- **`~/dev-home:/home/pn`**: Persists user configs, installed CLIs, and dotfiles
+- **`~/websites:/home/pn/app/websites`**: Your project files, editable from host
+- **SELinux context (`:z`)**: Only needed for Podman on Linux with SELinux
+- **Read-write (`:rw`)**: Default for Docker, explicitly stated for clarity
+</Notice>
+
+### When to Expose Ports
+
+Most AI CLI tools don't require exposed ports. However, you may need to uncomment the `ports` section if:
+
+<ListCheck>
+- A CLI tool requires **OAuth authentication** via localhost callback
+- You're running a **local development server** inside the container
+- A tool needs to open a **browser-based UI** for authentication
+</ListCheck>
+
+## Step 4: Build and Start the Container
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+cd ~/docker-ai-tools
+
+# Build the image (use --no-cache for fresh build)
+docker compose build --no-cache
+
+# Start the container in detached mode
+docker compose up -d
+
+# Enter the container
+docker exec -it ai-tools bash
+```
+
+To stop the container:
+```bash
+docker compose down
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+cd ~/podman-ai-tools
+
+# Ensure Podman machine is running (macOS/Windows)
+podman machine start
+
+# Build the image (use --no-cache for fresh build)
+podman compose build --no-cache
+
+# Start the container in detached mode
+podman compose up -d
+
+# Enter the container
+podman exec -it ai-tools bash
+```
+
+To stop the container:
+```bash
+podman compose down
+```
+
+</Tab>
+</Tabs>
+
+## Step 5: Verify Container Environment
+
+Once inside the container, run these checks:
+
+```bash
+# Verify user
+whoami
+# Output: pn
+
+# Check Node.js and package managers
+node -v          # v25.x
+npm -v           # 10.x
+yarn -v          # 4.x
+
+# Check Python and package managers
+python3 -V       # 3.14.x
+pip --version    # 24.x
+poetry --version # 1.8.x
+pipenv --version # 2024.x
+uv --version     # 0.x
+
+# Verify Starship prompt
+which starship
+# Output: /usr/local/bin/starship
+
+# Check mounted directories
+ls -la ~/app/websites
+ls -la ~
+```
+
+<Notice type="success" title="Success!">
+If all commands return expected versions, your container is ready for AI CLI tools installation.
+</Notice>
+
+## Step 6: Install AI CLI Tools
+
+Now you can safely install any AI coding assistant inside the container:
+
+<Tabs>
+<Tab name="cURL Installers">
+
+```bash
+# Amp / Sourcegraph Agent
+curl -fsSL https://ampcode.com/install.sh | bash
+
+# Factory.ai CLI
+curl -fsSL https://app.factory.ai/cli | sh
+
+# Claude CLI
+curl -fsSL https://claude.ai/install.sh | bash
+
+# OpenCode CLI
+curl -fsSL https://opencode.ai/install | bash
+```
+
+</Tab>
+<Tab name="npm Installers">
+
+```bash
+# Gemini CLI
+npm install -g @google/gemini-cli
+
+# GitHub Copilot CLI (requires GitHub account)
+npm install -g @githubnext/github-copilot-cli
+```
+
+</Tab>
+<Tab name="Root Access Required">
+
+Some tools require root access during installation. To run as root:
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+# Exit the container first, then:
+docker exec -it --user root ai-tools bash
+
+# Install tool as root, then exit
+# Re-enter as normal user
+docker exec -it ai-tools bash
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+# Exit the container first, then:
+podman exec -it --user root ai-tools bash
+
+# Install tool as root, then exit
+# Re-enter as normal user
+podman exec -it ai-tools bash
+```
+
+</Tab>
+</Tabs>
+
+</Tab>
+</Tabs>
+
+### Authenticate with CLI Tools
+
+After installation, authenticate with each tool:
+
+```bash
+# Example: Amp CLI
+amp login
+
+# Example: Factory.ai
+factory login
+
+# Example: Claude CLI
+claude login
+```
+
+<Notice type="warning" title="OAuth Authentication">
+If a tool requires browser-based OAuth and fails to connect, you may need to expose a port. Edit your compose file to add:
+
+```yaml
+ports:
+  - "3000:3000"  # Or whichever port the tool uses
+```
+
+Then rebuild: `docker compose up -d` or `podman compose up -d`
+</Notice>
+
+## Working with Projects
+
+Your `~/websites` directory is mounted at `/home/pn/app/websites` inside the container. This means:
+
+<ListCheck>
+- **Edit files on your host** using VS Code, Cursor, or any IDE
+- **Run AI tools in the container** to analyze and modify those same files
+- **Changes sync instantly** between host and container
+- **Git operations** can be performed on either side
+</ListCheck>
+
+### Example Workflow
+
+```bash
+# On your host machine
+cd ~/websites
+mkdir my-new-project
+cd my-new-project
+git init
+
+# Inside the container
+cd ~/app/websites/my-new-project
+
+# Use AI tools
+amp "Create a Next.js app with TypeScript"
+factory "Add authentication with Supabase"
+```
+
+## Configuring AI Tools Inside Container
+
+Your configurations persist in `~/dev-home`, which maps to `/home/pn` in the container.
+
+### Example: Factory.ai Custom Models
+
+Edit the Factory config:
+
+```bash
+# Inside container
+nano ~/.factory/config.json
+```
+
+Add custom models (from your Factory.ai setup):
+
+```json
+{
+  "custom_models": [
+    {
+      "model_display_name": "Claude Sonnet 4.5",
+      "model": "claude-sonnet-4-5-20250929",
+      "base_url": "https://api.anthropic.com",
+      "api_key": "your-api-key-here",
+      "provider": "anthropic",
+      "max_tokens": 8192
+    },
+    {
+      "model_display_name": "GPT-5 Codex",
+      "model": "gpt-5-codex",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "your-openai-key-here",
+      "provider": "openai",
+      "max_tokens": 8192
+    },
+    {
+      "model_display_name": "Qwen 3 (Local Ollama)",
+      "model": "qwen3:14b",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "ollama",
+      "provider": "generic-chat-completion-api",
+      "max_tokens": 4096
+    }
+  ]
+}
+```
+
+<Accordion label="Factory.ai Provider Types Explained" group="factory-providers">
+
+**Three provider types supported:**
+
+1. **`anthropic`**: For Claude models via Anthropic's official API
+   - Base URL: `https://api.anthropic.com`
+   - Uses Messages API (v1/messages)
+
+2. **`openai`**: For GPT models via OpenAI's official API
+   - Base URL: `https://api.openai.com/v1`
+   - Uses Responses API (required for GPT-5)
+
+3. **`generic-chat-completion-api`**: For open-source models
+   - Works with: OpenRouter, Fireworks, Together AI, Ollama, vLLM
+   - Uses OpenAI Chat Completions API format
+
+</Accordion>
+
+### Accessing Host Files from Container
+
+All your dotfiles and configs in `~/dev-home` are accessible:
+
+```bash
+# Inside container
+ls -la ~/.factory/     # Factory.ai configs
+ls -la ~/.amp/         # Amp configs
+ls -la ~/.config/      # Other tool configs
+cat ~/.bashrc          # Shell configuration
+```
+
+Edit these files from your **host** using any editor:
+
+```bash
+# On host machine
+code ~/dev-home/.factory/config.json
+code ~/dev-home/.bashrc
+code ~/dev-home/.config/starship.toml
+```
+
+Changes take effect immediately in the container!
+
+## Advanced Configuration
+
+### Running Local AI Models with Ollama
+
+To use local models inside your container:
+
+<Tabs>
+<Tab name="Docker">
+
+1. Install Ollama in the container:
+```bash
+docker exec -it ai-tools bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+2. Update compose file to expose Ollama port:
+```yaml
+ports:
+  - "11434:11434"
+```
+
+3. Start Ollama service:
+```bash
+ollama serve &
+ollama pull qwen3:14b
+```
+
+</Tab>
+<Tab name="Podman">
+
+1. Install Ollama in the container:
+```bash
+podman exec -it ai-tools bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+2. Update compose file to expose Ollama port:
+```yaml
+ports:
+  - "11434:11434"
+```
+
+3. Start Ollama service:
+```bash
+ollama serve &
+ollama pull qwen3:14b
+```
+
+</Tab>
+</Tabs>
+
+### Multiple Container Configurations
+
+You can create separate containers for different projects:
+
+```bash
+# Project 1 with GPT models
+~/docker-ai-tools-gpt/
+  ├── docker-compose.yml
+  └── Dockerfile
+
+# Project 2 with Claude models
+~/docker-ai-tools-claude/
+  ├── docker-compose.yml
+  └── Dockerfile
+```
+
+Change the `container_name` in each compose file to avoid conflicts.
+
+### Sharing Containers with Teams
+
+Commit your configuration to Git:
+
+```bash
+cd ~/docker-ai-tools
+git init
+git add Dockerfile docker-compose.yml
+git commit -m "Add AI tools container config"
+```
+
+Team members can then:
+
+```bash
+git clone <your-repo>
+cd <your-repo>
+docker compose up -d
+docker exec -it ai-tools bash
+```
+
+## IDE Integration
+
+While AI tools run in the container, you can use your favorite IDE on the host:
+
+### VS Code with Remote Containers
+
+1. Install **Remote - Containers** extension
+2. Open `~/websites/your-project` in VS Code
+3. Click "Reopen in Container" (or configure `.devcontainer.json`)
+
+### Direct File Editing
+
+Simply edit files in `~/websites` - changes sync automatically:
+
+```bash
+# On host
+code ~/websites/my-project
+
+# In container, AI tools see changes immediately
+cd ~/app/websites/my-project
+amp "Refactor this component"
+```
+
+## Troubleshooting
+
+<Accordion label="Permission Denied Errors" group="troubleshooting">
+
+If you see permission errors accessing `~/dev-home` or `~/websites`:
+
+**On Linux with SELinux:**
+```bash
+# Ensure :z is in podman-compose.yml volumes
+chcon -Rt svirt_sandbox_file_t ~/dev-home ~/websites
+```
+
+**On macOS/Windows:**
+```bash
+# Ensure directories exist and are readable
+chmod 755 ~/dev-home ~/websites
+```
+
+</Accordion>
+
+<Accordion label="Container Won't Start" group="troubleshooting">
+
+Check container logs:
+
+<Tabs>
+<Tab name="Docker">
+```bash
+docker compose logs
+docker logs ai-tools
+```
+</Tab>
+<Tab name="Podman">
+```bash
+podman compose logs
+podman logs ai-tools
+```
+</Tab>
+</Tabs>
+
+Common issues:
+- Port already in use: Change port in compose file
+- Image pull failed: Check internet connection
+- Volume mount failed: Verify directory paths exist
+
+</Accordion>
+
+<Accordion label="AI Tool Authentication Fails" group="troubleshooting">
+
+If OAuth or browser-based auth doesn't work:
+
+1. **Expose required port** in compose file
+2. **Restart container**: `docker compose up -d` or `podman compose up -d`
+3. **Use manual token auth** if available (check tool docs)
+4. **Copy auth URL** and paste in host browser
+
+Example for Factory.ai:
+```bash
+# Inside container
+factory login
+# Copy the URL, paste in host browser, complete auth
+```
+
+</Accordion>
+
+<Accordion label="Changes Not Syncing Between Host and Container" group="troubleshooting">
+
+Verify volume mounts:
+
+<Tabs>
+<Tab name="Docker">
+```bash
+docker inspect ai-tools | grep -A 10 Mounts
+```
+</Tab>
+<Tab name="Podman">
+```bash
+podman inspect ai-tools | grep -A 10 Mounts
+```
+</Tab>
+</Tabs>
+
+Ensure paths are correct:
+```bash
+# Should show your host directories
+~/dev-home -> /home/pn
+~/websites -> /home/pn/app/websites
+```
+
+</Accordion>
+
+## Installing Missing Commands in the Container
+
+Sometimes an AI CLI tool may require a command or utility that's not included in the base image. For example, you might see errors like:
+
+```bash
+bash: git: command not found
+bash: jq: command not found
+bash: curl: command not found
+```
+
+You have two options to resolve this:
+
+### Option 1: Install Temporarily (Quick Fix)
+
+Install the command directly in the running container as root:
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+# Enter container as root
+docker exec -it --user root ai-tools bash
+
+# Install missing packages (Debian/Ubuntu based)
+apt-get update
+apt-get install -y git jq curl vim htop
+
+# Exit and re-enter as normal user
+exit
+docker exec -it ai-tools bash
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+# Enter container as root
+podman exec -it --user root ai-tools bash
+
+# Install missing packages (Debian/Ubuntu based)
+apt-get update
+apt-get install -y git jq curl vim htop
+
+# Exit and re-enter as normal user
+exit
+podman exec -it ai-tools bash
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="Temporary Installation">
+Commands installed this way will be **lost when the container is recreated**. Use Option 2 for permanent installation by updating the Dockerfile/Containerfile.
+
+**Important**: Always run `apt-get update` before `apt-get install` when installing packages temporarily, otherwise you'll get "Unable to locate package" errors.
+</Notice>
+
+### Option 2: Update Dockerfile and Rebuild (Permanent)
+
+For permanent installation, update your Dockerfile/Containerfile:
+
+<Tabs>
+<Tab name="Docker">
+
+Edit your `Dockerfile`:
+
+```dockerfile
+# Dockerfile
+FROM nikolaik/python-nodejs:python3.14-nodejs25-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+USER root
+
+# Install system dependencies BEFORE Starship
+RUN apt-get update && apt-get install -y \
+    git \
+    jq \
+    curl \
+    vim \
+    htop \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# ... rest of Dockerfile remains the same ...
+```
+
+Then rebuild:
+
+```bash
+cd ~/docker-ai-tools
+
+# Stop the current container
+docker compose down
+
+# Rebuild with no cache
+docker compose build --no-cache
+
+# Start the new container
+docker compose up -d
+
+# Enter the container
+docker exec -it ai-tools bash
+
+# Verify new commands are available
+git --version
+jq --version
+```
+
+</Tab>
+<Tab name="Podman">
+
+Edit your `Containerfile`:
+
+```dockerfile
+# Containerfile
+FROM nikolaik/python-nodejs:python3.14-nodejs25-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+USER root
+
+# Install system dependencies BEFORE Starship
+RUN apt-get update && apt-get install -y \
+    git \
+    jq \
+    curl \
+    vim \
+    htop \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# ... rest of Containerfile remains the same ...
+```
+
+Then rebuild:
+
+```bash
+cd ~/podman-ai-tools
+
+# Stop the current container
+podman compose down
+
+# Rebuild with no cache
+podman compose build --no-cache
+
+# Start the new container
+podman compose up -d
+
+# Enter the container
+podman exec -it ai-tools bash
+
+# Verify new commands are available
+git --version
+jq --version
+```
+
+</Tab>
+</Tabs>
+
+### Common Packages You Might Need
+
+<ListCheck>
+- **`git`**: Version control (required by many AI coding tools)
+- **`curl` / `wget`**: Download files and make HTTP requests
+- **`jq`**: Parse and manipulate JSON (useful for API responses)
+- **`vim` / `nano`**: Text editors for quick config edits
+- **`htop`**: System monitoring
+- **`build-essential`**: C/C++ compilers and build tools (for native modules)
+- **`rsync`**: File synchronization
+- **`zip` / `unzip`**: Archive utilities
+- **`tree`**: Directory structure visualization
+- **`postgresql-client`**: PostgreSQL command-line tools
+</ListCheck>
+
+### Example: AI Tool Requires Git
+
+If Factory.ai or Amp fails with "git not found":
+
+```bash
+# Quick fix (temporary) - MUST include apt-get update
+docker exec -it --user root ai-tools bash
+apt-get update && apt-get install -y git
+exit
+
+# Permanent fix: Already included in our Dockerfile!
+# Git is pre-installed in the Dockerfile above
+# If you used the Dockerfile from this guide, git is already there
+```
+
+<Notice type="info" title="Rebuild vs Reinstall">
+After rebuilding the container:
+- **System packages** (git, jq, vim, etc.): Automatically included ✓
+- **AI CLI tools**: Need to be reinstalled (amp, factory, claude, etc.)
+- **Authentication**: Need to re-authenticate with `login` commands
+- **Configs in ~/dev-home**: Preserved ✓ (because it's a mounted volume)
+- **Projects in ~/websites**: Preserved ✓ (because it's a mounted volume)
+
+Your project files and configurations remain intact! Only the container itself is recreated with the updated base system.
+</Notice>
+
+## Security Best Practices
+
+<ListCheck>
+- **Never commit API keys** to Git - use environment variables
+- **Rotate API keys** regularly, especially in shared containers
+- **Use read-only mounts** for sensitive config: `~/config:/config:ro`
+- **Limit container resources** with `--memory` and `--cpus` flags
+- **Run as non-root** (already configured with user `pn`)
+- **Keep base image updated**: Rebuild periodically with `--no-cache`
+</ListCheck>
+
+### Environment Variables for API Keys
+
+Instead of hardcoding API keys, use environment variables:
+
+```yaml
+# docker-compose.yml or podman-compose.yml
+environment:
+  - OPENAI_API_KEY=${OPENAI_API_KEY}
+  - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+```
+
+Create `.env` file (don't commit this!):
+
+```bash
+OPENAI_API_KEY=sk-your-key-here
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+## Cleaning Up
+
+### Remove Container and Images
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+# Stop and remove container
+docker compose down
+
+# Remove images
+docker rmi ai-tools
+
+# Clean up unused images and volumes
+docker system prune -a
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+# Stop and remove container
+podman compose down
+
+# Remove images
+podman rmi ai-tools
+
+# Clean up unused images and volumes
+podman system prune -a
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="Data Persistence">
+Your `~/dev-home` and `~/websites` directories remain intact after removing containers. Only delete these if you want to completely reset.
+</Notice>
+
+### Start Fresh
+
+To completely reset your environment:
+
+```bash
+# Remove container and images (Docker)
+docker compose down
+docker rmi ai-tools
+
+# Remove container and images (Podman)
+podman compose down
+podman rmi ai-tools
+
+# Optional: Remove persistent data
+rm -rf ~/dev-home/*  # Careful! This removes all CLI configs
+
+# Rebuild
+docker compose build --no-cache
+docker compose up -d
+```
+
+## Comparison: Docker vs Podman
+
+| Feature | Docker | Podman |
+|---------|--------|--------|
+| **Architecture** | Client-server (daemon) | Daemonless |
+| **Root requirement** | Daemon runs as root | Can run rootless |
+| **Compose syntax** | `docker compose` | `podman compose` |
+| **Desktop GUI** | Docker Desktop | Podman Desktop |
+| **Compatibility** | Industry standard | OCI-compliant |
+| **macOS/Windows** | VM-based | VM-based |
+| **Linux** | Native | Native |
+| **SELinux** | Basic support | Advanced support |
+
+**When to choose Docker:**
+- You're already familiar with Docker
+- Your team uses Docker
+- You need maximum compatibility
+
+**When to choose Podman:**
+- You prefer daemonless architecture
+- You need rootless containers
+- You're on Fedora/RHEL/CentOS
+
+## Real-World Usage Examples
+
+### Example 1: Factory.ai with Custom Models
+
+```bash
+# Inside container
+cd ~/app/websites/my-app
+
+# Start Factory with custom model
+factory
+
+# In Factory prompt, select your custom model
+/model
+# Choose "Claude Sonnet 4.5" from Custom models
+
+# Give instructions
+"Add user authentication with Supabase, including sign-up, login, and protected routes"
+```
+
+### Example 2: Amp with Project Context
+
+```bash
+# Inside container
+cd ~/app/websites/nextjs-blog
+
+# Create AGENTS.md for context
+cat > AGENTS.md <<'EOF'
+# Project: Next.js Blog
+
+## Tech Stack
+- Next.js 15
+- TypeScript
+- Tailwind CSS
+- MDX for blog posts
+
+## Architecture
+- App Router
+- Server Components by default
+- Client Components only when needed
+EOF
+
+# Use Amp with context
+amp "Add a comments section using Supabase"
+```
+
+### Example 3: Multiple AI Tools in Sequence
+
+```bash
+# Use Amp for initial implementation
+amp "Create a React component for a product card"
+
+# Use Claude CLI for refinement
+claude "Review the ProductCard component and suggest performance improvements"
+
+# Use Factory for testing
+factory "Generate unit tests for ProductCard.tsx"
+```
+
+## Best Practices for AI CLI Tools in Containers
+
+<ListCheck>
+- **Keep one container per project** or project type
+- **Document your setup** in the project's README
+- **Use `.dockerignore` or `.containerignore`** to exclude unnecessary files
+- **Mount only necessary directories** for better performance
+- **Set appropriate resource limits** to prevent memory issues
+- **Regularly update base images** for security patches
+- **Back up your `~/dev-home`** configs periodically
+</ListCheck>
+
+## Frequently Asked Questions
+
+<Accordion label="Can I use multiple AI tools simultaneously?" group="faq">
+
+Yes! All tools are installed in the same container and can be used together:
+
+```bash
+# Run different tools for different tasks
+amp "Implement feature X"
+claude "Review the code for feature X"
+factory "Generate tests for feature X"
+```
+
+You can even pipe outputs between tools or use them in sequence for better results.
+
+</Accordion>
+
+<Accordion label="Will this slow down my AI tools?" group="faq">
+
+No significant performance impact. Container overhead is minimal for CLI tools since:
+- File I/O is nearly native speed with bind mounts
+- CPU and memory are shared with host (no VM overhead on Linux)
+- Network requests go directly to AI APIs
+- Only Docker Desktop on macOS/Windows uses a lightweight VM
+
+</Accordion>
+
+<Accordion label="Can I access the container from multiple terminals?" group="faq">
+
+Absolutely! Open as many terminal sessions as you need:
+
+```bash
+# Terminal 1
+docker exec -it ai-tools bash
+cd ~/app/websites/project1
+amp "Work on feature A"
+
+# Terminal 2 (same time)
+docker exec -it ai-tools bash
+cd ~/app/websites/project2
+factory "Work on feature B"
+```
+
+Each terminal session is independent but shares the same container environment.
+
+</Accordion>
+
+<Accordion label="How do I update AI CLI tools?" group="faq">
+
+Most AI CLIs have built-in update commands:
+
+```bash
+# Inside container
+amp update
+factory update
+claude update
+
+# For npm-based tools
+npm update -g @google/gemini-cli
+```
+
+Container rebuilds aren't necessary unless you want to update Node.js, Python, or the base OS.
+
+</Accordion>
+
+<Accordion label="Can I use this setup in CI/CD?" group="faq">
+
+Yes! This container setup is perfect for CI/CD:
+
+```yaml
+# .github/workflows/ai-review.yml
+name: AI Code Review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build AI tools container
+        run: docker compose build
+      - name: Run AI review
+        run: |
+          docker compose up -d
+          docker exec ai-tools amp "Review this PR for code quality"
+```
+
+</Accordion>
+
+<Accordion label="What if I need a different Node.js or Python version?" group="faq">
+
+Modify the base image tag in your Dockerfile/Containerfile:
+
+```dockerfile
+# Python 3.12 with Node.js 22
+FROM nikolaik/python-nodejs:python3.12-nodejs22-bookworm
+
+# Python 3.13 with Node.js 24
+FROM nikolaik/python-nodejs:python3.13-nodejs24-bookworm
+```
+
+Check [nikolaik/python-nodejs tags](https://hub.docker.com/r/nikolaik/python-nodejs/tags) for available versions.
+
+</Accordion>
+
+## Conclusion
+
+Using Docker or Podman to containerize AI CLI tools provides a safe, isolated, and reproducible environment for your development workflow. This setup offers several key advantages:
+
+<ListCheck>
+- **Isolation**: Protect your host system from potential issues
+- **Flexibility**: Run multiple configurations simultaneously
+- **Portability**: Share identical setups across teams
+- **Safety**: Experiment without risk
+- **Integration**: Edit files on host, run tools in container
+- **Persistence**: Configs and projects survive container restarts
+</ListCheck>
+
+Whether you're using Amp, Factory.ai, Claude CLI, or any other AI coding assistant, this containerized approach gives you the confidence to experiment, learn, and build without worrying about breaking your development environment.
+
+<Notice type="success" title="Ready to Start?">
+Choose your preferred container platform (Docker or Podman), follow the setup steps, and start exploring AI coding tools in a safe, isolated environment. Your host system remains clean, your projects stay organized, and you can always start fresh with a simple rebuild.
+
+**Next steps:**
+1. Build your container using the tabs above
+2. Install your favorite AI CLI tools
+3. Start coding with AI assistance
+4. Share your setup with your team
+</Notice>
+
+For more AI coding assistant guides, check out:
+- [Amp Code: Free AI Coding Agent Guide](/amp-code-free-ai-coding-agent/)
