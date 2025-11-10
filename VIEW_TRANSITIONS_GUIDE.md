@@ -282,12 +282,16 @@ const animation = isMobile ? 'none' : 'fade';
 ### Components Updated with View Transitions:
 
 - ✅ **Layout.astro** - Added `<ViewTransitions />` component
+- ✅ **Hero.astro** - Homepage hero block, CTA, and social links animate using home hero config
+- ✅ **Tools.astro** - AI tools grid cards and headings honor the shared home transitions
 - ✅ **PostLayout.astro** - Added transitions to images and titles
 - ✅ **PostCard.astro** - Added transitions to images and titles
 - ✅ **PopularTopics.astro** - Added transitions to thumbnails
 - ✅ **RelatedPosts.astro** - Added transitions to images and titles
 - ✅ **YouTubeVideos.astro** - Added fade animations to thumbnails and titles
 - ✅ **ResourceCard.astro** - Added slide animations to images
+- ✅ **index.astro** - Home section headings and Explore Content tiles now opt into view transitions
+- ✅ **blog.astro / categories/index.astro / authors/index.astro / tags/index.astro** - Page headers share transition names with their homepage entry points for seamless navigation
 - ✅ **SeriesBadge.astro** - Added `data-astro-reload` for series navigation
 - ✅ **Header.astro** - Fixed with `astro:page-load` event
 - ✅ **ThemeToggle.astro** - Fixed with `astro:page-load` event

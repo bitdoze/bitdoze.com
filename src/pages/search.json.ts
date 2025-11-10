@@ -1,5 +1,6 @@
 import { getCollection } from 'astro:content';
 import { formatDate } from '@utils/date';
+import { getEntrySlug } from '@utils/content';
 
 export async function GET() {
   // Get all posts
@@ -15,7 +16,7 @@ export async function GET() {
     } : null;
     
     return {
-      slug: post.slug,
+      slug: getEntrySlug(post),
       title: post.data.title,
       description: post.data.description || '',
       date: post.data.date ? formatDate(post.data.date) : '',

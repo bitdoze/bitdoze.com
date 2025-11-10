@@ -19,7 +19,10 @@ src/config/config.json
       "postImages": "fade",
       "postTitles": "fade",
       "youtubeVideos": "fade",
-      "resourceCards": "slide"
+      "resourceCards": "slide",
+      "homeHero": "fade",
+      "homeSectionHeadings": "fade",
+      "homeCards": "slide"
     },
     "duration": "0.3s",
     "fallback": "instant"
@@ -77,6 +80,30 @@ Configuration for specific animation types across different components.
 - **Description:** Animation type for resource card images
 - **Applies to:**
   - ResourceCard component
+- **Options:** `"fade"`, `"slide"`, `"none"`
+
+#### `homeHero` (string)
+- **Default:** `"fade"`
+- **Description:** Animation style for the hero section container, description, CTA, and social links on the homepage
+- **Applies to:**
+  - Hero component container and CTA
+- **Options:** `"fade"`, `"slide"`, `"none"`
+
+#### `homeSectionHeadings` (string)
+- **Default:** `"fade"`
+- **Description:** Controls how homepage section headings and supporting copy animate when navigating
+- **Applies to:**
+  - Home page `Latest Articles` heading/link
+  - Home page `Explore Content` heading/description
+  - Tools section heading/description
+- **Options:** `"fade"`, `"slide"`, `"none"`
+
+#### `homeCards` (string)
+- **Default:** `"slide"`
+- **Description:** Determines the animation for homepage cards such as AI tools and explore tiles
+- **Applies to:**
+  - Tools component cards
+  - Home page Explore Content tiles
 - **Options:** `"fade"`, `"slide"`, `"none"`
 
 ---

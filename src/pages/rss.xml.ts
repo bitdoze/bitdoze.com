@@ -1,14 +1,17 @@
 import rss from '@astrojs/rss';
+import type { APIContext } from 'astro';
 import { getCollection } from 'astro:content';
 import { siteConfig } from '@config/site';
-import { formatDate } from '@utils/date';
+import { getEntryHref } from '@utils/content';
 
-export async function GET(context) {
+export async function GET(context: APIContext) {
   const posts = await getCollection('posts');
   
   // Sort posts by date (newest first)
   const sortedPosts = posts.sort((a, b) => {
-    return new Date(b.data.date).getTime() - new Date(a.data.date).getTime();
+    const dateA = a.data.date instanceof Date ? a.data.date.getTime() : 0;
+    const dateB = b.data.date instanceof Date ? b.data.date.getTime() : 0;
+    return dateB - dateA;
   });
 
   return rss({
@@ -19,7 +22,7 @@ export async function GET(context) {
       title: post.data.title,
       pubDate: post.data.date,
       description: post.data.description,
-      link: `/${post.slug}/`,
+      link: getEntryHref(post),
       categories: post.data.categories || [],
       // Optional custom data
       customData: post.data.tags ? 
