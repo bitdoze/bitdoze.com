@@ -1,21 +1,4 @@
-import Fuse, { type FuseResult, type IFuseOptions } from "fuse.js";
-
-interface SearchImage {
-  src: string;
-  width?: number;
-  height?: number;
-}
-
-interface SearchEntry {
-  slug: string;
-  title: string;
-  description: string;
-  date: string;
-  image: SearchImage | null;
-  categories: string[];
-  tags: string[];
-  content?: string;
-}
+import Fuse from "fuse.js";
 
 const SPINNER = `<div class="flex justify-center py-10">
     <svg class="animate-spin h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -24,10 +7,10 @@ const SPINNER = `<div class="flex justify-center py-10">
     </svg>
   </div>`;
 
-let searchData: SearchEntry[] | null = null;
-let fuse: Fuse<SearchEntry> | null = null;
+let searchData = null;
+let fuse = null;
 
-const fuseConfig: IFuseOptions<SearchEntry> = {
+const fuseConfig = {
   keys: ["title", "description", "tags", "categories", "content"],
   includeMatches: true,
   minMatchCharLength: 2,
@@ -36,11 +19,8 @@ const fuseConfig: IFuseOptions<SearchEntry> = {
 
 const readyStates = new Set(["interactive", "complete"]);
 
-const ensureSearchData = async (
-  searchResults: HTMLElement,
-  options?: { showSpinner?: boolean }
-): Promise<void> => {
-  const showSpinner = options?.showSpinner ?? true;
+const ensureSearchData = async (searchResults, options = {}) => {
+  const showSpinner = options.showSpinner ?? true;
 
   if (searchData && fuse) {
     return;
@@ -55,16 +35,16 @@ const ensureSearchData = async (
     throw new Error("Failed to fetch search data");
   }
 
-  const data = (await response.json()) as SearchEntry[];
+  const data = await response.json();
   searchData = data;
-  fuse = new Fuse<SearchEntry>(data ?? [], fuseConfig);
+  fuse = new Fuse(data ?? [], fuseConfig);
 
   if (showSpinner) {
     searchResults.innerHTML = "";
   }
 };
 
-const buildPostUrl = (slug: string | undefined | null): string => {
+const buildPostUrl = (slug) => {
   if (!slug) return "/";
   const normalized = slug
     .replace(/^\/+/, "")
@@ -73,13 +53,7 @@ const buildPostUrl = (slug: string | undefined | null): string => {
   return `/${normalized ? `${normalized}/` : ""}`;
 };
 
-const displayResults = (
-  results: FuseResult<SearchEntry>[],
-  query: string,
-  searchResults: HTMLElement,
-  noResults: HTMLElement,
-  searchInfo: HTMLElement
-) => {
+const displayResults = (results, query, searchResults, noResults, searchInfo) => {
   searchResults.innerHTML = "";
 
   if (!results.length) {
@@ -95,7 +69,8 @@ const displayResults = (
 
   results.forEach(({ item: post }) => {
     const article = document.createElement("article");
-    article.className = "bg-white dark:bg-gray-800 rounded-lg overflow-hidden shadow-md hover:shadow-lg transition-shadow duration-300";
+    article.className =
+      "bg-white dark:bg-gray-800 rounded-lg overflow-hidden shadow-md hover:shadow-lg transition-shadow duration-300";
 
     const slug = buildPostUrl(post.slug);
 
@@ -180,12 +155,7 @@ const displayResults = (
   });
 };
 
-const performSearch = async (
-  query: string,
-  searchResults: HTMLElement,
-  noResults: HTMLElement,
-  searchInfo: HTMLElement
-) => {
+const performSearch = async (query, searchResults, noResults, searchInfo) => {
   const trimmed = query.trim();
 
   if (!trimmed) {
@@ -231,10 +201,10 @@ const initSearch = () => {
   }
   searchInput.dataset.searchInitialized = "true";
 
-  let debounceTimer: number | undefined;
+  let debounceTimer;
 
   searchInput.addEventListener("input", (event) => {
-    const target = event.target as HTMLInputElement;
+    const target = event.target;
     window.clearTimeout(debounceTimer);
     debounceTimer = window.setTimeout(() => {
       void performSearch(target.value, searchResults, noResults, searchInfo);
