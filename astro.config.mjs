@@ -40,6 +40,22 @@ export default defineConfig({
   },
 
   // Configure image settings for external domains
+  image: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "i.ytimg.com",
+      },
+      {
+        protocol: "https",
+        hostname: "i3.ytimg.com",
+      },
+      {
+        protocol: "https",
+        hostname: "img.youtube.com",
+      },
+    ],
+  },
 
   // Configure Astro integrations
   integrations: [mdx(), icon(), sitemap()],
