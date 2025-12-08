@@ -48,7 +48,7 @@ Date: 06 October 2025
 - **Button**: `<Button text="Click Here" link="/url" variant="solid" color="blue" size="md" icon="arrow-right" />`
 - **Notice**: `<Notice type="info|success|warning|error" title="Important">content</Notice>`
 - **ListCheck**: `<ListCheck><ul><li>Checkmark item 1</li><li>Item 2</li></ul></ListCheck>`
-- **YouTubeEmbed**: `<YouTubeEmbed url="https://youtube.com/embed/..." label="Video Title" />`
+- **YouTubeEmbed**: `<YouTubeEmbed url="https://youtube.com/embed/VIDEO_ID" label="Video Title" />` (lazy-loading facade - shows thumbnail, loads iframe on click. Supports all YouTube URL formats: youtube.com/watch?v=, youtu.be/, /embed/, /shorts/, /live/)
 - **Tabs/Tab**: `<Tabs><Tab name="Tab 1">content</Tab><Tab name="Tab 2">content</Tab></Tabs>`
 - **AmazonProduct**: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />`
 
