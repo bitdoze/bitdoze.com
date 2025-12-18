@@ -1,19 +1,30 @@
 ---
-date: 2024-05-23T00:00:00Z
+date: 2025-12-18T00:00:00Z
 title: "Reclaim Disk Space by Cleaning Up /var/lib/docker/overlay2"
-description: "Learn how to free up disk space on your Docker host by cleaning up the /var/lib/docker/overlay2 directory."
+description: "Learn how to safely reclaim disk space on your Docker host when /var/lib/docker/overlay2 grows large, using supported cleanup commands and careful troubleshooting."
 image: "../../assets/images/24/05/free-disk-space-docker-overlay2.jpeg"
 categories: ["vps"]
 authors: ["Dragos"]
 tags: ["docker"]
-canonical: https://www.bitdoze.com/clean-docker-overlay2-dir/
+canonical: "https://www.bitdoze.com/clean-docker-overlay2-dir/"
 ---
 
-The `/var/lib/docker/overlay2` directory is where Docker stores the layers and metadata for all the Docker images and containers on your system. Over time, this directory can grow significantly in size, especially if you have many Docker images and containers, or if you frequently build and rebuild images. A large `/var/lib/docker/overlay2` directory can consume a significant amount of disk space, potentially leading to performance issues or even system crashes if the disk becomes full.
+
+<Notice type="warning" title="Do not delete overlay2 folders manually">
+Avoid deleting anything inside `/var/lib/docker/overlay2` by hand. Manual deletion can corrupt Docker’s metadata and break running containers/images. Use the supported Docker cleanup commands in this guide, and only take “reset Docker data dir” actions if you fully understand the impact.
+</Notice>
+
+The `/var/lib/docker/overlay2` directory is where Docker (using the `overlay2` storage driver) stores the filesystem layers and runtime data for images and containers. Over time it can grow significantly—especially if you build images frequently, pull many tags, or leave stopped containers around. When it fills the disk, it can cause Docker failures and broader system issues.
 
 ## What you have in `/var/lib/docker/overlay2`
 
-The `/var/lib/docker/overlay2` directory contains several subdirectories, each representing a Docker image or container layer. These subdirectories are named using a unique identifier (a hash value) that corresponds to the specific layer. Inside each subdirectory, you'll find files and directories that make up the layer's contents, such as the filesystem, metadata, and configuration files.
+`overlay2` is Docker’s copy-on-write filesystem implementation on Linux. The `overlay2` directory contains:
+
+- **Layer directories**: content-addressed directories that hold the actual layer filesystem diffs.
+- **Container “upperdir” data**: writable layers for containers (this is often what grows when containers write lots of data).
+- **Metadata / linkage**: helper structures used by Docker to map layers to images and containers.
+
+Folder names are not meant to be human-friendly identifiers, and a 1:1 “folder == image” mapping is not reliable. The only safe way to understand what’s consuming space is using Docker commands (and supported tools) rather than deleting directories directly.
 
 ## Reasons for `/var/lib/docker/overlay2` using a lot of space
 
@@ -32,131 +43,87 @@ There are several reasons why the `/var/lib/docker/overlay2` directory can grow 
 
 ## Check the space used
 
-1. Check the space that `/var/lib/docker/overlay2` is using:
+Start with Docker’s own view of disk usage:
+
+```sh
+docker system df
+docker system df -v
+```
+
+This shows how much space is used by images, containers, volumes, and build cache (and with `-v`, it’s more detailed).
+
+Then check the raw on-disk usage for `overlay2`:
 
 ```sh
 du -sh /var/lib/docker/overlay2
 ```
 
-This command uses the `du` (disk usage) utility to display the total disk space used by the `/var/lib/docker/overlay2` directory and its contents. The `-s` option summarizes the total space used, and the `-h` option displays the size in human-readable format (e.g., KB, MB, GB).
-
-2. Check what is using the most space (top 5):
+If you need to see the largest directories (useful as a clue, not a deletion target):
 
 ```sh
-root@python-server:~# du -sh /var/lib/docker/overlay2/* | sort -hr | head -5
-3.6G    /var/lib/docker/overlay2/b5b5b1b4abef270dbc91bdd6c385865d778b6bd8ee9568030635994a296533ab
-2.5G    /var/lib/docker/overlay2/89048c0675f730b36077f7b967754ec94efead1d7d45b35870131f72bf412ff3
-610M    /var/lib/docker/overlay2/dc123594104a9a124bfb4def0780c9e2e65205abf366ea37128663cc7020e444
-559M    /var/lib/docker/overlay2/ac6efc422ab6e481c58b22d13e6d636d0c649bf58b0ef1bd2d9e01a01c5cbd8c
-512M    /var/lib/docker/overlay2/4052cb983b6bb7bbe28a6dff67fd1833eb87d4ee9a606b26d925c50e7a823b31
+du -sh /var/lib/docker/overlay2/* 2>/dev/null | sort -hr | head -10
 ```
 
-This command lists the disk space used by each subdirectory (layer) inside `/var/lib/docker/overlay2`. It uses the `du` command to get the size of each subdirectory, sorts the output in descending order (`sort -hr`), and displays the top 5 entries (`head -5`). This helps identify which specific layers or images are consuming the most disk space.
+Important notes:
+- Large `overlay2` directories are often caused by **container writable layers** (apps writing into the container filesystem) or **build cache**, not only “unused images”.
+- Knowing “which IDs are large” is less actionable than knowing whether the growth is from **images**, **containers**, **volumes**, or **build cache**—that’s why `docker system df -v` is the recommended first step.
 
 ## Cleanup `/var/lib/docker/overlay2`
 
-**1. Remove all unused containers, networks, images, and volumes:**
+### 1) Quick win: remove unused Docker objects
+
+This is the safest and most common cleanup sequence. Start with a read-only report:
+
+```sh
+docker system df -v
+```
+
+Then remove unused objects.
+
+Remove stopped containers, unused networks, dangling images, and build cache:
+
+```sh
+docker system prune -f
+```
+
+If you also want to remove all images not currently used by a container (more aggressive):
 
 ```sh
 docker system prune -a -f
 ```
 
-The `docker system prune` command removes unused Docker objects, such as containers, networks, images, and volumes. The `-a` option specifies that all unused objects should be removed, and the `-f` option forces the removal without prompting for confirmation.
+If you want to reclaim unused volumes (be careful: volumes can hold important data):
 
-This command is a good starting point for cleaning up the `/var/lib/docker/overlay2` directory, as it removes any unused Docker objects that are no longer needed, freeing up disk space.
+```sh
+docker volume prune -f
+```
 
-**2. Check `/var/lib/docker/overlay2` and see what image is using the space:**
+If you are running BuildKit builds, build cache can be the biggest contributor; prune it explicitly:
 
-I have created an util script that can be used to check this you can do that with:
+```sh
+docker builder prune -f
+docker builder prune -a -f
+```
+
+### 2) Identify “what” is growing (containers vs images vs volumes vs cache)
+
+A large `overlay2` directory is often caused by **container writes** (data being written inside containers) or **build cache**, not only “unused images”.
+
+- If `docker system df -v` shows large **Local Volumes** usage, focus on volumes first.
+- If it shows large **Build Cache** usage, prefer `docker builder prune`.
+- If it shows large **Containers** usage, check for containers that are writing into their writable layers.
+
+### 3) Map overlay2 usage to Docker objects (advanced)
+
+I’ve created a utility script that helps visualize `overlay2` disk usage:
 
 ```sh
 curl -sSL https://utils.bitdoze.com/scripts/docker-overlay2-view.sh | bash
 ```
 
-All the scripts an be found under: [utils.bitdoze.com](https://utils.bitdoze.com/)
+All scripts can be found under: https://utils.bitdoze.com/
 
-The script is below:
-
-```sh
-#!/bin/bash
-
-# Define the overlay2 directory
-overlay_dir="/var/lib/docker/overlay2"
-
-# Create a temporary file to store the results
-temp_file=$(mktemp)
-
-# Array to store used subfolders
-used_subfolders=()
-
-# Loop through each Docker image ID
-for image_id in $(docker image ls -q); do
-  # Inspect the image to get detailed information
-  image_info=$(docker inspect "$image_id")
-
-  # Get the image name (repository and tag)
-  repo_tag=$(docker inspect --format '{{if .RepoTags}}{{index .RepoTags 0}}{{else}}<none>{{end}}' "$image_id")
-
-  # Check all subfolders in the overlay2 directory
-  while IFS= read -r -d '' subfolder; do
-    if echo "$image_info" | grep -q "$subfolder"; then
-      # Get the space used by the subfolder
-      space_used=$(du -sh "$subfolder" | cut -f1)
-
-      # Convert space used to bytes for sorting
-      space_used_bytes=$(du -sb "$subfolder" | cut -f1)
-
-      # Output the image ID, image name, subfolder, space used, and space used in bytes to the temporary file
-      echo "$space_used_bytes $space_used Image ID: $image_id Image Name: $repo_tag Subfolder: $subfolder" >> "$temp_file"
-
-      # Add subfolder to the used_subfolders array
-      used_subfolders+=("$subfolder")
-    fi
-  done < <(find "$overlay_dir" -maxdepth 1 -mindepth 1 -type d -print0)
-done
-
-# Loop through all subfolders in the overlay2 directory
-while IFS= read -r -d '' subfolder; do
-  # Check if the subfolder is not in the used_subfolders array
-  if ! [[ " ${used_subfolders[@]} " =~ " $subfolder " ]]; then
-    # Get the space used by the subfolder
-    space_used=$(du -sh "$subfolder" | cut -f1)
-
-    # Convert space used to bytes for sorting
-    space_used_bytes=$(du -sb "$subfolder" | cut -f1)
-
-    # Output the subfolder information to the temporary file
-    echo "$space_used_bytes $space_used Image ID: N/A Image Name: N/A Subfolder: $subfolder" >> "$temp_file"
-  fi
-done < <(find "$overlay_dir" -maxdepth 1 -mindepth 1 -type d -print0)
-
-# Sort the results by space used in bytes (from largest to smallest) and display them
-sort -nr "$temp_file" | cut -d' ' -f2- | column -t
-
-# Remove the temporary file
-rm "$temp_file"
-```
-
-This Bash script provides a detailed breakdown of the disk space used by each Docker image and its associated layers in the `/var/lib/docker/overlay2` directory. Here's what the script does:
-
-1. It defines the `overlay_dir` variable with the path to the `/var/lib/docker/overlay2` directory.
-2. It creates a temporary file to store the results using `mktemp`.
-3. It loops through each Docker image ID using `docker image ls -q`.
-4. For each image ID, it inspects the image to get detailed information using `docker inspect`.
-5. It gets the image name (repository and tag) using `docker inspect --format '{{index .RepoTags 0}}'`.
-6. It checks all subdirectories in the `overlay_dir` directory using `find`.
-7. If the subfolder is associated with the current image ID (based on the `image_info` output), it gets the space used by the subfolder using `du -sh` and `du -sb`.
-8. It outputs the image ID, image name, subfolder path, space used (human-readable and bytes) to the temporary file.
-9. It adds the used subfolder to the `used_subfolders` array.
-10. After processing all images, it loops through all subdirectories in the `overlay_dir` directory again.
-11. If a subfolder is not in the `used_subfolders` array, it outputs the subfolder path and space used to the temporary file with "N/A" for the image ID and name.
-12. It sorts the results in the temporary file by space used in bytes (from largest to smallest) using `sort -nr`.
-13. It displays the sorted results in a tabular format using `cut` and `column -t`.
-14. Finally, it removes the temporary file.
-
-This script provides a comprehensive view of the disk space usage in the `/var/lib/docker/overlay2` directory, allowing you to identify which Docker images and their associated layers are consuming the most space. With this information, you can make informed decisions about which images or layers to remove or optimize to reclaim disk space.
-
-Output for the script:
+Note: this mapping is best-effort. `overlay2` is an internal structure, and not every directory has a clean “this belongs to image X” relationship. Use this output as guidance for what to investigate via Docker commands, not as a list of directories to delete.
 
 ```sh
 3.6G  Image  ID:  N/A           Image  Name:  N/A                            Subfolder:  /var/lib/docker/overlay2/b5b5b1b4abef270dbc91bdd6c385865d778b6bd8ee9568030635994a296533ab
@@ -257,38 +224,43 @@ Output for the script:
 16K   Image  ID:  5e183bda51e6  Image  Name:  amir20/dozzle:latest           Subfolder:  /var/lib/docker/overlay2/7464a99ae22b909b5657a85b7428d669ea743e5de39989e59767edbf4a9efa81
 ```
 
-**Why there are subfolders in /`var/lib/docker/overlay2` not corresponding to an image even after I run `docker system prune -a -f `**
+## Why are there overlay2 subfolders not “matching an image” even after `docker system prune -a`?
 
-The presence of subfolders in `/var/lib/docker/overlay2` that do not correspond to Docker images, even after running `docker system prune -a -f`, can be attributed to several reasons:
+It’s normal to see directories in `/var/lib/docker/overlay2` that don’t obviously map to a current image ID. Common reasons:
 
-1. **Orphaned Layers:** When you pull or build Docker images, each layer is stored as a directory within `/var/lib/docker/overlay2`. Sometimes, due to interruptions during image pulls or builds, or issues with Docker's internal processes, these layers can become orphaned, meaning they are not associated with any active Docker image. Orphaned layers are not automatically removed by `docker system prune`.
+1. **Container writable layers**: Running (or stopped-but-not-removed) containers have a writable layer that lives in `overlay2`. If you still have containers, you will still have overlay data.
 
-2. **Shared Layers:** Docker images can share common layers. If an image is deleted but its layers are shared with other images, those layers will remain in `/var/lib/docker/overlay2` as they are still being used by other images. `docker system prune` only removes layers that are not referenced by any existing images.
+2. **Build cache**: Modern builds (BuildKit) can create significant cache data. `docker system prune -a` doesn’t always remove all build cache. Use `docker builder prune` to target it.
 
-3. **Dangling Volumes:** Docker volumes created by containers are stored in `/var/lib/docker/volumes`. If a volume is not associated with any active container, it becomes a dangling volume. While `docker system prune` removes dangling volumes, it may not remove all orphaned layers in `/var/lib/docker/overlay2`.
+3. **Shared / referenced layers**: Images share layers, and Docker won’t remove anything that is still referenced by an existing image or container. Also remember: the “directory name” you see in `overlay2` is not necessarily the same identifier you see from `docker image ls`.
 
-4. **Incomplete Cleanup:** In rare cases, Docker's cleanup mechanisms may not remove all unused or orphaned resources, leaving behind residual data in `/var/lib/docker/overlay2`.
+4. **Init layers and internal metadata**: The `*-init` directories and metadata structures are part of how Docker sets up containers and layers.
 
-To further investigate and clean up these leftover subfolders, you can:
+5. **Leaked/orphaned data (rare)**: Abrupt power loss, daemon crashes, or storage corruption can leave “leftovers”. If you suspect this, the safer approach is to use Docker’s reporting (`docker system df -v`) and logs, and consider a controlled cleanup window.
 
-- Manually inspect the contents of the subfolders within `/var/lib/docker/overlay2` to identify any leftover layers or orphaned files.
-- Use tools like `docker image prune`, `docker container prune`, and `docker volume prune` to remove additional unused resources.
-- If necessary, you can delete the leftover subfolders manually, but exercise caution as deleting essential Docker files can result in data loss or system instability.
+### Important: avoid manual deletion
 
-Regular maintenance and cleanup of Docker's storage directories are essential for efficient resource utilization and preventing disk space issues.
+Even if a directory looks “unused”, deleting overlay2 directories by hand can corrupt Docker’s state.
 
-**If you want to start fresh while keeping some of your existing data, you can create a new Docker environment by following these steps:**
+If you truly need a “start fresh” reset, do it by resetting the Docker data directory (with Docker stopped) and only after backing up what you need.
 
-1. Stop and remove all running containers.
-2. Save any images you want to keep by creating a new image from a container or exporting the image to a tar file.
-3. Remove all unused images with `docker image prune -a`.
-4. Stop the Docker daemon.
-5. Rename or move the `/var/lib/docker` directory to a backup location.
-6. Start the Docker daemon again, which will create a new, empty `/var/lib/docker` directory.
-7. Import or load any images you want to keep in the new environment.
+### Controlled “reset” approach (last resort)
 
-This process will effectively reset your Docker environment while allowing you to selectively keep or discard existing images and data.
+1. Stop/remove containers you don’t need.
+2. Back up anything important (especially volumes and bind-mounted data).
+3. Stop the Docker daemon.
+4. Move `/var/lib/docker` to a backup location.
+5. Start Docker again (it will recreate `/var/lib/docker`).
+
+Then re-pull images and restore only what you need. This is disruptive, but safer than deleting random overlay directories.
 
 ## Conclusions
 
-Maintaining the `/var/lib/docker/overlay2` directory is crucial for efficient Docker usage and preventing disk space issues. By regularly removing unused Docker objects, monitoring disk space usage, and optimizing Docker images, you can keep the `/var/lib/docker/overlay2` directory at a manageable size and ensure smooth operation of your Docker environment.
+A growing `/var/lib/docker/overlay2` directory is usually a symptom of one of these:
+
+- unused/stopped containers and unused images
+- build cache growth (especially with BuildKit)
+- containers writing large amounts of data to their writable layer (better moved to volumes/bind mounts)
+- large/unmanaged volumes
+
+Use Docker’s own disk reports (`docker system df -v`) and supported prune commands first. Avoid manual deletion inside `/var/lib/docker/overlay2`. If you need a full reset, do it in a controlled way by moving `/var/lib/docker` while Docker is stopped, after backing up anything important.
