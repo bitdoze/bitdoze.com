@@ -1,0 +1,700 @@
+---
+date: 2026-01-23T00:00:00Z
+title: "How to Self-Host Cloudreve with Docker and Cloudflare Tunnels"
+description: "Learn how to deploy Cloudreve on your home server using Docker Compose and Dockge, then expose it securely with Cloudflare Tunnels for external access."
+image: "../../assets/images/26/01/cloudreve-docker-setup.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["dockge", "self-hosted"]
+canonical: "https://www.bitdoze.com/cloudreve-docker-setup/"
+---
+
+import Button from "../../layouts/components/widgets/Button.astro";
+import { Picture } from "astro:assets";
+import YouTubeEmbed from "../../layouts/components/widgets/YouTubeEmbed.astro";
+import Tabs from "../../layouts/components/widgets/Tabs.astro";
+import Tab from "../../layouts/components/widgets/Tab.astro";
+import Notice from "../../layouts/components/widgets/Notice.astro";
+import Accordion from "../../layouts/components/widgets/Accordion.astro";
+import imag1 from "../../assets/images/24/01/cloudflare-tunel-setup.png";
+
+Cloudreve is an open-source file management system for building your own cloud storage. It works like Google Drive or Dropbox, except you run it on your own hardware and keep all the data.
+
+The project supports local storage, S3-compatible backends, and OneDrive. You get drag-and-drop uploads, file previews in the browser, WebDAV access for mounting as a network drive, and Aria2 integration for downloading files directly to your server.
+
+This guide covers deploying Cloudreve with Docker Compose and Dockge, using PostgreSQL and Redis for better performance than the default SQLite setup. I'll also show you how to expose it to the internet through Cloudflare Tunnels and configure remote downloads with Aria2.
+
+## Cloudreve features
+
+Cloudreve comes in two editions: Community (free and open source) and Pro (paid license). The Community edition covers most home server use cases.
+
+<Tabs>
+  <Tab name="Community Edition">
+    The free version includes:
+    
+    - **Multiple storage backends** - Local disk, S3-compatible services (Cloudflare R2, MinIO, Backblaze B2), OneDrive, SharePoint, and Chinese providers like Qiniu, Alibaba OSS, Tencent COS
+    - **File sharing** - Generate share links with passwords and expiration dates
+    - **WebDAV** - Mount your storage as a network drive on Windows, macOS, or Linux
+    - **Browser previews** - View documents, images, videos, audio, ePub files, and code without downloading
+    - **User management** - Create multiple users with different storage quotas and permissions
+    - **Remote downloads** - Aria2 and qBittorrent integration for downloading from URLs, magnets, and torrents
+    - **File compression** - Create and extract ZIP archives in the browser
+    - **Thumbnails** - Automatic thumbnail generation for images and videos
+    - **Media metadata** - Extract and search by EXIF data, video metadata, and custom tags
+    - **OIDC authentication** - Single sign-on with Google, GitHub, or your own identity provider
+    - **Customization** - Dark mode, custom themes, PWA support, multiple languages
+  </Tab>
+  <Tab name="Pro Edition">
+    The Pro license adds features for larger deployments:
+    
+    - **Slave nodes** - Distribute storage and downloads across multiple servers
+    - **Load balancing** - Spread traffic across storage backends
+    - **Office document collaboration** - Real-time editing with WOPI integration (like Collabora or OnlyOffice)
+    - **Custom payment providers** - Sell storage to users with your own payment gateway
+    - **Priority support** - Direct access to the development team
+    - **File encryption** - Encrypt files at rest on storage backends
+    
+    Pro licenses are purchased from [cloudreve.org](https://cloudreve.org). Pricing depends on deployment size.
+  </Tab>
+</Tabs>
+
+For a home server or small team, the Community edition has everything you need.
+
+## Prerequisites
+
+You'll need:
+
+- A VPS or home server with Linux. I recommend [Hetzner](https://go.bitdoze.com/hetzner) for VPS hosting, or check out [Mini PC as Home Server](https://www.bitdoze.com/best-mini-pc-home-server/) for local setups
+- Docker and Dockge running on your server. See my [Dockge installation guide](https://www.bitdoze.com/dockge-install/) for setup instructions
+- Cloudflare Tunnels configured if you want external access. The Dockge article covers this too
+
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
+<Button link="https://go.bitdoze.com/vultr" text="Vultr $100 Free" />
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 Free" />
+
+> Traefik works as an alternative to Cloudflare Tunnels. I wrote a separate guide: [How to Use Traefik as A Reverse Proxy in Docker](https://www.bitdoze.com/traefik-proxy-docker/).
+
+## Deploy Cloudreve with Docker Compose
+
+This setup runs three containers: Cloudreve for the web interface and file handling, PostgreSQL for storing metadata and user data, and Redis for caching. PostgreSQL handles more users and larger file libraries better than SQLite.
+
+### 1. Create the environment file
+
+Keep credentials and configuration in a separate `.env` file. Dockge loads this automatically when you deploy the stack.
+
+```bash
+# .env file for Cloudreve
+
+# PostgreSQL database credentials
+POSTGRES_USER=cloudreve
+POSTGRES_DB=cloudreve
+POSTGRES_HOST_AUTH_METHOD=trust
+
+# Cloudreve database connection
+CR_DB_TYPE=postgres
+CR_DB_HOST=postgresql
+CR_DB_USER=cloudreve
+CR_DB_NAME=cloudreve
+CR_DB_PORT=5432
+
+# Redis connection
+CR_REDIS_SERVER=redis:6379
+```
+
+The `trust` authentication method works here because PostgreSQL only accepts connections from other containers in the same Docker network. Nothing outside can reach it directly.
+
+### 2. Create the Docker Compose file
+
+Here's the full stack with Cloudreve, PostgreSQL, and Redis. This configuration includes port 6888 for BitTorrent downloads (explained in the remote download section below):
+
+```yaml
+services:
+  cloudreve:
+    image: cloudreve/cloudreve:latest
+    container_name: cloudreve-backend
+    depends_on:
+      - postgresql
+      - redis
+    restart: unless-stopped
+    ports:
+      - 5212:5212
+      - 6888:6888
+      - 6888:6888/udp
+    environment:
+      - CR_CONF_Database.Type=${CR_DB_TYPE}
+      - CR_CONF_Database.Host=${CR_DB_HOST}
+      - CR_CONF_Database.User=${CR_DB_USER}
+      - CR_CONF_Database.Name=${CR_DB_NAME}
+      - CR_CONF_Database.Port=${CR_DB_PORT}
+      - CR_CONF_Redis.Server=${CR_REDIS_SERVER}
+    volumes:
+      - backend_data:/cloudreve/data
+
+  postgresql:
+    image: postgres:17
+    container_name: cloudreve-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST_AUTH_METHOD=${POSTGRES_HOST_AUTH_METHOD}
+    volumes:
+      - database_postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:latest
+    container_name: cloudreve-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  backend_data:
+  database_postgres:
+  redis_data:
+```
+
+<Notice type="info" title="About port 6888">
+Port 6888 (TCP and UDP) is used by Aria2 for BitTorrent peer connections. If you don't plan to use torrent downloads, you can remove these port mappings. The web interface only needs port 5212.
+</Notice>
+
+### Understanding the Docker volumes
+
+Docker volumes store data outside the container filesystem. When you restart or update a container, the volume keeps your files safe.
+
+This stack uses three named volumes:
+
+| Volume | Location inside container | What it stores |
+|--------|--------------------------|----------------|
+| `backend_data` | `/cloudreve/data` | Your uploaded files, avatars, thumbnails, and Cloudreve configuration |
+| `database_postgres` | `/var/lib/postgresql/data` | PostgreSQL database files containing user accounts, file metadata, and share links |
+| `redis_data` | `/data` | Redis cache data for session storage and performance |
+
+Named volumes like `backend_data` are managed by Docker and stored in `/var/lib/docker/volumes/` on your host. You don't need to create folders manually.
+
+**Using a custom storage location**
+
+If you prefer storing files in a specific location on your host (for example, a separate drive for media), replace the named volume with a bind mount:
+
+```yaml
+volumes:
+  - /mnt/storage/cloudreve:/cloudreve/data
+```
+
+This maps `/mnt/storage/cloudreve` on your host directly to `/cloudreve/data` inside the container. Create the folder and set permissions before starting the stack:
+
+```bash
+sudo mkdir -p /mnt/storage/cloudreve
+sudo chown -R 1000:1000 /mnt/storage/cloudreve
+```
+
+**Adding external storage directories**
+
+To use an existing directory like `/media/storage/downloads` with Cloudreve, you need to mount it into the container. Add it to the volumes section:
+
+```yaml
+services:
+  cloudreve:
+    image: cloudreve/cloudreve:latest
+    container_name: cloudreve-backend
+    volumes:
+      - backend_data:/cloudreve/data
+      - /media/storage/downloads:/cloudreve/downloads
+```
+
+This makes your `/media/storage/downloads` folder available inside the container at `/cloudreve/downloads`. You can add multiple directories:
+
+```yaml
+volumes:
+  - backend_data:/cloudreve/data
+  - /media/storage/downloads:/cloudreve/downloads
+  - /media/storage/media:/cloudreve/media
+  - /media/storage/backups:/cloudreve/backups
+```
+
+<Notice type="warning" title="Storage policies required">
+Mounting a directory doesn't automatically make files visible in Cloudreve. You need to create a storage policy pointing to that path. See the "Configure storage policies" section below for setup instructions.
+</Notice>
+
+After adding volumes, restart the stack:
+
+```bash
+docker compose down && docker compose up -d
+```
+
+### 3. Deploy with Dockge
+
+Dockge gives you a web interface for managing Docker Compose stacks. Here's the deployment process:
+
+1. Open Dockge in your browser (usually `http://your-server-ip:5001`)
+2. Click the **+ Compose** button in the top right
+3. Enter `cloudreve` as the stack name
+4. Paste the Docker Compose content into the editor
+5. Click the **Environment Variables** section below the editor
+6. Add each variable from the `.env` file:
+   - `POSTGRES_USER` = `cloudreve`
+   - `POSTGRES_DB` = `cloudreve`
+   - `POSTGRES_HOST_AUTH_METHOD` = `trust`
+   - `CR_DB_TYPE` = `postgres`
+   - `CR_DB_HOST` = `postgresql`
+   - `CR_DB_USER` = `cloudreve`
+   - `CR_DB_NAME` = `cloudreve`
+   - `CR_DB_PORT` = `5432`
+   - `CR_REDIS_SERVER` = `redis:6379`
+7. Click **Save**
+8. Click **Start** to deploy the stack
+
+Dockge stores stack files in `/opt/stacks/cloudreve/` by default. You'll find `compose.yaml` there if you need to edit it later.
+
+After clicking Start, Dockge shows real-time logs from all three containers. Wait until you see Cloudreve's startup message indicating it's ready to accept connections.
+
+<Tabs>
+  <Tab name="Dockge UI">
+    The visual approach works well for most users:
+    
+    1. Navigate to your Dockge instance
+    2. Create a new stack named `cloudreve`
+    3. Paste the compose content
+    4. Add environment variables in the UI
+    5. Save and start
+    
+    Dockge handles the `.env` file creation automatically based on the variables you enter in the UI.
+  </Tab>
+  <Tab name="Command Line">
+    If you prefer working directly on the server:
+    
+    ```bash
+    mkdir -p /opt/stacks/cloudreve
+    cd /opt/stacks/cloudreve
+    ```
+    
+    Create `compose.yaml` with the Docker Compose content above.
+    
+    Create `.env` with your environment variables.
+    
+    Then start the stack:
+    
+    ```bash
+    docker compose up -d
+    ```
+    
+    Check logs with:
+    
+    ```bash
+    docker compose logs -f
+    ```
+  </Tab>
+</Tabs>
+
+### 4. Verify the containers are running
+
+Check that all three containers started:
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+You should see `cloudreve-backend`, `cloudreve-db`, and `cloudreve-redis` all showing "Up" status.
+
+## Configure Cloudflare Tunnels
+
+Cloudflare Tunnels let you access Cloudreve from anywhere without opening ports on your router. The tunnel runs as a container on your server and creates an outbound connection to Cloudflare's network.
+
+If you followed my Dockge guide, you already have a tunnel running. Add a new hostname for Cloudreve:
+
+1. Log into the Cloudflare Zero Trust dashboard
+2. Go to **Access > Tunnels**
+3. Click your tunnel name, then **Configure**
+4. Under **Public Hostname**, click **Add a public hostname**
+5. Fill in the details:
+   - **Subdomain**: `cloudreve` (or pick something else)
+   - **Domain**: Select your domain from the dropdown
+   - **Service Type**: HTTP
+   - **URL**: `cloudreve-backend:5212`
+
+<Picture src={imag1} alt="Cloudflare Tunnel configuration" />
+
+Using `cloudreve-backend:5212` works if your tunnel container shares a Docker network with Cloudreve. If they're on separate networks, use your server's local IP instead (like `192.168.1.50:5212`).
+
+
+Save the hostname. Give it a minute to propagate, then try accessing `https://cloudreve.yourdomain.com`.
+
+> CloudPanel also works as a reverse proxy. See [Setup CloudPanel as Reverse Proxy with Docker and Dockge](https://www.bitdoze.com/cloudpanel-setup-dockge/) for that approach.
+
+## Initial Cloudreve setup
+
+### Create your admin account
+
+Open Cloudreve in your browser. Use either your Cloudflare Tunnel URL (`https://cloudreve.yourdomain.com`) or the local address (`http://your-server-ip:5212`).
+
+1. Click **Sign up** on the login page
+2. Enter an email address and password
+3. Click **Sign up** again to create the account
+4. Log in with those credentials
+
+The first account you create becomes the administrator. Cloudreve v4 dropped the old default admin credentials in favor of this signup flow.
+
+### Configure site URLs
+
+Tell Cloudreve about its public and local addresses:
+
+1. Click your avatar in the top right
+2. Select **Dashboard** to open the admin panel
+3. Go to **Settings > Basic**
+4. Set the URLs:
+   - **Primary Site URL**: Your local address, like `http://192.168.1.50:5212`
+   - **Secondary Site URL**: Your public address, like `https://cloudreve.yourdomain.com`
+5. Click **Save**
+
+These URLs affect how Cloudreve generates share links and handles redirects.
+
+### Configure storage policies
+
+Storage policies control where files go and what limits apply. Each policy points to a specific storage location.
+
+**Edit the default policy:**
+
+1. In the Dashboard, go to **Storage Policies**
+2. Click the default policy to edit it
+3. Set maximum upload size, allowed file extensions, and storage quota
+4. Save your changes
+
+The default policy stores files in `/cloudreve/data` inside the container (mapped to `backend_data` volume or your bind mount).
+
+**Create a policy for external directories:**
+
+If you mounted an external directory like `/media/storage/downloads` into the container, create a new storage policy to use it:
+
+1. Go to **Dashboard > Storage Policies**
+2. Click **New Storage Policy**
+3. Select **Local** as the storage type
+4. Configure the policy:
+   - **Name**: Give it a descriptive name like "Downloads Storage"
+   - **Storage Path**: Enter the container path, e.g., `/cloudreve/downloads` (this must match where you mounted the directory in your compose file)
+   - **Max Size**: Set the maximum file size for uploads
+   - **Allowed Extensions**: Leave empty for all types, or specify extensions
+5. Save the policy
+
+<Notice type="info" title="Path must match your mount">
+The storage path in Cloudreve must match the container path from your volume mount. If you mounted `-v /media/storage/downloads:/cloudreve/downloads`, use `/cloudreve/downloads` as the storage path.
+</Notice>
+
+**Assign the policy to users:**
+
+Storage policies are assigned through user groups:
+
+1. Go to **Dashboard > User Groups**
+2. Edit the group you want to use the new storage
+3. Under **Storage Policy**, select your new policy
+4. Save the group
+
+Users in that group will now upload to and see files from the external directory.
+
+**About existing files:**
+
+Cloudreve tracks files through its database. If you have existing files in `/media/storage/downloads`, they won't appear in the web interface automatically.
+
+Use the built-in import feature to add existing files without copying them:
+
+1. Go to **Dashboard > Files > Import**
+2. Select the storage policy, source path, target user, and destination folder
+3. Enable recursive import for subdirectories
+4. Click Import
+
+See the "Using existing files on disk" section below for full details.
+
+### Add more users
+
+To let other people use your Cloudreve:
+
+1. Go to **Dashboard > Users**
+2. Click **New User**
+3. Enter their email and set a password
+4. Choose a user group (controls permissions)
+5. Set their storage quota
+6. Save the user
+
+Each user gets their own file space and can create their own share links.
+
+## How users and file storage work
+
+Cloudreve doesn't store files in per-user folders on disk. Instead, it uses a database to track which files belong to which user.
+
+### Where files are stored on disk
+
+All user files go to the same storage location defined by the storage policy. Cloudreve renames uploaded files to random hashes:
+
+```
+/cloudreve/data/
+├── upload/
+│   ├── 1/
+│   │   ├── a3f2b8c9d4e5.jpg
+│   │   ├── 7b2e4f8a1c3d.pdf
+│   │   └── ...
+│   └── 2/
+│       └── ...
+├── thumb/
+└── temp/
+```
+
+The numbered folders (`1/`, `2/`) correspond to storage policy IDs, not users. File names are hashed, so you can't browse user files directly on the filesystem.
+
+### User file separation
+
+Users only see their own files in the web interface. The database tracks ownership:
+
+| What users see | What's on disk |
+|----------------|----------------|
+| `/Documents/report.pdf` | `/cloudreve/data/upload/1/7b2e4f8a1c3d.pdf` |
+| `/Photos/vacation.jpg` | `/cloudreve/data/upload/1/a3f2b8c9d4e5.jpg` |
+
+Two users can have files with the same name in the same virtual path. They're stored separately on disk with different hashes.
+
+### Accessing files outside Cloudreve
+
+You can't easily browse user files by navigating the storage folder. To access files:
+
+- **WebDAV**: Mount the storage as a network drive. Each user authenticates and sees only their files.
+- **Share links**: Create a share link in the web interface.
+- **API**: Use Cloudreve's API to list and download files programmatically.
+- **Direct download**: From the web interface, right-click a file and copy the download link.
+
+### Using existing files on disk
+
+Cloudreve tracks files through its database. Files placed directly in the storage folder won't appear in the interface until you import them.
+
+**Import existing folders:**
+
+Cloudreve has a built-in import feature that adds existing files to a user's library without copying them:
+
+1. Go to **Dashboard > Files > Import**
+2. Configure the import:
+   - **Storage policy**: Select the policy where your files are located
+   - **Source folder path**: Enter the path on disk, e.g., `/cloudreve/downloads/movies`
+   - **Target user**: Search and select which user should own the files
+   - **Destination folder path**: Where files appear in the user's file browser, e.g., `/Movies`
+   - **Recursively import**: Enable to include subdirectories
+   - **Extract media information**: Enable to pull metadata from videos and images
+3. Click **Import**
+
+<Notice type="warning" title="Import ownership">
+After import, Cloudreve manages the physical files. Don't modify or delete them outside Cloudreve. Importing the same file twice will skip duplicates. Files count against the user's storage quota even though no data is copied.
+</Notice>
+
+This is the fastest way to add large existing collections. The files stay in place on disk, and Cloudreve creates database entries pointing to them.
+
+## Remote downloads with Aria2
+
+Cloudreve includes Aria2 in the official Docker image, so you can download files from URLs, magnet links, and torrents directly to your storage. The files appear in your Cloudreve file browser once the download completes.
+
+### Why port 6888 matters
+
+Aria2 uses port 6888 for BitTorrent peer connections. When downloading torrents, other peers need to reach your server on this port to share file pieces. Without it:
+
+- Magnet links might not find enough peers
+- Download speeds will be slower
+- Some torrents won't start at all
+
+The compose file maps both TCP and UDP on port 6888:
+
+```yaml
+ports:
+  - 5212:5212      # Web interface
+  - 6888:6888      # Aria2 BitTorrent TCP
+  - 6888:6888/udp  # Aria2 BitTorrent UDP
+```
+
+<Notice type="warning" title="Firewall configuration">
+If you're running on a VPS, open port 6888 in your firewall. On Ubuntu with UFW:
+
+```bash
+sudo ufw allow 6888/tcp
+sudo ufw allow 6888/udp
+```
+
+For home servers behind a router, forward port 6888 to your server's local IP.
+</Notice>
+
+### Enable remote downloads
+
+The built-in Aria2 runs automatically with the Cloudreve container. You just need to enable it in the admin settings:
+
+1. Go to **Dashboard > Nodes**
+2. Click on the default node (or create one)
+3. Check **Remote Download** in the Enabled Features section
+4. Configure the downloader:
+   - **Downloader Type**: Aria2
+   - **RPC Server Address**: `http://localhost:6800`
+   - **RPC Authorization Token**: Leave empty (the built-in Aria2 has no token by default)
+   - **Temporary Download Directory**: Leave empty to use the default (`/cloudreve/data/temp`)
+5. Save the node settings
+
+### Enable for user groups
+
+By default, remote downloads are disabled for users. Enable it for your user group:
+
+1. Go to **Dashboard > User Groups**
+2. Edit the group you want to allow downloads for
+3. Check **Remote Download** in the permissions section
+4. Save the group
+
+### Creating download tasks
+
+Once enabled, users can create remote download tasks from the web interface:
+
+1. Click the **+** button in the file browser
+2. Select **Remote Download**
+3. Paste a URL, magnet link, or upload a .torrent file
+4. Choose the destination folder
+5. Click **Create**
+
+The download runs in the background. Progress shows in the remote download panel. When complete, files appear in your chosen folder.
+
+### Aria2 configuration options
+
+You can pass additional options to Aria2 through the node settings. In the **Downloader Task Parameters** field, add JSON:
+
+```json
+{
+  "max-download-limit": "10M",
+  "max-concurrent-downloads": 3,
+  "bt-tracker": [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://tracker.openbittorrent.com:6969/announce"
+  ],
+  "seed-ratio": 1.0,
+  "seed-time": 60
+}
+```
+
+This limits download speed to 10MB/s, allows 3 concurrent downloads, adds tracker servers for better peer discovery, and stops seeding after reaching a 1:1 ratio or 60 minutes.
+
+<Accordion label="Using qBittorrent instead of Aria2" group="downloads">
+If you prefer qBittorrent for torrent downloads, run it as a separate container and point Cloudreve to its Web UI. qBittorrent handles torrents better than Aria2 for long-running seeds, but it can't download regular HTTP/FTP URLs.
+
+Add qBittorrent to your compose file:
+
+```yaml
+  qbittorrent:
+    image: linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - WEBUI_PORT=8080
+    volumes:
+      - qbit_config:/config
+      - backend_data:/downloads
+    ports:
+      - 8080:8080
+      - 6881:6881
+      - 6881:6881/udp
+    restart: unless-stopped
+```
+
+Then configure the node to use qBittorrent:
+- **Downloader Type**: qBittorrent
+- **Web UI Address**: `http://qbittorrent:8080`
+- **Username/Password**: Set these in qBittorrent's settings
+
+The shared `backend_data` volume lets qBittorrent download directly to Cloudreve's storage.
+</Accordion>
+
+## Working with Cloudreve
+
+The web interface handles most file operations:
+
+- **Uploading** - Drag files onto the page or click the upload button. Large files upload in chunks and resume if interrupted.
+- **Folders** - Create folders to organize files. Right-click for options.
+- **Sharing** - Right-click a file or folder, select Share, and configure the link. Set a password or expiration if needed.
+- **Previews** - Click files to preview them. Cloudreve handles images, videos, audio, PDFs, and code files.
+- **Photo editing** - Right-click an image and open it with Photopea for quick edits without leaving the browser.
+
+For desktop integration, enable WebDAV in your user settings and mount the drive on your computer. Windows, macOS, and Linux all support WebDAV natively.
+
+## Troubleshooting
+
+<Accordion label="Containers fail to start" group="faq">
+Pull up the logs:
+
+```bash
+docker logs cloudreve-backend
+docker logs cloudreve-db
+```
+
+Common problems: PostgreSQL isn't ready when Cloudreve tries to connect (just restart the stack), environment variables are misspelled, or port 5212 is already in use by something else.
+</Accordion>
+
+<Accordion label="Can't reach Cloudreve through Cloudflare Tunnel" group="faq">
+First confirm it works locally:
+
+```bash
+curl http://localhost:5212
+```
+
+If that works but the tunnel doesn't:
+
+- Check the tunnel container is running: `docker ps | grep cloudflared`
+- Verify the hostname configuration in Cloudflare Zero Trust
+- Make sure the URL in the hostname config matches your container name or IP
+</Accordion>
+
+<Accordion label="Database connection errors" group="faq">
+If logs show PostgreSQL connection failures:
+
+1. Check that `cloudreve-db` container is running
+2. Verify environment variables match between the `.env` file and compose.yaml
+3. Restart the whole stack: `docker compose down && docker compose up -d`
+</Accordion>
+
+<Accordion label="Permission errors on bind mounts" group="faq">
+If you're using a bind mount instead of named volumes and see permission errors:
+
+```bash
+# Check what user ID Cloudreve runs as
+docker exec cloudreve-backend id
+
+# Set ownership on your host folder
+sudo chown -R 1000:1000 /mnt/storage/cloudreve
+```
+
+Adjust the user ID based on what the container actually uses.
+</Accordion>
+
+<Accordion label="Torrent downloads are slow or won't start" group="faq">
+BitTorrent needs port 6888 reachable from the internet:
+
+1. Check the port is mapped in your compose file
+2. Open port 6888 in your server's firewall
+3. If behind NAT, forward port 6888 to your server
+4. Add more trackers in the Aria2 configuration to find peers
+
+You can test if the port is open:
+
+```bash
+# From another machine
+nc -zv your-server-ip 6888
+```
+</Accordion>
+
+<Accordion label="Remote download files not appearing" group="faq">
+After a download completes, Cloudreve moves files from the temp directory to your storage. If files don't appear:
+
+1. Check the remote download panel for errors
+2. Verify Cloudreve has write permissions to the storage directory
+3. Look at the logs: `docker logs cloudreve-backend | grep -i download`
+
+The temp directory and storage directory must be accessible to the Cloudreve process.
+</Accordion>
+
+## Wrapping up
+
+Cloudreve gives you a file sharing system that runs on your own hardware. Combined with Cloudflare Tunnels, you can reach your files from anywhere without exposing your home network directly to the internet.
+
+The PostgreSQL and Redis setup handles growth better than SQLite. Add Aria2 remote downloads to grab files from anywhere and have them waiting in your cloud storage. For a home server or small team, the free Community edition covers everything most people need.
+
+Related guides you might find useful:
+
+- [Deploy Filebrowser with Docker](https://www.bitdoze.com/deploy-filebrowser-docker/) - Lighter alternative if you just need file browsing
+- [Best 100+ Docker Containers for Home Server](https://www.bitdoze.com/docker-containers-home-server/) - More applications for your home lab
+- [How To Monitor Server and Docker Resources](https://www.bitdoze.com/sever-monitoring/) - Track CPU, memory, and disk usage
