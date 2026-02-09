@@ -1,0 +1,413 @@
+---
+date: 2026-02-09T00:00:00Z
+title: "Arcane Docker Install: Self-Hosted Container Manager"
+description: "Step-by-step guide to install Arcane with Docker Compose. Covers basic setup, socket proxy security, OIDC authentication, reverse proxy config, and remote host management."
+image: "../../assets/images/26/02/arcane-install.webp"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["docker", "self-hosted"]
+canonical: "https://www.bitdoze.com/arcane-docker-install/"
+---
+
+import { Picture } from "astro:assets";
+import arcaneUi from "../../assets/images/26/02/arcane-ui.webp";
+
+I've been running [Arcane](https://getarcane.app/) on two of my servers for a few weeks now. It replaced Portainer on both, and I haven't looked back. The whole thing runs on Go, which means it's fast, light on memory, and doesn't need a complicated runtime.
+
+If you're looking for a comparison with another newer Docker manager, check out my [Arcane vs Dockhand](/arcane-vs-dockhand/) article. But if you've already decided on Arcane and just want it running, this guide covers everything from basic install to socket proxy security.
+
+## What Arcane actually does
+
+Arcane is a web-based Docker management UI. You get container management, compose stack editing, real-time logs, a web terminal, and GitOps all in one interface. It runs as a single container.
+
+<Picture
+  src={arcaneUi}
+  alt="Arcane Docker Manager UI showing container list and compose editor"
+/>
+
+A few things that stood out to me after using it:
+
+<ListCheck>
+<ul>
+<li>REST API that you can script against directly</li>
+<li>CLI tool for terminal-based management alongside the web UI</li>
+<li>GitOps built in, not as an afterthought. Point it at a repo and your stacks sync automatically</li>
+<li>OIDC/SSO support for single sign-on</li>
+<li>Remote host management via the arcane-headless agent</li>
+<li>BSD-3-Clause license. Free, no paid tiers, no feature locks</li>
+</ul>
+</ListCheck>
+
+The project has around 4,400 GitHub stars, 35 contributors, and has been actively developed since 2022. It's not new software.
+
+## Prerequisites
+
+Before you start, you need:
+
+- A Linux server (VPS or local machine). I recommend [Hetzner](https://go.bitdoze.com/hetzner) for VPS hosting
+- Docker and Docker Compose installed
+- Basic terminal knowledge
+
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner VPS" />
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
+<Button link="https://go.bitdoze.com/vultr" text="Vultr $100 Free" />
+
+Or use a [Mini PC as home server](https://www.bitdoze.com/best-mini-pc-home-server/).
+
+### Install Docker
+
+If you don't have Docker yet:
+
+```sh
+sudo apt-get update
+sudo apt-get install ca-certificates curl gnupg lsb-release
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  jammy stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose
+```
+
+Full walkthrough: [Install Docker & Docker-compose for Ubuntu](https://www.bitdoze.com/install-docker-ubuntu-arm/).
+
+## Install Arcane with Docker Compose
+
+There are two ways to install Arcane. The convenience script is the fastest, but I prefer the compose method because you can see and control exactly what's happening.
+
+### Quick install (convenience script)
+
+If you want to get running in 30 seconds:
+
+```bash
+curl -fsSL https://getarcane.app/install.sh | bash
+```
+
+This pulls the image, generates secrets, and starts the container. Good for testing, but I wouldn't use it for a permanent setup because you don't control the compose file.
+
+### Docker Compose install (recommended)
+
+First, create a directory for Arcane:
+
+```bash
+mkdir -p /opt/arcane
+cd /opt/arcane
+```
+
+Generate the secrets you'll need. Run this command twice, once for `ENCRYPTION_KEY` and once for `JWT_SECRET`:
+
+```bash
+docker run --rm ghcr.io/getarcaneapp/arcane:latest /app/arcane generate secret
+```
+
+Copy both values. Now create your `compose.yaml`:
+
+```yaml
+services:
+  arcane:
+    image: ghcr.io/getarcaneapp/arcane:latest
+    container_name: arcane
+    ports:
+      - "3552:3552"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - arcane-data:/app/data
+      - /opt/stacks:/opt/stacks
+    environment:
+      - APP_URL=http://localhost:3552
+      - PUID=1000
+      - PGID=1000
+      - ENCRYPTION_KEY=your-generated-encryption-key
+      - JWT_SECRET=your-generated-jwt-secret
+    restart: unless-stopped
+volumes:
+  arcane-data:
+```
+
+Replace the `ENCRYPTION_KEY` and `JWT_SECRET` values with the ones you generated. Set `APP_URL` to your actual server address if you're accessing it remotely.
+
+Start it up:
+
+```bash
+docker compose up -d
+```
+
+Open `http://your-server-ip:3552` in your browser. Default login credentials are `arcane` / `arcane-admin`. Change the password immediately.
+
+<Notice type="warning" title="Volume paths matter">
+If you want Arcane to manage existing compose projects on your server, mount the directory with matching paths inside and outside the container. For example, if your stacks live at `/opt/stacks`, mount it as `/opt/stacks:/opt/stacks`, NOT as `/opt/stacks:/app/data/projects`. Compose files use relative paths, and they'll break if the mount point doesn't match. You can also set the `PROJECTS_DIRECTORY` environment variable to tell Arcane where to look.
+</Notice>
+
+## Hardening: Docker socket proxy
+
+Mounting the Docker socket directly gives Arcane full control over your Docker daemon. That's a security risk. If Arcane gets compromised somehow, an attacker has root-equivalent access to your host.
+
+The fix is a socket proxy that filters which Docker API calls Arcane can make.
+
+<Accordion label="Why use a socket proxy?" group="security" expanded="true">
+
+The Docker socket (`/var/run/docker.sock`) is essentially a root-level API. Any container with access to it can create privileged containers, mount the host filesystem, or run arbitrary commands as root on the host.
+
+A socket proxy sits between Arcane and the Docker daemon. It intercepts API calls and only allows the ones you've explicitly permitted. You get the management functionality without handing over the keys to the kingdom.
+
+This setup is recommended for any internet-facing server. For a homelab behind a firewall, direct socket mounting is probably fine.
+
+</Accordion>
+
+Here's a compose setup with [Tecnativa's docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy):
+
+```yaml
+services:
+  arcane:
+    image: ghcr.io/getarcaneapp/arcane:latest
+    container_name: arcane
+    ports:
+      - "3552:3552"
+    volumes:
+      - arcane-data:/app/data
+      - /opt/stacks:/opt/stacks
+    environment:
+      - APP_URL=http://localhost:3552
+      - PUID=1000
+      - PGID=1000
+      - ENCRYPTION_KEY=your-generated-encryption-key
+      - JWT_SECRET=your-generated-jwt-secret
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    depends_on:
+      - docker-socket-proxy
+    networks:
+      - arcane-net
+    restart: unless-stopped
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: arcane-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - VOLUMES=1
+      - SERVICES=1
+      - TASKS=1
+      - NODES=1
+      - BUILD=1
+      - EXEC=1
+      - SYSTEM=1
+      - INFO=1
+      - VERSION=1
+      - POST=1
+      - DELETE=1
+    networks:
+      - arcane-net
+    restart: unless-stopped
+
+networks:
+  arcane-net:
+    driver: bridge
+
+volumes:
+  arcane-data:
+```
+
+Notice that Arcane no longer mounts the Docker socket directly. Instead, it connects to the proxy via `DOCKER_HOST=tcp://docker-socket-proxy:2375`. The socket is mounted read-only on the proxy container, and both containers sit on an internal bridge network.
+
+The environment variables on the proxy control which Docker API endpoints are accessible. The list above is fairly permissive since Arcane needs most of them to function. You can tighten it further if you don't need certain features.
+
+## Setting up OIDC/SSO
+
+If you're already running an identity provider like Authentik, Keycloak, or Authelia, you can hook Arcane into it for single sign-on.
+
+<Tabs>
+  <Tab name="Via the web UI">
+    Go to **Settings > Security > OIDC Authentication** in Arcane. Fill in your client ID, client secret, and issuer URL. The redirect URI is:
+
+    ```
+    https://your-arcane-url/auth/oidc/callback
+    ```
+
+    Save and test the connection. Users who authenticate via OIDC are auto-provisioned on first login.
+  </Tab>
+
+  <Tab name="Via environment variables">
+    Add these to your compose file:
+
+    ```yaml
+    environment:
+      - OIDC_ENABLED=true
+      - OIDC_CLIENT_ID=your-client-id
+      - OIDC_CLIENT_SECRET=your-client-secret
+      - OIDC_ISSUER_URL=https://your-idp.example.com
+      - OIDC_ADMIN_CLAIM=groups
+      - OIDC_ADMIN_VALUE=arcane-admins
+    ```
+
+    `OIDC_ADMIN_CLAIM` and `OIDC_ADMIN_VALUE` let you auto-assign admin privileges based on a claim from your identity provider. So if a user belongs to the `arcane-admins` group, they get admin access automatically.
+
+    If you want to disable local password login entirely once OIDC is working, that's configurable too.
+  </Tab>
+</Tabs>
+
+## Reverse proxy setup
+
+You'll want a reverse proxy in front of Arcane for SSL and a clean domain name. Arcane uses WebSockets for real-time updates, so your proxy config needs to support that.
+
+<Tabs>
+  <Tab name="Nginx">
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name arcane.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3552;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+The key lines are `proxy_http_version 1.1` and the `Upgrade` / `Connection` headers. Without them, WebSocket connections fail and the UI won't get live updates.
+
+  </Tab>
+
+  <Tab name="Traefik">
+    If you're already running Traefik (and you probably should be for Docker setups), add labels to your Arcane service:
+
+    ```yaml
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.arcane.rule=Host(`arcane.yourdomain.com`)"
+      - "traefik.http.routers.arcane.entrypoints=websecure"
+      - "traefik.http.routers.arcane.tls.certresolver=letsencrypt"
+      - "traefik.http.services.arcane.loadbalancer.server.port=3552"
+    ```
+
+    Traefik handles WebSocket upgrade automatically. Full Traefik setup guide: [How to use Traefik as a reverse proxy in Docker](https://www.bitdoze.com/traefik-proxy-docker/).
+  </Tab>
+
+  <Tab name="Cloudflare Tunnels">
+    If you don't want to expose ports at all, Cloudflare Tunnels work well. Point a tunnel at `http://localhost:3552` and Cloudflare handles SSL and routing. WebSocket support is automatic.
+
+    This is what I use on my homelab since I don't want to open any ports on my router.
+  </Tab>
+</Tabs>
+
+Update the `APP_URL` environment variable in your compose file to match your actual domain (e.g., `https://arcane.yourdomain.com`).
+
+## Managing remote hosts
+
+Arcane can manage Docker on other machines through the `arcane-headless` agent. This is useful if you have multiple servers but want one dashboard.
+
+On the remote machine, deploy the agent:
+
+```yaml
+services:
+  arcane-agent:
+    image: ghcr.io/getarcaneapp/arcane:latest
+    container_name: arcane-agent
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AGENT_MODE=true
+      - AGENT_TOKEN=your-agent-token
+      - MANAGER_API_URL=https://arcane.yourdomain.com
+    restart: unless-stopped
+```
+
+Generate the `AGENT_TOKEN` on your main Arcane instance, then paste it here. The agent connects outbound to your main instance, so you don't need to open any ports on the remote machine.
+
+## Environment variables reference
+
+Here are the most useful environment variables you can set:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `APP_URL` | `http://localhost:3552` | Public URL for the instance |
+| `PUID` / `PGID` | `1000` | User/group ID for file permissions |
+| `ENCRYPTION_KEY` | none | Required. 32-byte key for encrypting sensitive data |
+| `JWT_SECRET` | none | Required. Secret for signing auth tokens |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker connection. Use `tcp://` for socket proxy |
+| `DATABASE_URL` | SQLite | External PostgreSQL connection string |
+| `GPU_MONITORING_ENABLED` | `false` | Enable NVIDIA/AMD GPU stats |
+| `GPU_TYPE` | none | `nvidia` or `amd` |
+| `LOG_LEVEL` | `info` | Logging verbosity |
+| `UI_CONFIGURATION_DISABLED` | `false` | Force config via env vars only |
+
+## Troubleshooting
+
+<Accordion label="Arcane can't see my existing compose stacks" group="troubleshoot" expanded="true">
+
+This is almost always a volume mount path mismatch. If your compose files live at `/opt/stacks/myapp/compose.yaml`, mount that exact path:
+
+```yaml
+volumes:
+  - /opt/stacks:/opt/stacks
+```
+
+Not `/opt/stacks:/some/other/path`. The paths inside and outside the container must match. Also set `PROJECTS_DIRECTORY=/opt/stacks` in the environment.
+
+</Accordion>
+
+<Accordion label="WebSocket errors or UI not updating live" group="troubleshoot">
+
+Your reverse proxy isn't forwarding WebSocket connections. Make sure you have the upgrade headers set. For Nginx, you need:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+</Accordion>
+
+<Accordion label="Permission denied on Docker socket" group="troubleshoot">
+
+Either add your user to the `docker` group (`sudo usermod -aG docker $USER`) or make sure the `PUID`/`PGID` values in the compose file match a user with Docker access.
+
+</Accordion>
+
+<Accordion label="Can't generate secrets" group="troubleshoot">
+
+The secret generation command requires pulling the Arcane image first. If it fails, pull manually:
+
+```bash
+docker pull ghcr.io/getarcaneapp/arcane:latest
+docker run --rm ghcr.io/getarcaneapp/arcane:latest /app/arcane generate secret
+```
+
+</Accordion>
+
+## What I like and what's missing
+
+After a few weeks with Arcane, here's where I've landed.
+
+The GitOps integration is genuinely good. I keep my compose files in a private Git repo, and when I push changes, Arcane picks them up and redeploys. No webhook config, no CI pipeline needed. It just works.
+
+The REST API is another strong point. I wrote a small script that checks container health and restarts anything that's unhealthy. Took about 20 minutes because the API is straightforward.
+
+What I wish it had: vulnerability scanning (Dockhand has this), scheduled auto-updates with rollback protection, and a file browser for containers. These aren't dealbreakers, but they'd make Arcane the complete package.
+
+If you want vulnerability scanning and some of those missing features, take a look at [how to install Dockhand](/dockhand-docker-install/).
+
+## Related articles
+
+- [Arcane vs Dockhand](/arcane-vs-dockhand/) - side-by-side comparison of both tools
+- [Install Dockhand](/dockhand-docker-install/) - the other Docker manager worth trying
+- [Install Dockge](/dockge-install/) - another Docker management UI
+- [Best Docker containers for home server](/docker-containers-home-server/) - what to run once your manager is set up
+- [Best self-hosted panels](/best-self-hosted-panels/) - server management panels compared
+- [Traefik reverse proxy for Docker](/traefik-proxy-docker/) - proper reverse proxy setup
+- [Docker auto-update with Tugtainer](/tugtainer-docker-autoupdate/) - keep containers updated
+- [Server monitoring tools](/sever-monitoring/) - monitoring your Docker host

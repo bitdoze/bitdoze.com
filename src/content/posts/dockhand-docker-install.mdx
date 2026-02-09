@@ -1,0 +1,360 @@
+---
+date: 2026-02-09T00:00:00Z
+title: "Dockhand Docker Install: Security-Focused Container Manager"
+description: "Step-by-step guide to install Dockhand with Docker Compose. Covers SQLite and PostgreSQL setups, OIDC/SSO, vulnerability scanning, auto-updates, and remote host management with Hawser."
+image: "../../assets/images/26/02/dockerhand-install.webp"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["docker", "self-hosted"]
+canonical: "https://www.bitdoze.com/dockhand-docker-install/"
+---
+
+import { Picture } from "astro:assets";
+import dockhandUi from "../../assets/images/26/02/dockerhand-ui.webp";
+
+[Dockhand](https://dockhand.pro/) shipped its first release in December 2025 and has been putting out updates at a pace I rarely see from new projects. Sixteen releases in about two months. I installed it alongside [Arcane](/arcane-docker-install/) on the same server to see how they compare, and while Arcane has the maturity edge, Dockhand's security features caught my attention.
+
+If you're trying to decide between the two, read my [Arcane vs Dockhand comparison](/arcane-vs-dockhand/) first. This guide is for people who've already decided on Dockhand and want it running properly.
+
+## What Dockhand brings to the table
+
+Dockhand is a Docker management UI built on Bun and SvelteKit. The security angle is what makes it different from other options in this space.
+
+<Picture
+  src={dockhandUi}
+  alt="Dockhand Docker Manager UI showing container dashboard"
+/>
+
+Here's what stood out to me:
+
+<ListCheck>
+<ul>
+<li>Vulnerability scanning with Grype and Trivy built into the UI</li>
+<li>Safe-pull protection: scans new images before replacing running containers</li>
+<li>OIDC/SSO included in the free tier (Portainer charges for this)</li>
+<li>MFA/TOTP support for local accounts</li>
+<li>Container file browser and web terminal</li>
+<li>Scheduled auto-updates with automatic rollback if something breaks</li>
+<li>Activity logging for every action</li>
+<li>Notifications via SMTP and Apprise</li>
+<li>Zero telemetry. Nothing phones home</li>
+</ul>
+</ListCheck>
+
+The container image is built from scratch using Wolfi packages via apko. No Alpine or Debian base layer with packages you don't need. Smaller attack surface by design.
+
+One thing to know: Dockhand uses a BSL 1.1 license. Free for personal and internal business use. You can't resell it as a hosted service. The license converts to Apache 2.0 in 2029. For self-hosting, this doesn't matter.
+
+## Prerequisites
+
+You need:
+
+- A Linux server (VPS or local). I use [Hetzner](https://go.bitdoze.com/hetzner) for VPS hosting
+- Docker and Docker Compose installed
+- Works on both amd64 and arm64 (Raspberry Pi 4 included)
+
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner VPS" />
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
+<Button link="https://go.bitdoze.com/vultr" text="Vultr $100 Free" />
+
+Or use a [Mini PC as home server](https://www.bitdoze.com/best-mini-pc-home-server/).
+
+### Install Docker
+
+If Docker isn't set up yet:
+
+```sh
+sudo apt-get update
+sudo apt-get install ca-certificates curl gnupg lsb-release
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  jammy stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose
+```
+
+Full walkthrough: [Install Docker & Docker-compose for Ubuntu](https://www.bitdoze.com/install-docker-ubuntu-arm/).
+
+## Install Dockhand with Docker Compose
+
+You have three options depending on your needs: a quick single command, SQLite-based compose, or PostgreSQL-backed compose. I'll cover all three.
+
+### Quick install (single command)
+
+If you just want to kick the tires:
+
+```bash
+docker run -d \
+  --name dockhand \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v dockhand_data:/app/data \
+  fnsys/dockhand:latest
+```
+
+That's it. Open `http://your-server-ip:3000` and create your admin account. For a permanent setup, I'd use one of the compose methods below instead.
+
+### Docker Compose with SQLite (recommended for most users)
+
+Create a directory and compose file:
+
+```bash
+mkdir -p /opt/dockhand
+cd /opt/dockhand
+```
+
+Create `compose.yaml`:
+
+```yaml
+services:
+  dockhand:
+    image: fnsys/dockhand:latest
+    container_name: dockhand
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dockhand_data:/app/data
+volumes:
+  dockhand_data:
+```
+
+Start it:
+
+```bash
+docker compose up -d
+```
+
+Open `http://your-server-ip:3000`. The first-run wizard walks you through creating an admin account. SQLite is the default database and works well for single-server setups. The data lives in the `dockhand_data` volume.
+
+### Docker Compose with PostgreSQL
+
+If you're managing a lot of containers or want the database running separately for backup purposes, use PostgreSQL:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dockhand-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dockhand
+      POSTGRES_PASSWORD: change-this-password
+      POSTGRES_DB: dockhand
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  dockhand:
+    image: fnsys/dockhand:latest
+    container_name: dockhand
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://dockhand:change-this-password@postgres:5432/dockhand
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dockhand_data:/app/data
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+  dockhand_data:
+```
+
+<Notice type="warning" title="Change the database password">
+Replace `change-this-password` in both the `POSTGRES_PASSWORD` and `DATABASE_URL` fields with an actual strong password. Use the same password in both places.
+</Notice>
+
+## Setting up vulnerability scanning
+
+This is one of Dockhand's best features and it's included in the free tier. You can scan your container images for known vulnerabilities using either Grype or Trivy.
+
+After logging in, go to the settings page and enable vulnerability scanning. Choose your scanner:
+
+<Tabs>
+  <Tab name="Grype">
+    Grype is the default option. It's fast, developed by Anchore, and pulls vulnerability data from multiple sources. Scans run against your local images without sending anything to external servers.
+  </Tab>
+
+  <Tab name="Trivy">
+    Trivy by Aqua Security is the other option. It supports more scan targets (OS packages, language-specific dependencies, IaC files) but is slightly slower. If you need deeper scanning beyond container images, Trivy is the better pick.
+  </Tab>
+</Tabs>
+
+The safe-pull feature ties into scanning. When Dockhand auto-updates a container, it pulls the new image, scans it for vulnerabilities, and only switches over if the scan passes. If the new image has problems, your running container stays untouched. I've had this catch a bad image update twice in three weeks.
+
+## Scheduled auto-updates
+
+Dockhand can check for new container images on a schedule and update them automatically. Combined with the safe-pull protection mentioned above, this is actually usable in practice. I say "actually usable" because most auto-update tools don't verify the new image works before swapping it in.
+
+Set this up per container or per stack in the UI. You pick a schedule (e.g., daily at 3am), and Dockhand handles the rest. If an update fails or the new container doesn't start properly, it rolls back.
+
+## Configuring OIDC/SSO
+
+OIDC support is free in Dockhand. No paid tier needed. If you run Authentik, Keycloak, or any other OIDC provider, you can set up single sign-on.
+
+In the Dockhand UI, go to Settings and configure your OIDC provider with:
+
+- Client ID
+- Client secret
+- Issuer URL / Discovery URL
+
+Users are auto-provisioned on first login. Once OIDC is working, you can hide the local password login by setting the `DISABLE_LOCAL_LOGIN` environment variable. That way users can only authenticate through your identity provider.
+
+<Notice type="info" title="MFA is separate from OIDC">
+If you're using local accounts instead of OIDC, Dockhand supports TOTP-based MFA. Each user can enable it from their profile settings. If you're using OIDC, MFA is handled by your identity provider instead.
+</Notice>
+
+## Reverse proxy setup
+
+Dockhand runs on port 3000 by default. For SSL and a proper domain, put a reverse proxy in front of it. WebSocket support is needed for live container logs and metrics.
+
+<Tabs>
+  <Tab name="Nginx">
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name dockhand.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+  </Tab>
+
+  <Tab name="Traefik">
+    Add labels to the Dockhand service in your compose file:
+
+    ```yaml
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dockhand.rule=Host(`dockhand.yourdomain.com`)"
+      - "traefik.http.routers.dockhand.entrypoints=websecure"
+      - "traefik.http.routers.dockhand.tls.certresolver=letsencrypt"
+      - "traefik.http.services.dockhand.loadbalancer.server.port=3000"
+    ```
+
+    Full Traefik setup: [How to use Traefik as a reverse proxy in Docker](https://www.bitdoze.com/traefik-proxy-docker/).
+  </Tab>
+
+  <Tab name="Cloudflare Tunnels">
+    Point a tunnel at `http://localhost:3000`. SSL and WebSocket handling are automatic. This is the easiest option if you don't want to manage certificates or open ports.
+  </Tab>
+</Tabs>
+
+## Managing remote hosts with Hawser
+
+Dockhand can manage Docker on remote machines through the Hawser agent. What makes Hawser interesting is NAT traversal. The agent makes outbound-only connections, so you don't need to open any ports on the remote machine. It works behind firewalls and NAT without any special network configuration.
+
+[Hawser](https://github.com/Finsys/hawser) is open source (Go), separate from Dockhand itself.
+
+To set it up:
+
+1. In Dockhand, go to Environments and create a new remote host. This generates a token
+2. On the remote machine, deploy Hawser:
+
+```bash
+docker run -d \
+  --name hawser \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  fnsys/hawser:latest \
+  --token YOUR_TOKEN \
+  --server https://dockhand.yourdomain.com
+```
+
+The agent connects to your Dockhand instance and the remote host shows up in your dashboard. Token-based auth, auto-reconnect on network issues. There are Standard and Edge modes depending on whether the remote machine has consistent connectivity.
+
+## Environment variables reference
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DATABASE_URL` | SQLite | PostgreSQL connection string |
+| `PUID` / `PGID` | `1000` | File ownership user/group |
+| `DISABLE_LOCAL_LOGIN` | `false` | Hide password login when SSO is active |
+| `SKIP_DF_COLLECTION` | `false` | Skip disk usage collection (useful on NAS devices) |
+| `DATA_DIR` | `/app/data` | Custom data directory path |
+
+## Troubleshooting
+
+<Accordion label="Container logs show permission denied" group="troubleshoot" expanded="true">
+
+Check that the `PUID` and `PGID` values match a user with access to the Docker socket. On most systems, the Docker socket belongs to the `docker` group. Find the group ID with:
+
+```bash
+getent group docker
+```
+
+Use that GID as your `PGID` value.
+
+</Accordion>
+
+<Accordion label="Vulnerability scans fail or time out" group="troubleshoot">
+
+The first scan takes longer because Grype or Trivy needs to download the vulnerability database. Subsequent scans are faster. If it keeps timing out, check that the container has internet access (DNS resolution, outbound HTTPS).
+
+</Accordion>
+
+<Accordion label="Dockhand uses too much CPU on my NAS" group="troubleshoot">
+
+Set `SKIP_DF_COLLECTION=true` in your environment variables. Disk usage collection can be heavy on certain NAS devices with many mount points.
+
+</Accordion>
+
+<Accordion label="Hawser agent won't connect" group="troubleshoot">
+
+Verify the token is correct and the Dockhand URL is reachable from the remote machine. Hawser makes outbound HTTPS connections, so the remote machine needs to be able to reach your Dockhand instance on port 443. Check firewall rules on the remote machine's outbound traffic.
+
+</Accordion>
+
+## Pricing
+
+Worth being clear about this. Dockhand has a tiered pricing model:
+
+| Tier | Cost | What you get |
+|---|---|---|
+| Free | $0 | Full features for homelab use, OIDC/SSO included |
+| SMB | $499/host/year | Commercial support, priority updates |
+| Enterprise | $1,499/host/year | RBAC, LDAP/AD, audit logging, dedicated support |
+
+The free tier is legitimately full-featured. OIDC, vulnerability scanning, auto-updates, multi-host, all included. You only need to pay if you need RBAC, LDAP, or commercial support. That's a better deal than what Portainer offers at the free level.
+
+## My take after three weeks
+
+Dockhand is a v1 product that doesn't feel like one. The UI is polished, the security features work well, and the update pace shows the team is actively shipping.
+
+The safe-pull feature is my favorite thing about it. I set auto-updates on all my non-critical containers and let it run. It caught two bad image updates by scanning them before deploying. Both times, my running containers were left untouched while the new images got flagged.
+
+What gives me pause is the project's age. Seventy-four commits, seven contributors, first release two months ago. Arcane has been around since 2022 with 1,800+ commits and 35 contributors. That kind of maturity takes time to build, and there will be edge cases Dockhand hasn't hit yet.
+
+If security features are your priority and you can tolerate a newer project, Dockhand is worth installing. If you want something more battle-tested, check out [how to install Arcane](/arcane-docker-install/) instead.
+
+## Related articles
+
+- [Arcane vs Dockhand](/arcane-vs-dockhand/) - side-by-side comparison of both tools
+- [Install Arcane](/arcane-docker-install/) - the other Docker manager covered in this series
+- [Install Dockge](/dockge-install/) - another Docker management UI
+- [Best Docker containers for home server](/docker-containers-home-server/) - what to run once your manager is set up
+- [Best self-hosted panels](/best-self-hosted-panels/) - server management panels compared
+- [Traefik reverse proxy for Docker](/traefik-proxy-docker/) - proper reverse proxy setup
+- [Docker auto-update with Tugtainer](/tugtainer-docker-autoupdate/) - keep containers updated
+- [Server monitoring tools](/sever-monitoring/) - monitoring your Docker host
