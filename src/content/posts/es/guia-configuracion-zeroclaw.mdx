@@ -1,0 +1,682 @@
+---
+date: 2026-02-16T00:00:00Z
+title: "Guia de Configuracion de ZeroClaw: MiniMax M2.5, GLM-5, y Discord en Tu VPS"
+description: "Guia paso a paso para instalar ZeroClaw en un VPS Linux con MiniMax M2.5, GLM-5, integracion con Discord y Brave Search. Cubre configuracion, proveedores, memoria y despliegue con Docker."
+image: "@assets/images/26/02/zeroclaw-setup-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "vps"]
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+[ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) aparecio en mi radar la semana pasada y tuve que probarlo. Es un asistente de IA auto-alojado escrito completamente en Rust que compila a un binario de 3.4MB y usa menos de 5MB de RAM en ejecucion. Para ponerlo en contexto, eso es unas 200 veces menos memoria que OpenClaw y aproximadamente 20 veces menos que nanobot. Si has estado usando [nanobot](/es/guia-configuracion-nanobot/) u [OpenClaw](/es/guia-configuracion-openclaw/) y querias algo mas ligero, vale la pena echarle un vistazo.
+
+Esta guia te lleva paso a paso para poner ZeroClaw en marcha en un VPS con MiniMax M2.5 y GLM-5 como modelos, Brave Search para acceso web, y Discord como canal de chat.
+
+<Button text="ZeroClaw en GitHub" link="https://github.com/zeroclaw-labs/zeroclaw" variant="solid" color="blue" size="md" icon="github" />
+
+<Notice type="info" title="Lo que cubre esta guia">
+<ListCheck>
+<ul>
+<li>Instalar ZeroClaw desde el codigo fuente o via Docker</li>
+<li>Configurar MiniMax M2.5 y Zhipu GLM-5 como proveedores LLM</li>
+<li>Configurar Brave Search para acceso web</li>
+<li>Integracion con canal de Discord</li>
+<li>Sistema de memoria con busqueda hibrida en SQLite</li>
+<li>Configuracion de seguridad, sandboxing y emparejamiento del gateway</li>
+</ul>
+</ListCheck>
+</Notice>
+
+Si estas comparando opciones de bots auto-alojados, nuestro articulo de [alternativas a OpenClaw](/es/alternativas-openclaw/) incluye ZeroClaw junto con nanobot, NanoClaw, memU y PicoClaw.
+
+## Que es ZeroClaw realmente
+
+ZeroClaw es un asistente de IA basado en Rust de zeroclaw-labs. Arranca en menos de 10ms, usa menos de 5MB de RAM, y el binario de release pesa unos 3.4MB. Todo esta construido alrededor de traits, que es la version de interfaces en Rust. ¿Quieres cambiar tu proveedor LLM? Cambia una linea en un archivo TOML. Lo mismo aplica para canales, backends de memoria y herramientas.
+
+La arquitectura se ve asi:
+
+```
+Tu (Discord / Telegram / Slack / iMessage / Matrix / etc.)
+    ↓
+ZeroClaw Gateway (ejecutandose en tu VPS, 127.0.0.1:8080)
+    ↓
+Proveedor LLM (OpenRouter, Anthropic, OpenAI, Ollama, MiniMax, Zhipu, etc.)
+    ↓
+Herramientas (shell, acceso a archivos, busqueda web, memoria, integraciones Composio)
+```
+
+Los mensajes llegan desde tu app de chat, ZeroClaw los enruta al LLM que configuraste, y el modelo puede usar herramientas integradas para hacer el trabajo. El gateway se vincula a localhost por defecto y requiere un codigo de emparejamiento antes de aceptar cualquier solicitud webhook. Ese es un buen valor por defecto de seguridad que la mayoria de alternativas se saltan.
+
+### Como se compara
+
+| | OpenClaw | NanoBot | ZeroClaw 🦀 |
+|---|---|---|---|
+| **Lenguaje** | TypeScript | Python | **Rust** |
+| **RAM** | > 1GB | > 100MB | **< 5MB** |
+| **Arranque** | > 10s | > 2s | **< 10ms** |
+| **Binario** | ~28MB (dist) | N/A (scripts) | **3.4MB** |
+| **Canales** | 4 plataformas | 9 plataformas | **8+ plataformas** |
+| **Proveedores** | Varios | 13+ | **22+** |
+| **Memoria** | Archivo + semantica | Basada en archivos | **Busqueda hibrida SQLite** |
+
+## Por que MiniMax M2.5 y GLM-5
+
+Ambos modelos salieron en febrero de 2026 y combinan bien con un bot ligero como ZeroClaw.
+
+### MiniMax M2.5
+
+MiniMax M2.5 es un modelo Mixture-of-Experts de 230B con solo 10B parametros activos por pasada. Es rapido y barato:
+
+| Especificacion | Valor |
+|------|-------|
+| Arquitectura | 230B MoE, 10B activos |
+| Ventana de contexto | 1M tokens |
+| Velocidad (Lightning) | 100 tokens/seg |
+| Costo (Lightning) | $0.30/M entrada, $2.40/M salida |
+| SWE-Bench Verified | 80.2% |
+| Licencia | MIT modificada (codigo abierto) |
+
+Obtiene 80.2% en SWE-Bench Verified, igualando a Claude Opus 4.6 a aproximadamente 1/20 del costo. La ventana de contexto de 1M tokens significa que ZeroClaw no alcanzara limites de contexto ni con conversaciones largas.
+
+### GLM-5
+
+GLM-5 de Zhipu AI es un modelo MoE de 744B con 40-44B parametros activos:
+
+| Especificacion | Valor |
+|------|-------|
+| Arquitectura | 744B MoE, ~40B activos |
+| Ventana de contexto | 200K tokens |
+| SWE-Bench Verified | 77.8% |
+| BrowseComp | #1 codigo abierto |
+| Licencia | MIT |
+
+GLM-5 ocupa el primer lugar entre modelos de codigo abierto en BrowseComp (tareas de agentes de busqueda web), asi que es una buena eleccion para un bot que hace muchas consultas web.
+
+Ambos modelos estan disponibles a traves de sus propias APIs y a traves de OpenRouter si quieres un unico gateway.
+
+## Instalacion
+
+Dos formas principales de instalar ZeroClaw: desde el codigo fuente o via Docker.
+
+<Tabs>
+<Tab name="Desde el codigo fuente (recomendado)">
+
+Necesitas tener Rust instalado. Si no lo tienes:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+Luego compila e instala ZeroClaw:
+
+```bash
+git clone https://github.com/zeroclaw-labs/zeroclaw.git
+cd zeroclaw
+cargo build --release --locked
+cargo install --path . --force --locked
+```
+
+El build de release produce un binario de ~3.4MB. En un VPS de 2 nucleos esto toma unos minutos. En una Raspberry Pi con 1GB de RAM, usa `CARGO_BUILD_JOBS=1 cargo build --release` para evitar que el kernel mate a rustc.
+
+</Tab>
+<Tab name="Docker">
+
+Descarga la imagen pre-compilada o compila localmente:
+
+```bash
+# Using docker-compose
+curl -O https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/main/docker-compose.yml
+
+# Set your API key
+export API_KEY="sk-your-key-here"
+
+# Start
+docker-compose up -d
+```
+
+O compila desde el repositorio:
+
+```bash
+git clone https://github.com/zeroclaw-labs/zeroclaw.git
+cd zeroclaw
+docker build -t zeroclaw .
+```
+
+</Tab>
+</Tabs>
+
+Despues de instalar, ejecuta el asistente de configuracion:
+
+```bash
+# Quick setup (non-interactive)
+zeroclaw onboard --api-key sk-... --provider openrouter
+
+# Or interactive wizard
+zeroclaw onboard --interactive
+```
+
+Esto crea el directorio `~/.zeroclaw/` con un `config.toml` y una carpeta de workspace.
+
+Verifica que todo funciona:
+
+```bash
+zeroclaw status
+```
+
+## Configurar MiniMax M2.5
+
+ZeroClaw usa TOML para la configuracion en lugar de JSON. El archivo de configuracion esta en `~/.zeroclaw/config.toml`.
+
+### Obtener una clave API
+
+1. Ve a [platform.minimax.io](https://platform.minimax.io) (global) o [minimaxi.com](https://www.minimaxi.com) (China continental)
+2. Crea una cuenta y genera una clave API
+
+<Notice type="success" title="Plan de codificacion MiniMax — 10% de descuento">
+MiniMax ofrece planes de codificacion con precios para cargas de trabajo de desarrolladores. [Obtén 10% de descuento con nuestro enlace de referido](https://go.bitdoze.com/minimax). Para detalles sobre como se comparan GLM-5 y MiniMax M2.5 para bots siempre activos, ve nuestro desglose de [mejores modelos open source para OpenClaw](/best-opensource-models-for-openclaw/).
+</Notice>
+
+### Agregar a la configuracion
+
+ZeroClaw soporta MiniMax a traves de OpenRouter o como un endpoint personalizado compatible con OpenAI. La forma mas simple es via OpenRouter:
+
+```toml
+api_key = "sk-or-your-openrouter-key"
+default_provider = "openrouter"
+default_model = "minimax/MiniMax-M2.5"
+default_temperature = 0.7
+```
+
+Si quieres conectar directamente con la API de MiniMax, usa un proveedor personalizado:
+
+```toml
+api_key = "your-minimax-api-key"
+default_provider = "custom:https://api.minimax.chat/v1"
+default_model = "MiniMax-M2.5"
+default_temperature = 0.7
+```
+
+Para el endpoint de China continental, cambia la URL a `https://api.minimaxi.com/v1`.
+
+### Probar
+
+```bash
+zeroclaw agent -m "What's 42 * 17?"
+```
+
+Si obtienes una respuesta, MiniMax esta funcionando.
+
+## Configurar GLM-5 (Zhipu)
+
+GLM-5 funciona a traves de OpenRouter o directamente via la API de Zhipu.
+
+### Obtener una clave API
+
+1. Ve a [z.ai](https://z.ai/manage-apikey/apikey-list)
+2. Registrate y crea una clave API
+
+<Notice type="success" title="Plan de codificacion Z.AI GLM — 10% de descuento">
+Z.AI ofrece [planes de codificacion GLM](https://z.ai/subscribe?ic=NKNUNYDRZT) diseñados para cargas de trabajo continuas de desarrolladores. Usa nuestro enlace para obtener 10% de descuento.
+</Notice>
+
+<Notice type="info" title="Endpoint del plan de codificacion Zhipu">
+Si estas en el plan de codificacion de Zhipu, usa `custom:https://api.z.ai/api/coding/paas/v4` como tu proveedor. Esto enruta a traves de su endpoint optimizado para codificacion.
+</Notice>
+
+### Agregar a la configuracion
+
+Via OpenRouter:
+
+```toml
+api_key = "sk-or-your-openrouter-key"
+default_provider = "openrouter"
+default_model = "zhipu/glm-5"
+default_temperature = 0.7
+```
+
+O directamente via la API de Zhipu:
+
+```toml
+api_key = "your-zhipu-api-key"
+default_provider = "custom:https://api.z.ai/api/coding/paas/v4"
+default_model = "glm-5"
+default_temperature = 0.7
+```
+
+### Cambiar entre modelos
+
+ZeroClaw lee el modelo desde `config.toml`, asi que cambiar es solo editar una linea. No se necesita reinicio si usas el CLI. Para el gateway, reinicia con `zeroclaw gateway`.
+
+## Configurar Brave Search
+
+Sin busqueda web, tu bot esta limitado a los datos de entrenamiento del modelo y los archivos que esten en tu servidor. Brave Search le da acceso web en vivo.
+
+### Obtener una clave API de Brave
+
+1. Ve a [brave.com/search/api](https://brave.com/search/api/)
+2. Registra una cuenta
+3. El tier gratuito te da unas 1,000 busquedas al mes
+4. Genera una clave API desde el dashboard
+
+### Agregar a la configuracion
+
+```toml
+[browser]
+enabled = true
+allowed_domains = ["*"]
+```
+
+La herramienta de navegador de ZeroClaw soporta Brave Search a traves de la herramienta `browser_open`. Configura la clave API de Brave como variable de entorno:
+
+```bash
+export BRAVE_API_KEY="your-brave-search-api-key"
+```
+
+O agregala a la configuracion si prefieres tener todo en un solo lugar. El array `allowed_domains` controla que dominios puede navegar el bot. Usa `["*"]` durante la configuracion, luego restringe a dominios especificos despues.
+
+## Configuracion de Discord
+
+Discord es uno de los 8+ canales que ZeroClaw soporta. La integracion usa el WebSocket gateway de Discord directamente, asi que no necesitas una URL de webhook o un endpoint publico.
+
+### Crear un bot de Discord
+
+1. Ve a [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Haz clic en **New Application**, dale un nombre
+3. Ve a **Bot** en la barra lateral izquierda, haz clic en **Add Bot**
+4. Copia el token del bot
+
+### Habilitar intents
+
+Todavia en la pagina de configuracion del Bot:
+
+1. Baja hasta **Privileged Gateway Intents**
+2. Habilita **MESSAGE CONTENT INTENT** (obligatorio, si no el bot no puede leer mensajes)
+3. Opcionalmente habilita **SERVER MEMBERS INTENT** si quieres usar listas de permitidos por nombre de usuario
+
+### Obtener tu ID de usuario
+
+1. Abre Configuracion de Discord → **Advanced** → habilita **Developer Mode**
+2. Haz clic derecho en tu avatar en cualquier parte de Discord
+3. Haz clic en **Copy User ID**
+
+### Configurar ZeroClaw
+
+Agrega la configuracion del canal de Discord a tu `~/.zeroclaw/config.toml`:
+
+```toml
+[channels_config.discord]
+token = "YOUR_DISCORD_BOT_TOKEN"
+allowed_users = ["YOUR_USER_ID"]
+```
+
+<Notice type="warning" title="Comportamiento de la lista de permitidos">
+En ZeroClaw, una lista de permitidos vacia significa **denegar todos los mensajes entrantes** por defecto. Esto es lo opuesto a la mayoria de otros bots. Agrega tu ID de usuario o usa `["*"]` para acceso abierto. Si no estas seguro de como se ve tu identidad de remitente, inicia el bot, enviale un mensaje, y revisa el log de advertencias para ver el valor exacto.
+</Notice>
+
+### Invitar el bot a tu servidor
+
+1. En el portal de desarrolladores de Discord, ve a **OAuth2** → **URL Generator**
+2. En **Scopes**, marca `bot`
+3. En **Bot Permissions**, marca `Send Messages` y `Read Message History`
+4. Copia la URL generada y abrela en tu navegador
+5. Selecciona el servidor al que quieres agregar el bot
+
+### Iniciar el daemon
+
+```bash
+zeroclaw daemon
+```
+
+Esto inicia el runtime autonomo completo incluyendo todos los canales configurados. Solo para el gateway:
+
+```bash
+zeroclaw gateway
+```
+
+Envia un mensaje en Discord. El bot deberia responder. Si no pasa nada, ejecuta `zeroclaw doctor` para diagnosticar problemas de canal, o `zeroclaw channel doctor` para chequeos de salud de canal especificos.
+
+## Ejemplo de configuracion completa
+
+Asi se ve un `~/.zeroclaw/config.toml` completo con OpenRouter (para MiniMax M2.5), Brave Search, Discord y memoria SQLite:
+
+```toml
+api_key = "sk-or-your-openrouter-key"
+default_provider = "openrouter"
+default_model = "minimax/MiniMax-M2.5"
+default_temperature = 0.7
+
+[memory]
+backend = "sqlite"
+auto_save = true
+embedding_provider = "openai"
+vector_weight = 0.7
+keyword_weight = 0.3
+
+[gateway]
+require_pairing = true
+allow_public_bind = false
+
+[autonomy]
+level = "supervised"
+workspace_only = true
+allowed_commands = ["git", "npm", "cargo", "ls", "cat", "grep"]
+forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
+
+[channels_config.discord]
+token = "YOUR_DISCORD_BOT_TOKEN"
+allowed_users = ["YOUR_USER_ID"]
+
+[browser]
+enabled = true
+allowed_domains = ["docs.rs", "github.com", "stackoverflow.com"]
+
+[heartbeat]
+enabled = false
+interval_minutes = 30
+
+[tunnel]
+provider = "none"
+
+[secrets]
+encrypt = true
+```
+
+### Explicacion de la configuracion
+
+| Ajuste | Por defecto | Que hace |
+|---------|---------|-------------|
+| `default_model` | `anthropic/claude-sonnet-4-20250514` | Que modelo maneja tus mensajes |
+| `default_temperature` | `0.7` | Aleatoriedad (menor = mas deterministico) |
+| `autonomy.level` | `supervised` | `readonly`, `supervised`, o `full` |
+| `autonomy.workspace_only` | `true` | Limita todo acceso a archivos/shell al workspace |
+| `memory.backend` | `sqlite` | `sqlite`, `lucid`, `markdown`, o `none` |
+| `gateway.require_pairing` | `true` | Requiere codigo de 6 digitos para conectar |
+| `gateway.allow_public_bind` | `false` | Rechaza 0.0.0.0 sin un tunel |
+| `secrets.encrypt` | `true` | Claves API encriptadas con ChaCha20-Poly1305 |
+
+## Sistema de proveedores
+
+ZeroClaw viene con 22+ proveedores integrados. Cada proveedor implementa el mismo trait `Provider`, asi que cambiar entre ellos es un cambio de configuracion.
+
+| Proveedor | Endpoint API | Notas |
+|----------|-------------|-------|
+| OpenRouter | `https://openrouter.ai/api/v1` | Gateway a cualquier modelo |
+| Anthropic | API directa | Modelos Claude |
+| OpenAI | API directa | Modelos GPT |
+| Ollama | Local | Modelos auto-alojados |
+| Gemini | API directa | Google Gemini (nativo, no OpenAI-compat) |
+| Venice | API directa | Enfocado en privacidad |
+| Groq | API directa | Inferencia rapida |
+| Mistral | API directa | Modelos Mistral |
+| xAI | API directa | Modelos Grok |
+| DeepSeek | API directa | Modelos DeepSeek |
+| Together | API directa | Modelos open-source |
+| Fireworks | API directa | Open-source rapido |
+| Perplexity | API directa | Aumentado con busqueda |
+| Cohere | API directa | Modelos Command |
+| Bedrock | AWS API | Modelos hosteados en AWS |
+| Custom | Cualquier URL | Cualquier API compatible con OpenAI |
+
+Para MiniMax y Zhipu especificamente, usa OpenRouter o el proveedor `custom:` con sus URLs de API. El proveedor custom de ZeroClaw funciona con cualquier endpoint compatible con OpenAI, lo que cubre a ambos.
+
+## Sistema de memoria
+
+La memoria de ZeroClaw va mas alla de lo que ofrecen nanobot u OpenClaw. Es un motor de busqueda hibrido construido sobre SQLite sin dependencias externas:
+
+| Capa | Que hace |
+|-------|-------------|
+| Vector DB | Embeddings almacenados como BLOB en SQLite, busqueda por similitud coseno |
+| Busqueda por palabras clave | Tablas virtuales FTS5 con puntuacion BM25 |
+| Fusion hibrida | Fusion ponderada de resultados vectoriales y por palabras clave |
+| Embeddings | Embeddings de OpenAI por defecto, o noop para sin embeddings |
+| Chunking | Chunker de markdown basado en lineas con preservacion de encabezados |
+| Cache | Cache de embeddings en SQLite con eviccion LRU |
+
+El bot automaticamente almacena, recupera y gestiona la memoria a traves de herramientas integradas. No se necesitan servicios externos. Ni Pinecone, ni Elasticsearch.
+
+```toml
+[memory]
+backend = "sqlite"
+auto_save = true
+embedding_provider = "openai"
+vector_weight = 0.7
+keyword_weight = 0.3
+```
+
+Configura `embedding_provider = "noop"` si no quieres pagar por embeddings de OpenAI. Perderas la busqueda vectorial pero la busqueda por palabras clave (FTS5) sigue funcionando bien por si sola.
+
+### Archivos de identidad
+
+Como nanobot, ZeroClaw usa archivos de workspace para dar forma a la personalidad del bot:
+
+| Archivo | Proposito |
+|------|---------|
+| `IDENTITY.md` | Quien es el agente |
+| `SOUL.md` | Personalidad y valores centrales |
+| `USER.md` | Tu informacion personal y preferencias |
+| `AGENTS.md` | Pautas de comportamiento |
+| `TOOLS.md` | Instrucciones de uso de herramientas |
+
+Edita estos en `~/.zeroclaw/workspace/`. ZeroClaw tambien soporta AIEOS (AI Entity Object Specification) como formato alternativo de identidad si quieres personas de IA portables.
+
+## Despliegue con Docker
+
+Para Docker, ZeroClaw tiene un Dockerfile multi-stage con targets de desarrollo y produccion. La imagen de produccion usa la base distroless de Google, asi que es muy pequeña.
+
+### Usando docker-compose
+
+```bash
+# Download the compose file
+curl -O https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/main/docker-compose.yml
+
+# Create .env file
+cat > .env << 'EOF'
+API_KEY=sk-or-your-openrouter-key
+PROVIDER=openrouter
+ZEROCLAW_MODEL=minimax/MiniMax-M2.5
+HOST_PORT=3000
+EOF
+
+# Start
+docker-compose up -d
+```
+
+### Docker run manual
+
+```bash
+# Build
+docker build -t zeroclaw --target release .
+
+# Run
+docker run -d \
+  -e API_KEY="sk-or-your-openrouter-key" \
+  -e PROVIDER="openrouter" \
+  -e ZEROCLAW_MODEL="minimax/MiniMax-M2.5" \
+  -v zeroclaw-data:/zeroclaw-data \
+  -p 3000:3000 \
+  --name zeroclaw \
+  zeroclaw
+```
+
+El contenedor se ejecuta como usuario no-root (UID 65534) por defecto.
+
+### Chequeos de salud
+
+El archivo compose incluye un chequeo de salud usando `zeroclaw doctor`:
+
+```yaml
+healthcheck:
+  test: ["CMD", "zeroclaw", "doctor"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+```
+
+## Configuracion de seguridad
+
+Los valores por defecto de seguridad de ZeroClaw son mas estrictos que la mayoria de alternativas. Algunas cosas que vale la pena saber:
+
+### Emparejamiento del gateway
+
+Cuando inicias el gateway, ZeroClaw genera un codigo de emparejamiento de 6 digitos de un solo uso. Necesitas intercambiar este codigo por un bearer token antes de que el gateway acepte cualquier solicitud webhook:
+
+```bash
+# Start gateway (shows pairing code in logs)
+zeroclaw gateway
+
+# Exchange code for token
+curl -X POST http://127.0.0.1:8080/pair \
+  -H "X-Pairing-Code: 123456"
+```
+
+Todas las solicitudes `/webhook` posteriores necesitan el header `Authorization: Bearer <token>`.
+
+### Sandboxing del workspace
+
+```toml
+[autonomy]
+workspace_only = true
+allowed_commands = ["git", "npm", "cargo", "ls", "cat", "grep"]
+forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
+```
+
+Con `workspace_only = true`, el bot solo puede acceder a archivos dentro de su workspace. 14 directorios del sistema y 4 dotfiles sensibles estan bloqueados por defecto. Los intentos de escape via symlink se detectan a traves de la canonicalizacion de rutas.
+
+### Vinculacion solo a localhost
+
+El gateway se vincula a `127.0.0.1` por defecto y se niega a vincularse a `0.0.0.0` a menos que configures un tunel (Cloudflare, Tailscale, ngrok) o establezcas explicitamente `allow_public_bind = true`.
+
+## Referencia del CLI
+
+| Comando | Que hace |
+|---------|-------------|
+| `zeroclaw onboard` | Configuracion rapida |
+| `zeroclaw onboard --interactive` | Asistente completo de 7 pasos |
+| `zeroclaw onboard --channels-only` | Reconfigurar solo canales |
+| `zeroclaw agent -m "..."` | Enviar un solo mensaje |
+| `zeroclaw agent` | Modo de chat interactivo |
+| `zeroclaw gateway` | Iniciar servidor webhook |
+| `zeroclaw daemon` | Iniciar runtime autonomo completo |
+| `zeroclaw status` | Mostrar estado del sistema |
+| `zeroclaw doctor` | Ejecutar diagnosticos |
+| `zeroclaw channel doctor` | Chequear salud del canal |
+| `zeroclaw service install` | Instalar como servicio del sistema |
+| `zeroclaw service status` | Verificar estado del servicio |
+| `zeroclaw migrate openclaw` | Migrar memoria desde OpenClaw |
+
+El comando `migrate openclaw` es util si estas migrando desde OpenClaw. Ejecuta `--dry-run` primero para previsualizar lo que se importa.
+
+## Hosting en VPS
+
+ZeroClaw se ejecuta en practicamente cualquier cosa. Lo probe en un [Hetzner CX22](/hetzner-cloud-review/) (2 vCPU, 4GB RAM) a €4.35/mes, pero honestamente funcionaria bien en hardware mucho mas barato. El proyecto dice que funciona en computadoras de placa unica de $10 y lo creo dado el consumo de memoria.
+
+<Notice type="success" title="Descuento en Hetzner">
+[Obtén €20 de credito](https://go.bitdoze.com/hetzner) cuando te registres a traves de nuestro enlace de referido. Eso cubre alrededor de 4 meses de un CX22.
+</Notice>
+
+Configuracion rapida en un VPS Ubuntu 24.04 nuevo:
+
+```bash
+ssh root@YOUR_SERVER_IP
+
+# Update system
+apt update && apt upgrade -y
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Clone and build
+git clone https://github.com/zeroclaw-labs/zeroclaw.git
+cd zeroclaw
+cargo build --release --locked
+cargo install --path . --force --locked
+
+# Initialize
+zeroclaw onboard --interactive
+
+# Edit config
+nano ~/.zeroclaw/config.toml
+
+# Start
+zeroclaw daemon
+```
+
+Para una configuracion de daemon adecuada, instala ZeroClaw como servicio del sistema:
+
+```bash
+zeroclaw service install
+zeroclaw service start
+zeroclaw service status
+```
+
+Esto crea un servicio de usuario systemd que arranca con el sistema y se reinicia en caso de fallo.
+
+Si quieres ejecutar modelos locales junto con ZeroClaw, revisa nuestra guia de [instalar Ollama con Docker](/ollama-docker-install/). El proveedor Ollama de ZeroClaw se conecta a cualquier instancia local de Ollama sin configuracion extra.
+
+## ZeroClaw vs nanobot vs OpenClaw
+
+Uso los tres en este punto, asi que aqui va una comparacion directa:
+
+| Aspecto | ZeroClaw 🦀 | nanobot | OpenClaw |
+|--------|------------|---------|----------|
+| Lenguaje | Rust | Python | TypeScript |
+| Uso de RAM | < 5MB | ~100MB | > 1GB |
+| Arranque | < 10ms | > 2s | > 10s |
+| Tamaño del binario | 3.4MB | N/A (scripts) | ~28MB |
+| Formato de config | TOML | JSON | Custom |
+| Cantidad de canales | 8+ | 9 | 4 |
+| Cantidad de proveedores | 22+ | 13+ | Varios |
+| Memoria | Busqueda hibrida SQLite | Basada en archivos | Archivo + semantica |
+| Seguridad | Emparejamiento + sandbox + listas de permitidos | Listas de permitidos | Listas de permitidos |
+| Metodo de instalacion | `cargo install` | `pip install` | Script personalizado |
+| Tiempo de configuracion | ~10 minutos (incluye compilacion) | ~5 minutos | ~20 minutos |
+
+ZeroClaw gana en uso de recursos y seguridad. nanobot gana en velocidad de configuracion y cantidad de canales. OpenClaw tiene la experiencia de onboarding mas pulida con su flujo OAuth para suscripciones existentes de Claude/ChatGPT.
+
+Para la guia de configuracion de nanobot, ve nuestro [tutorial completo](/es/guia-configuracion-nanobot/). Para OpenClaw, ve la [guia de configuracion](/es/guia-configuracion-openclaw/).
+
+<Accordion label="Preguntas frecuentes" group="faq" expanded="true">
+
+**¿Cuanto cuesta ejecutar ZeroClaw?**
+
+VPS: ~$5/mes en Hetzner. API Lightning de MiniMax M2.5: aproximadamente $1/hora de uso continuo, pero los costos reales son mucho menores ya que el bot solo llama a la API cuando le envias un mensaje. Espera $5-20/mes para uso personal.
+
+**¿Puedo usar ZeroClaw sin costos de API?**
+
+Si. Configura `default_provider = "ollama"` y apuntalo a una instancia local de Ollama. Necesitas hardware que pueda ejecutar inferencia, pero no hay facturas de API.
+
+**¿ZeroClaw funciona en una Raspberry Pi?**
+
+Si. El proyecto soporta explicitamente targets ARM. En una Pi con 1GB de RAM, compila con `CARGO_BUILD_JOBS=1` para evitar quedarte sin memoria durante la compilacion. Una vez compilado, ZeroClaw usa menos de 5MB de RAM en ejecucion.
+
+**¿Pueden varias personas usar una instancia de ZeroClaw?**
+
+Si. Agrega multiples IDs de usuario a la lista de permitidos del canal. Cada persona obtiene su propio contexto de conversacion.
+
+**¿Cual es la diferencia entre gateway y daemon?**
+
+`zeroclaw gateway` inicia solo el servidor webhook. `zeroclaw daemon` inicia el runtime autonomo completo incluyendo todos los canales, tareas de heartbeat y el planificador. Para uso 24/7 con Discord, quieres el daemon.
+
+**¿Puedo migrar de OpenClaw a ZeroClaw?**
+
+Si. ZeroClaw tiene un comando de migracion integrado: `zeroclaw migrate openclaw`. Ejecuta `--dry-run` primero para previsualizar lo que se importa, luego ejecutalo de verdad.
+
+**¿Puedo agregar Telegram junto con Discord?**
+
+Si. Configura ambos canales en el mismo archivo de configuracion. ZeroClaw los maneja simultaneamente. Ve la seccion de Telegram en la guia de nanobot para el flujo de BotFather ya que es el mismo proceso.
+
+</Accordion>
+
+Si quieres explorar otras herramientas de codificacion con IA, nuestra [comparacion de herramientas de codificacion con IA](/ai-coading-tools/) cubre el panorama actual. Para conceptos basicos de MCP que funcionan en todos estos asistentes, revisa la [introduccion a MCP para principiantes](/mcp-introduction-beginners/).
+
+Este articulo tambien esta disponible en ingles: [ZeroClaw Setup Guide](/zeroclaw-setup-guide/)
