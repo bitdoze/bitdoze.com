@@ -18,6 +18,8 @@ const postsCollection = defineCollection({
       categories: z.array(z.string()).default(["others"]),
       tags: z.array(z.string()).default(["others"]),
       series: z.tuple([z.string(), z.string()]).optional(),
+      locale: z.enum(["en", "es"]).optional(),
+      translationKey: z.string().optional(),
       canonical: z.string().optional(),
       draft: z.boolean().optional(),
     }),

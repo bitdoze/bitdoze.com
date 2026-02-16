@@ -3,7 +3,7 @@ import { defineConfig } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import icon from "astro-icon";
-import sitemap from "@astrojs/sitemap";
+// Sitemap handled by custom sitemap-en.xml.ts and sitemap-es.xml.ts
 import path from "path";
 
 // https://astro.build/config
@@ -58,5 +58,5 @@ export default defineConfig({
   },
 
   // Configure Astro integrations
-  integrations: [mdx(), icon(), sitemap()],
+  integrations: [mdx(), icon()],
 });

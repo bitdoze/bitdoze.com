@@ -1,0 +1,507 @@
+---
+date: 2026-02-15T00:00:00Z
+title: "Agregar Busqueda DuckDuckGo a OpenClaw: Busqueda Web Gratis Sin Claves API"
+description: "Guia paso a paso para agregar busqueda DuckDuckGo a OpenClaw (anteriormente Clawdbot/Moltbot). Reemplaza Brave Search con una alternativa gratuita que no requiere clave API."
+image: "@assets/images/15/02/duckduckgo-openclaw-search.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "openclaw"]
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Button from "@components/widgets/Button.astro";
+
+OpenClaw viene con Brave Search como el proveedor de busqueda web predeterminado. Funciona bien, pero necesitas una clave API. Si quieres una alternativa gratuita que simplemente funciona sin registros, DuckDuckGo es la respuesta.
+
+<Notice type="info" title="Lo Que Necesitas">
+<ListCheck>
+<ul>
+<li>OpenClaw instalado en tu servidor</li>
+<li>Familiaridad basica con editar archivos TypeScript</li>
+<li>curl instalado (disponible por defecto en la mayoria de sistemas Linux)</li>
+<li>No se requiere clave API para DuckDuckGo!</li>
+</ul>
+</ListCheck>
+</Notice>
+
+Si eres nuevo en OpenClaw, primero revisa nuestra [Guia de Configuracion de OpenClaw](/es/guia-configuracion-openclaw/).
+
+## Por Que DuckDuckGo Sobre Brave?
+
+| Feature | Brave Search | DuckDuckGo |
+|---------|--------------|------------|
+| **Clave API** | Requerida (nivel gratuito disponible) | No necesaria |
+| **Costo Mensual** | Nivel gratuito + planes pagos | $0 para siempre |
+| **Limites de Tasa** | Limites por plan | Riesgo anti-bot |
+| **Complejidad de Configuracion** | Baja | Media (modificacion de codigo) |
+| **Filtros de Actualidad** | Si (pd, pw, pm, py) | No |
+| **Confiabilidad** | Alta | Media (scraping HTML) |
+
+DuckDuckGo usa scraping HTML, lo que significa que puede romperse si cambian la estructura de su pagina. Pero para uso personal en OpenClaw, es una opcion gratuita solida.
+
+## Resumen de la Implementacion
+
+El enfoque usa el endpoint de busqueda HTML de DuckDuckGo (`https://html.duckduckgo.com/html/`) y analiza los resultados del HTML crudo. Este es el mismo metodo usado por muchas herramientas de busqueda enfocadas en privacidad.
+
+Esto es lo que haremos:
+
+<ListCheck>
+<ul>
+<li>Agregar DuckDuckGo a la lista de proveedores de busqueda</li>
+<li>Crear una funcion para llamar la busqueda HTML de DuckDuckGo via curl</li>
+<li>Agregar un analizador HTML para extraer resultados</li>
+<li>Actualizar la logica de resolucion de proveedor</li>
+<li>Configurar OpenClaw para usar DuckDuckGo</li>
+</ul>
+</ListCheck>
+
+## Paso 1: Agregar DuckDuckGo a los Proveedores de Busqueda
+
+Abre el archivo de la herramienta de busqueda web:
+
+```bash
+nano ~/.openclaw/openclawd/src/agents/tools/web-search.ts
+```
+
+Encuentra el array `SEARCH_PROVIDERS` cerca del inicio y agrega `duckduckgo`:
+
+```typescript
+const SEARCH_PROVIDERS = ["brave", "perplexity", "grok", "duckduckgo"] as const;
+```
+
+## Paso 2: Agregar el Endpoint de DuckDuckGo
+
+Agrega la constante del endpoint de busqueda HTML despues del endpoint de Brave:
+
+```typescript
+const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const DUCKDUCKGO_HTML_ENDPOINT = "https://html.duckduckgo.com/html/";
+```
+
+## Paso 3: Agregar Definiciones de Tipo
+
+Agrega el tipo de resultado de DuckDuckGo antes de la funcion de analisis:
+
+```typescript
+type DuckDuckGoSearchResult = {
+  title: string;
+  url: string;
+  description: string;
+  siteName?: string;
+};
+```
+
+## Paso 4: Crear el Analizador HTML
+
+Agrega esta funcion para analizar la respuesta HTML de DuckDuckGo:
+
+```typescript
+function parseDuckDuckGoHtml(html: string): DuckDuckGoSearchResult[] {
+  const results: DuckDuckGoSearchResult[] = [];
+  const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>/gi;
+  const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)<\/a>/gi;
+
+  const links: { url: string; title: string }[] = [];
+  let match;
+
+  // Extract links and titles
+  while ((match = linkRegex.exec(html)) !== null) {
+    let url = match[1] ?? "";
+    const title = (match[2] ?? "").trim();
+
+    // DuckDuckGo redirects through their own URL - extract the real URL
+    if (url.includes("uddg=")) {
+      try {
+        const parsed = new URL(url, "https://duckduckgo.com");
+        const realUrl = parsed.searchParams.get("uddg");
+        if (realUrl) {
+          url = decodeURIComponent(realUrl);
+        }
+      } catch {
+        // Keep original URL if parsing fails
+      }
+    }
+
+    if (url && title && url.startsWith("http")) {
+      links.push({ url, title });
+    }
+  }
+
+  // Extract snippets
+  const snippets: string[] = [];
+  while ((match = snippetRegex.exec(html)) !== null) {
+    const snippet = (match[1] ?? "").replace(/<[^>]*>/g, "").trim();
+    snippets.push(snippet);
+  }
+
+  // Combine links with snippets
+  for (let i = 0; i < links.length; i++) {
+    const link = links[i];
+    if (!link) {
+      continue;
+    }
+    results.push({
+      title: link.title,
+      url: link.url,
+      description: snippets[i] ?? "",
+      siteName: resolveSiteName(link.url),
+    });
+  }
+
+  return results;
+}
+```
+
+## Paso 5: Crear la Funcion de Busqueda
+
+Agrega una funcion que realice la busqueda de DuckDuckGo usando curl:
+
+```typescript
+async function runDuckDuckGoSearch(params: {
+  query: string;
+  count: number;
+  timeoutSeconds: number;
+}): Promise<DuckDuckGoSearchResult[]> {
+  const { execFileSync } = await import("child_process");
+
+  const curlArgs = [
+    "-s",
+    "--max-time",
+    String(params.timeoutSeconds),
+    "-X",
+    "POST",
+    "-H",
+    "Content-Type: application/x-www-form-urlencoded",
+    "-H",
+    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "-H",
+    "Accept: text/html",
+    "-d",
+    `q=${encodeURIComponent(params.query)}`,
+    DUCKDUCKGO_HTML_ENDPOINT,
+  ];
+
+  try {
+    const html = execFileSync("curl", curlArgs, {
+      encoding: "utf-8",
+      maxBuffer: 2 * 1024 * 1024,
+      timeout: params.timeoutSeconds * 1000,
+    });
+
+    const allResults = parseDuckDuckGoHtml(html);
+
+    // Check if we got results or just the homepage (anti-bot detection)
+    if (allResults.length === 0 && html.includes("<title>") && !html.includes("at DuckDuckGo")) {
+      throw new Error(
+        "DuckDuckGo returned homepage instead of search results (possible anti-bot detection)"
+      );
+    }
+
+    return allResults.slice(0, params.count);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`DuckDuckGo search failed: ${message}`, { cause: err });
+  }
+}
+```
+
+## Paso 6: Actualizar Resolucion de Proveedor
+
+Encuentra la funcion `resolveSearchProvider` y agrega soporte para DuckDuckGo:
+
+```typescript
+function resolveSearchProvider(search?: WebSearchConfig): (typeof SEARCH_PROVIDERS)[number] {
+  const raw =
+    search && "provider" in search && typeof search.provider === "string"
+      ? search.provider.trim().toLowerCase()
+      : "";
+  if (raw === "perplexity") {
+    return "perplexity";
+  }
+  if (raw === "grok") {
+    return "grok";
+  }
+  if (raw === "duckduckgo" || raw === "ddg") {
+    return "duckduckgo";
+  }
+  if (raw === "brave") {
+    return "brave";
+  }
+  return "brave"; // Default
+}
+```
+
+## Paso 7: Agregar DuckDuckGo a la Funcion Principal de Busqueda
+
+En la funcion `runWebSearch`, agrega un caso para DuckDuckGo antes del fallback de Brave:
+
+```typescript
+async function runWebSearch(params: {
+  // ... existing params
+}): Promise<Record<string, unknown>> {
+  // ... existing cache logic
+
+  const start = Date.now();
+
+  // ... existing Perplexity code...
+
+  if (params.provider === "duckduckgo") {
+    const ddgResults = await runDuckDuckGoSearch({
+      query: params.query,
+      count: params.count,
+      timeoutSeconds: params.timeoutSeconds,
+    });
+    const payload = {
+      query: params.query,
+      provider: params.provider,
+      count: ddgResults.length,
+      tookMs: Date.now() - start,
+      results: ddgResults,
+    };
+    writeCache(SEARCH_CACHE, cacheKey, payload, params.cacheTtlMs);
+    return payload;
+  }
+
+  // ... existing Brave code...
+}
+```
+
+## Paso 8: Actualizar Descripcion de Herramienta
+
+Modifica la funcion `createWebSearchTool` para incluir DuckDuckGo en la descripcion:
+
+```typescript
+const description =
+  provider === "perplexity"
+    ? "Search the web using Perplexity Sonar (direct or via OpenRouter). Returns AI-synthesized answers with citations from real-time web search."
+    : provider === "grok"
+      ? "Search the web using xAI Grok. Returns AI-synthesized answers with citations from real-time web search."
+      : provider === "duckduckgo"
+        ? "Search the web using DuckDuckGo. Free search without API key requirements. Returns titles, URLs, and snippets."
+        : "Search the web using Brave Search API. Supports region-specific and localized search via country and language parameters. Returns titles, URLs, and snippets for fast research.";
+```
+
+## Paso 9: Saltar Verificacion de Clave API para DuckDuckGo
+
+En la funcion execute, modifica la verificacion de clave API:
+
+```typescript
+execute: async (_toolCallId, args) => {
+  // ... existing code...
+
+  if (!apiKey && provider !== "duckduckgo") {
+    return jsonResult(missingSearchKeyPayload(provider));
+  }
+
+  // ... rest of the code...
+}
+```
+
+## Paso 10: Configurar OpenClaw
+
+Edita tu configuracion de OpenClaw:
+
+```bash
+nano ~/.openclaw/config.json
+```
+
+Establece DuckDuckGo como tu proveedor de busqueda:
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "provider": "duckduckgo"
+      }
+    }
+  }
+}
+```
+
+O usa el CLI:
+
+```bash
+openclaw configure --section web
+```
+
+## Paso 11: Recompilar y Reiniciar
+
+Despues de hacer todos los cambios de codigo, recompila OpenClaw:
+
+```bash
+cd ~/.openclaw/openclawd
+npm run build
+```
+
+Reinicia el gateway:
+
+```bash
+openclaw gateway restart
+```
+
+## Probando Tu Configuracion
+
+Envia una consulta de busqueda a OpenClaw a traves de tu canal de mensajeria:
+
+> "Busca el ultimo release de Node.js"
+
+Deberias ver resultados de DuckDuckGo sin ninguna configuracion de clave API.
+
+## Alternativa: Usar Parche de la Comunidad
+
+Si no quieres modificar el codigo manualmente, hay un fork de la comunidad con DuckDuckGo ya implementado:
+
+```bash
+git clone https://github.com/jokelord/openclaw-local-model-tool-calling-patch.git
+cd openclaw-local-model-tool-calling-patch
+```
+
+La implementacion de DuckDuckGo esta en `openclawd-2026.2.3/src/agents/tools/web-search.ts`.
+
+<Button text="Ver Parche de la Comunidad" link="https://github.com/jokelord/openclaw-local-model-tool-calling-patch" variant="solid" color="purple" size="md" icon="arrow-right" />
+
+## Limitaciones a Conocer
+
+<Notice type="warning" title="Limitaciones de DuckDuckGo">
+<ListCheck>
+<ul>
+<li>**Sin filtros de actualidad**: A diferencia de Brave, no puedes filtrar por ultimo dia/semana/mes</li>
+<li>**Deteccion anti-bot**: Uso pesado puede activar bloqueos</li>
+<li>**Analisis HTML**: Podria romperse si DuckDuckGo cambia la estructura de su pagina</li>
+<li>**Sin filtros de pais/idioma**: Menos control granular que la API de Brave</li>
+</ul>
+</ListCheck>
+</Notice>
+
+Para uso en produccion o cargas pesadas de busqueda, considera usar Brave Search con una clave API en su lugar. El nivel gratuito es generoso suficiente para uso personal de OpenClaw.
+
+## Comparando Proveedores de Busqueda
+
+<Tabs>
+<Tab name="Brave Search">
+
+**Pros:**
+- API oficial con estabilidad garantizada
+- Filtros de actualidad (ultimo dia, semana, mes, ano)
+- Segmentacion por pais e idioma
+- Limites de tasa mas altos en planes pagos
+
+**Contras:**
+- Requiere registro de clave API
+- El nivel gratuito tiene limites
+- Planes pagos para uso pesado
+
+**Mejor para:** Uso en produccion, equipos, necesidades de busqueda intensiva
+</Tab>
+
+<Tab name="DuckDuckGo">
+
+**Pros:**
+- No requiere clave API
+- Gratis para siempre
+- Enfocado en privacidad
+- Configuracion facil (una vez modificado el codigo)
+
+**Contras:**
+- El scraping HTML puede romperse
+- Riesgo de deteccion anti-bot
+- Sin filtros de actualidad
+- Menos confiable para uso pesado
+
+**Mejor para:** Uso personal, pruebas, entusiastas de la privacidad
+</Tab>
+
+<Tab name="Perplexity">
+
+**Pros:**
+- Respuestas sintetizadas por IA
+- Citas integradas
+- Acceso web en tiempo real
+- Respuestas directas, no solo enlaces
+
+**Contras:**
+- Requiere clave API (mas costoso)
+- Formato de salida diferente
+- Puede ser excesivo para busquedas simples
+
+**Mejor para:** Tareas de investigacion, respuestas completas
+</Tab>
+</Tabs>
+
+## Solucion de Problemas
+
+### "DuckDuckGo devolvio la pagina principal en lugar de resultados de busqueda"
+
+Esto significa que la deteccion anti-bot se activo. Intenta:
+
+1. Reducir la frecuencia de busqueda
+2. Agregar retrasos entre busquedas
+3. Considerar rotar user agents
+
+### "curl: command not found"
+
+Instala curl:
+
+```bash
+apt install curl -y  # Ubuntu/Debian
+```
+
+### Los Resultados Estan Vacios
+
+Revisa la estructura HTML - DuckDuckGo puede haber cambiado el diseno de su pagina. El analizador busca:
+- Enlaces con clase `result__a`
+- Snippets con clase `result__snippet`
+
+### Errores de Compilacion TypeScript
+
+Asegurate de haber agregado todas las definiciones de tipo e importado `execFileSync` correctamente:
+
+```typescript
+const { execFileSync } = await import("child_process");
+```
+
+<Accordion label="Preguntas Frecuentes" group="faq" expanded="true">
+
+**Por que usar curl en lugar de fetch?**
+
+El endpoint HTML de DuckDuckGo funciona mejor con los encabezados y comportamiento predeterminado de curl. El fetch de Node puede activar respuestas diferentes. Curl tambien es mas probable que este en cache y sea eficiente.
+
+**Puedo usar tanto Brave como DuckDuckGo?**
+
+Si! Cambia proveedores en tu configuracion en cualquier momento, o modifica el codigo para soportar proveedores de respaldo.
+
+**Es esto contra los Terminos de Servicio de DuckDuckGo?**
+
+Esto usa su busqueda HTML publica, que es accesible para cualquiera. Para uso comercial pesado, considera su API oficial o usa Brave Search en su lugar.
+
+**Como vuelvo a Brave?**
+
+Solo cambia el proveedor en tu configuracion:
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "provider": "brave",
+        "apiKey": "YOUR_BRAVE_API_KEY"
+      }
+    }
+  }
+}
+```
+
+**Funcionara con futuras versiones de OpenClaw?**
+
+La implementacion puede necesitar actualizaciones si OpenClaw cambia su arquitectura de busqueda web. Vigila el repositorio oficial por cambios en `web-search.ts`.
+
+</Accordion>
+
+Agregar DuckDuckGo a OpenClaw te da una opcion de busqueda gratuita y enfocada en privacidad sin gestion de claves API. Es perfecto para uso personal y pruebas. Para despliegues de produccion o equipos, Brave Search con su API oficial sigue siendo la opcion recomendada.
+
+Para mas consejos de OpenClaw, ve nuestra [Guia de Configuracion de OpenClaw](/es/guia-configuracion-openclaw/) completa y [alternativas a OpenClaw](/es/alternativas-openclaw/).

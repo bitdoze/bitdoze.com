@@ -18,6 +18,22 @@ const fuseConfig = {
 };
 
 const readyStates = new Set(["interactive", "complete"]);
+const searchLocale = window.location.pathname.startsWith("/es/") ? "es" : "en";
+const localePrefix = searchLocale === "es" ? "/es" : "";
+const searchCopy =
+  searchLocale === "es"
+    ? {
+        noResultsFor: "No se encontraron resultados para",
+        found: "Se encontraron",
+        for: "para",
+        resultsSuffix: "resultados",
+      }
+    : {
+        noResultsFor: "No results found for",
+        found: "Found",
+        for: "for",
+        resultsSuffix: "result",
+      };
 
 const ensureSearchData = async (searchResults, options = {}) => {
   const showSpinner = options.showSpinner ?? true;
@@ -30,7 +46,8 @@ const ensureSearchData = async (searchResults, options = {}) => {
     searchResults.innerHTML = SPINNER;
   }
 
-  const response = await fetch("/search.json", { cache: "force-cache" });
+  const endpoint = searchLocale === "es" ? "/es/search.json" : "/search.json";
+  const response = await fetch(endpoint, { cache: "force-cache" });
   if (!response.ok) {
     throw new Error("Failed to fetch search data");
   }
@@ -59,13 +76,17 @@ const displayResults = (results, query, searchResults, noResults, searchInfo) =>
   if (!results.length) {
     searchResults.classList.add("hidden");
     noResults.classList.remove("hidden");
-    searchInfo.textContent = query ? `No results found for '${query}'` : "";
+    searchInfo.textContent = query ? `${searchCopy.noResultsFor} '${query}'` : "";
     return;
   }
 
   searchResults.classList.remove("hidden");
   noResults.classList.add("hidden");
-  searchInfo.textContent = `Found ${results.length} result${results.length === 1 ? "" : "s"} for '${query}'`;
+  const suffix =
+    searchLocale === "es"
+      ? searchCopy.resultsSuffix
+      : `${searchCopy.resultsSuffix}${results.length === 1 ? "" : "s"}`;
+  searchInfo.textContent = `${searchCopy.found} ${results.length} ${suffix} ${searchCopy.for} '${query}'`;
 
   results.forEach(({ item: post }) => {
     const article = document.createElement("article");
@@ -110,7 +131,7 @@ const displayResults = (results, query, searchResults, noResults, searchInfo) =>
                 .slice(0, 3)
                 .map(
                   (tag) => `
-                  <a href="/tags/${tag.toLowerCase()}/" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-xs hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors duration-300">
+                  <a href="${localePrefix}/tags/${tag.toLowerCase()}/" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-xs hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors duration-300">
                     #${tag}
                   </a>
                 `

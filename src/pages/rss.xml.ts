@@ -3,9 +3,10 @@ import type { APIContext } from 'astro';
 import { getCollection } from 'astro:content';
 import { siteConfig } from '@config/site';
 import { getEntryHref } from '@utils/content';
+import { isPostIdInLocale } from '@utils/i18n';
 
 export async function GET(context: APIContext) {
-  const posts = await getCollection('posts');
+  const posts = await getCollection('posts', ({ id, data }) => !data.draft && isPostIdInLocale(id, 'en'));
   
   // Sort posts by date (newest first)
   const sortedPosts = posts.sort((a, b) => {

@@ -1,10 +1,11 @@
 import { getCollection } from 'astro:content';
 import { formatDate } from '@utils/date';
 import { getEntrySlug } from '@utils/content';
+import { isPostIdInLocale } from '@utils/i18n';
 
 export async function GET() {
   // Get all posts
-  const posts = await getCollection('posts');
+  const posts = await getCollection('posts', ({ id, data }) => !data.draft && isPostIdInLocale(id, 'en'));
 
   // Format posts for search
   const searchData = posts.map(post => {

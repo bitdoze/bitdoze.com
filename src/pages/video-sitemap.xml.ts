@@ -61,7 +61,7 @@ const extractVideosFromBody = (
 };
 
 export async function GET(context: APIContext) {
-  const posts = await getCollection("posts");
+  const posts = await getCollection("posts", ({ data }) => !data.draft);
   const site = context.site || siteConfig.url;
 
   const urlEntries = posts
