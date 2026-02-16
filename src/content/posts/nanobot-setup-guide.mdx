@@ -1,0 +1,753 @@
+---
+date: 2026-02-16T00:00:00Z
+title: "NanoBot Setup Guide: MiniMax M2.5, GLM-5, and Brave Search on Your VPS"
+description: "Step-by-step guide to installing nanobot on a Linux VPS with MiniMax M2.5, GLM-5 (Zhipu), Discord integration, and Brave Search. Covers config, providers, memory, and Docker deployment."
+image: "../../assets/images/26/02/nanobot-setup-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "vps"]
+canonical: "https://www.bitdoze.com/nanobot-setup-guide/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+I've been testing [nanobot](https://github.com/HKUDS/nanobot) for the past week alongside my [OpenClaw setup](/clawdbot-setup-guide/). The pitch is simple: a personal AI assistant in about 3,700 lines of Python that connects to Telegram, Discord, WhatsApp, Slack, and a bunch of other chat platforms. What got me interested was how quick the setup is compared to OpenClaw, and how well it works with cheaper LLM providers like MiniMax and Zhipu's GLM-5.
+
+This guide walks through getting nanobot running on a VPS with MiniMax M2.5 and GLM-5 as your models, Brave Search for web access, and Discord as the chat channel.
+
+<Button text="NanoBot GitHub" link="https://github.com/HKUDS/nanobot" variant="solid" color="blue" size="md" icon="github" />
+
+<Notice type="info" title="What this guide covers">
+<ListCheck>
+<ul>
+<li>Installing nanobot via pip, uv, or Docker</li>
+<li>Configuring MiniMax M2.5 and Zhipu GLM-5 as LLM providers</li>
+<li>Setting up Brave Search for web access</li>
+<li>Discord channel integration</li>
+<li>Memory system, workspace files, and MCP support</li>
+<li>Security settings and scheduled tasks</li>
+</ul>
+</ListCheck>
+</Notice>
+
+If you're looking at multiple self-hosted bot options, our [OpenClaw alternatives](/openclaw-alternatives/) roundup compares nanobot against NanoClaw, memU, PicoClaw, and others. For MCP basics, check the [MCP introduction for beginners](/mcp-introduction-beginners/).
+
+## What nanobot actually is
+
+nanobot is an open-source project from HKUDS (University of Hong Kong). It's an AI assistant that runs on your server and talks to you through whatever chat app you prefer. The whole thing is about 3,700 lines of Python, compared to OpenClaw's 430k+.
+
+The architecture is straightforward:
+
+```
+You (Discord / Telegram / WhatsApp / Slack / etc.)
+    ↓
+nanobot Gateway (running on your VPS)
+    ↓
+LLM Provider (MiniMax, Zhipu, OpenRouter, Anthropic, etc.)
+    ↓
+Tools (file access, shell commands, web search, MCP servers)
+```
+
+Messages come in from your chat app, nanobot sends them to whatever LLM you configured, and the model can use tools (run shell commands, read/write files, search the web) to get things done. Everything except the LLM API calls stays on your machine.
+
+## Why MiniMax M2.5 and GLM-5
+
+Both of these models dropped in February 2026 and they're worth paying attention to for self-hosted bot setups.
+
+### MiniMax M2.5
+
+MiniMax M2.5 is a 230B Mixture-of-Experts model with only 10B active parameters per pass. In practice, that means it runs fast and cheap:
+
+| Spec | Value |
+|------|-------|
+| Architecture | 230B MoE, 10B active |
+| Context window | 1M tokens |
+| Speed (Lightning) | 100 tokens/sec |
+| Cost (Lightning) | $0.30/M input, $2.40/M output |
+| SWE-Bench Verified | 80.2% |
+| License | Modified MIT (open-source) |
+
+It scores 80.2% on SWE-Bench Verified, matching Claude Opus 4.6 at roughly 1/20th the cost. The 1M token context window is overkill for most chat interactions, but it means nanobot won't run into context limits even with long conversations and large files.
+
+MiniMax has two API platforms. The global one at `platform.minimax.io` and a mainland China one at `minimaxi.com`. nanobot supports both.
+
+### GLM-5
+
+GLM-5 from Zhipu AI is a 744B MoE model with 40-44B active parameters. It's beefier than MiniMax but still efficient because of the sparse architecture:
+
+| Spec | Value |
+|------|-------|
+| Architecture | 744B MoE, ~40B active |
+| Context window | 200K tokens |
+| SWE-Bench Verified | 77.8% |
+| BrowseComp | #1 open-source |
+| License | MIT |
+
+GLM-5 ranks first among open-source models on BrowseComp (web search agent tasks), which makes it a solid choice for a bot that needs to find things online. The 200K context window handles most workloads comfortably.
+
+Both models are available through their respective APIs and through OpenRouter if you want a single gateway.
+
+## Installation
+
+Three ways to get nanobot installed. Pick whatever fits your workflow.
+
+<Tabs>
+<Tab name="pip">
+
+The simplest path. Requires Python 3.11+.
+
+```bash
+pip install nanobot-ai
+```
+
+</Tab>
+<Tab name="uv (recommended)">
+
+Faster package management with [uv](/uv-get-start/). This is what I use.
+
+```bash
+uv tool install nanobot-ai
+```
+
+</Tab>
+<Tab name="From source">
+
+If you want the latest features or plan to modify the code:
+
+```bash
+git clone https://github.com/HKUDS/nanobot.git
+cd nanobot
+pip install -e .
+```
+
+</Tab>
+</Tabs>
+
+After installing, initialize the workspace and config:
+
+```bash
+nanobot onboard
+```
+
+This creates the `~/.nanobot/` directory with a default `config.json` and a `workspace/` folder for memory, skills, and bootstrap files.
+
+Check that everything's working:
+
+```bash
+nanobot status
+```
+
+## Configuring MiniMax M2.5
+
+The config lives at `~/.nanobot/config.json`. All changes go there. nanobot uses a provider registry system internally, so you just need to set your API key and model name.
+
+### Get an API key
+
+1. Go to [platform.minimax.io](https://platform.minimax.io) (global) or [minimaxi.com](https://www.minimaxi.com) (mainland China)
+2. Create an account and generate an API key
+3. Note which platform you're on, because the API base URL differs
+
+<Notice type="success" title="MiniMax coding plan — 10% off">
+MiniMax offers coding plans priced for developer workloads. [Get 10% off with our referral link](https://go.bitdoze.com/minimax). For details on how GLM-5 and MiniMax M2.5 compare for always-on bots, see our [best open source models for OpenClaw](/best-opensource-models-for-openclaw/) breakdown.
+</Notice>
+
+### Add to config
+
+For the global platform:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "your-minimax-api-key"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.5"
+    }
+  }
+}
+```
+
+For the mainland China platform, add the `apiBase` override:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "your-minimax-api-key",
+      "apiBase": "https://api.minimaxi.com/v1"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.5"
+    }
+  }
+}
+```
+
+nanobot automatically prefixes the model name for LiteLLM routing. When you set `"model": "MiniMax-M2.5"`, it becomes `minimax/MiniMax-M2.5` internally. You don't need to add the prefix yourself.
+
+### Test it
+
+```bash
+nanobot agent -m "What's 42 * 17?"
+```
+
+If you get a response, MiniMax is wired up correctly.
+
+## Configuring GLM-5 (Zhipu)
+
+GLM-5 goes through Zhipu's API. nanobot has built-in support for it.
+
+### Get an API key
+
+1. Go to [z.ai](https://z.ai/manage-apikey/apikey-list)
+2. Register and create an API key
+
+<Notice type="success" title="Z.AI GLM coding plan — 10% off">
+Z.AI offers [GLM coding plans](https://z.ai/subscribe?ic=NKNUNYDRZT) designed for continuous developer workloads. Use our link for 10% off.
+</Notice>
+
+<Notice type="info" title="Zhipu coding plan endpoint">
+If you're on Zhipu's coding plan, set `"apiBase": "https://api.z.ai/api/coding/paas/v4"` in your zhipu provider config. This routes through their coding-optimized endpoint.
+</Notice>
+
+### Add to config
+
+```json
+{
+  "providers": {
+    "zhipu": {
+      "apiKey": "your-zhipu-api-key",
+       "apiBase": "https://api.z.ai/api/coding/paas/v4"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "glm-5"
+    }
+  }
+}
+```
+
+nanobot detects the `glm` keyword in the model name and routes it to Zhipu automatically. Internally it adds the `zai/` prefix for LiteLLM, so `glm-5` becomes `zai/glm-5`.
+
+### Switching between models
+
+You don't have to pick one. Configure both providers and swap the default model whenever you want:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "your-minimax-key"
+    },
+    "zhipu": {
+      "apiKey": "your-zhipu-key"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "glm-5"
+    }
+  }
+}
+```
+
+Change `"model"` to `"MiniMax-M2.5"` when you want to switch. No restart needed if you're using the CLI. For the gateway, restart with `nanobot gateway`.
+
+## Setting up Brave Search
+
+Without web search, your bot can only work with what the model already knows and whatever's on your server. Brave Search gives it access to the live web.
+
+### Get a Brave API key
+
+1. Go to [brave.com/search/api](https://brave.com/search/api/)
+2. Sign up for an account
+3. The free tier gives you about 1,000 searches per month ($5 in monthly credits)
+4. Generate an API key from the dashboard
+
+### Add to config
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "your-brave-search-api-key",
+        "maxResults": 5
+      }
+    }
+  }
+}
+```
+
+The `maxResults` setting controls how many results nanobot pulls per search. Five is a reasonable default. Lower it to 3 if you want faster responses, bump it to 10 if you need more thorough research.
+
+### How it works
+
+Once configured, nanobot's LLM can call the web search tool whenever it needs current information. Ask your bot something like "what happened in tech news today" and it'll hit Brave's API, pull results, and summarize them.
+
+The free tier's 1,000 queries per month is enough for casual use. If you're running the bot for a team or heavy daily use, the paid plans start at $5/month for 2,000 queries.
+
+## Discord setup
+
+Discord works well for personal and team bot setups. Here's how to connect nanobot to it.
+
+### Create a Discord bot
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Click **New Application**, give it a name
+3. Go to **Bot** in the left sidebar, click **Add Bot**
+4. Copy the bot token
+
+### Enable intents
+
+Still in the Bot settings page:
+
+1. Scroll down to **Privileged Gateway Intents**
+2. Enable **MESSAGE CONTENT INTENT** (required, or the bot can't read messages)
+3. Optionally enable **SERVER MEMBERS INTENT** if you plan to use allow lists
+
+### Get your user ID
+
+1. Open Discord Settings, go to **Advanced**, enable **Developer Mode**
+2. Right-click your avatar anywhere in Discord
+3. Click **Copy User ID**
+
+### Configure nanobot
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_DISCORD_BOT_TOKEN",
+      "allowFrom": ["YOUR_USER_ID"]
+    }
+  }
+}
+```
+
+The `allowFrom` array restricts who can talk to the bot. Leave it empty to let anyone in your server use it, or add specific user IDs to lock it down. I'd keep it restricted unless you want every server member chatting with your bot.
+
+### Invite the bot to your server
+
+1. In the Discord developer portal, go to **OAuth2** then **URL Generator**
+2. Under **Scopes**, check `bot`
+3. Under **Bot Permissions**, check `Send Messages` and `Read Message History`
+4. Copy the generated URL and open it in your browser
+5. Select the server you want to add the bot to
+
+### Start the gateway
+
+```bash
+nanobot gateway
+```
+
+Send a message in Discord. The bot should respond. If nothing happens, check `nanobot status` and look at the gateway logs.
+
+## Full config example
+
+Here's what a complete `~/.nanobot/config.json` looks like with MiniMax M2.5, GLM-5 as a second provider, Brave Search, and Discord:
+
+```json
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "your-minimax-api-key"
+    },
+    "zhipu": {
+      "apiKey": "your-zhipu-api-key"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "MiniMax-M2.5",
+      "workspace": "~/.nanobot/workspace",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 20,
+      "memoryWindow": 50
+    }
+  },
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_DISCORD_BOT_TOKEN",
+      "allowFrom": ["YOUR_USER_ID"]
+    }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "your-brave-search-api-key",
+        "maxResults": 5
+      }
+    },
+    "exec": {
+      "timeout": 60
+    },
+    "restrictToWorkspace": false
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  }
+}
+```
+
+### Config settings explained
+
+| Setting | Default | What it does |
+|---------|---------|-------------|
+| `agents.defaults.model` | `anthropic/claude-opus-4-5` | Which model handles your messages |
+| `agents.defaults.maxTokens` | `8192` | Max tokens per LLM response |
+| `agents.defaults.temperature` | `0.7` | Randomness (lower = more deterministic) |
+| `agents.defaults.maxToolIterations` | `20` | How many tool calls per turn before stopping |
+| `agents.defaults.memoryWindow` | `50` | Number of past messages kept in context |
+| `tools.exec.timeout` | `60` | Shell command timeout in seconds |
+| `tools.restrictToWorkspace` | `false` | When true, all file/shell access is sandboxed to workspace |
+| `gateway.port` | `18790` | Port the gateway listens on |
+
+## How the provider system works
+
+nanobot uses a provider registry that automatically routes your model name to the right API. When you set a model like `glm-5`, nanobot:
+
+1. Scans the model name for keywords (`glm` matches `zhipu`)
+2. Checks if the matched provider has an API key configured
+3. Adds the correct prefix for LiteLLM routing (`zai/glm-5`)
+4. Sets environment variables the LLM library expects
+
+If the model name doesn't match any provider, nanobot falls back to the first provider that has an API key. Gateways (like OpenRouter) get fallback priority since they can route any model.
+
+Here are the providers nanobot supports out of the box:
+
+| Provider | Keyword match | Use case |
+|----------|--------------|----------|
+| `openrouter` | `openrouter` | Gateway to any model |
+| `anthropic` | `anthropic`, `claude` | Claude models |
+| `openai` | `openai`, `gpt` | GPT models |
+| `deepseek` | `deepseek` | DeepSeek models |
+| `gemini` | `gemini` | Google Gemini |
+| `zhipu` | `zhipu`, `glm`, `zai` | GLM models |
+| `minimax` | `minimax` | MiniMax models |
+| `moonshot` | `moonshot`, `kimi` | Kimi models |
+| `dashscope` | `qwen`, `dashscope` | Qwen models |
+| `groq` | `groq` | Groq (also handles Whisper voice transcription) |
+| `vllm` | `vllm` | Local models via vLLM |
+| `openai_codex` | `openai-codex`, `codex` | Codex via OAuth |
+| `custom` | — | Any OpenAI-compatible endpoint |
+
+You can configure multiple providers at once. nanobot picks the right one based on the model name you set.
+
+## Memory system
+
+nanobot stores memory in two files inside the workspace:
+
+| File | Purpose |
+|------|---------|
+| `~/.nanobot/workspace/memory/MEMORY.md` | Long-term facts the bot remembers |
+| `~/.nanobot/workspace/memory/HISTORY.md` | Searchable log of past interactions |
+
+Tell the bot to remember something and it writes to `MEMORY.md`. It can also grep through `HISTORY.md` to find past conversations. Both files are plain Markdown, so you can edit them directly.
+
+### Workspace bootstrap files
+
+The workspace also has bootstrap files that shape how the bot behaves:
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Agent configuration and instructions |
+| `SOUL.md` | Personality and behavior rules |
+| `USER.md` | Your personal info and preferences |
+| `TOOLS.md` | Tool usage instructions |
+| `IDENTITY.md` | Bot identity overrides |
+
+These get loaded into the system prompt every time the bot processes a message. Edit `USER.md` to tell the bot about yourself, your work, your preferences. Edit `SOUL.md` to change how it communicates.
+
+```bash
+nano ~/.nanobot/workspace/USER.md
+```
+
+Add whatever context you want the bot to always have. For me, that's project details, preferred communication style, and a few technical preferences.
+
+## MCP support
+
+nanobot supports [Model Context Protocol](/mcp-introduction-beginners/) for connecting external tool servers. The config format is the same as Claude Desktop and Cursor, so you can copy MCP server configs from any MCP server's README.
+
+### Adding an MCP server
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents"]
+      }
+    }
+  }
+}
+```
+
+Two transport modes work:
+
+| Mode | Config fields | Example |
+|------|--------------|---------|
+| Stdio | `command` + `args` | Local process via `npx` or `uvx` |
+| HTTP | `url` | Remote endpoint like `https://mcp.example.com/sse` |
+
+MCP tools get discovered and registered automatically when nanobot starts. The LLM can use them alongside built-in tools without any extra setup.
+
+## Docker deployment
+
+If you prefer containers, nanobot has a Dockerfile that bundles Python 3.12 and Node.js 20 (needed for the WhatsApp bridge).
+
+```bash
+# Build
+docker build -t nanobot .
+
+# Initialize config (first time)
+docker run -v ~/.nanobot:/root/.nanobot --rm nanobot onboard
+
+# Edit config on host
+nano ~/.nanobot/config.json
+
+# Run gateway
+docker run -d \
+  -v ~/.nanobot:/root/.nanobot \
+  -p 18790:18790 \
+  --name nanobot \
+  nanobot gateway
+```
+
+The `-v ~/.nanobot:/root/.nanobot` mount keeps your config and workspace data on the host, so it survives container restarts.
+
+For a quick test without the gateway:
+
+```bash
+docker run -v ~/.nanobot:/root/.nanobot --rm nanobot agent -m "Hello!"
+```
+
+## Scheduled tasks
+
+nanobot has a cron system for recurring tasks. You manage jobs from the CLI:
+
+```bash
+# Add a job that runs every morning at 9am
+nanobot cron add --name "morning" --message "Good morning! What's on my calendar today?" --cron "0 9 * * *"
+
+# Add a job that runs every hour
+nanobot cron add --name "check" --message "Check server disk usage" --every 3600
+
+# List all jobs
+nanobot cron list
+
+# Remove a job
+nanobot cron remove <job_id>
+```
+
+The bot processes these messages through the same LLM pipeline as regular chat. If you have Brave Search configured, your morning briefing can include live news and weather.
+
+## Security settings
+
+Two settings to pay attention to for production use:
+
+### Workspace restriction
+
+```json
+{
+  "tools": {
+    "restrictToWorkspace": true
+  }
+}
+```
+
+When enabled, the bot can only read and write files inside `~/.nanobot/workspace/`, and shell commands are limited to that directory. This prevents the LLM from wandering around your server. I'd turn this on if the bot is accessible to multiple people.
+
+### Channel allowlists
+
+Every channel config has an `allowFrom` field:
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "...",
+      "allowFrom": ["123456789"]
+    }
+  }
+}
+```
+
+Empty `allowFrom` means anyone can interact. Add user IDs to restrict access. For a personal bot, always set this.
+
+## CLI reference
+
+| Command | What it does |
+|---------|-------------|
+| `nanobot onboard` | Initialize config and workspace |
+| `nanobot agent -m "..."` | Send a single message |
+| `nanobot agent` | Interactive chat mode |
+| `nanobot agent --no-markdown` | Plain-text output |
+| `nanobot agent --logs` | Show runtime logs during chat |
+| `nanobot gateway` | Start the gateway (connects to chat channels) |
+| `nanobot status` | Show current status |
+| `nanobot provider login openai-codex` | OAuth login for Codex |
+| `nanobot channels login` | Link WhatsApp (QR scan) |
+| `nanobot channels status` | Show channel connection status |
+| `nanobot cron list` | List scheduled jobs |
+| `nanobot cron add` | Add a scheduled job |
+| `nanobot cron remove <id>` | Remove a scheduled job |
+
+In interactive mode, type `exit`, `quit`, `/exit`, `/quit`, `:q`, or press `Ctrl+D` to leave.
+
+## VPS hosting
+
+A small VPS handles nanobot without issues. I'm running it on a [Hetzner CX22](/hetzner-cloud-review/) (2 vCPU, 4GB RAM) at €4.35/month. Python memory usage is modest compared to OpenClaw's Node.js stack.
+
+<Notice type="success" title="Hetzner discount">
+[Get €20 credit](https://go.bitdoze.com/hetzner) when you sign up through our referral link. That covers around 4 months of a CX22.
+</Notice>
+
+Quick setup on a fresh Ubuntu 24.04 VPS:
+
+<Tabs>
+<Tab name="uv (recommended)">
+
+```bash
+ssh root@YOUR_SERVER_IP
+
+# Update system
+apt update && apt upgrade -y
+
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+
+# Install nanobot
+uv tool install nanobot-ai
+
+# Initialize
+nanobot onboard
+
+# Edit config
+nano ~/.nanobot/config.json
+
+# Start gateway in background
+nohup nanobot gateway > /var/log/nanobot.log 2>&1 &
+```
+
+</Tab>
+<Tab name="pip">
+
+```bash
+ssh root@YOUR_SERVER_IP
+
+# Install Python 3.12 and pip
+apt update && apt upgrade -y
+apt install -y python3 python3-pip python3-venv
+
+# Install nanobot
+pip install nanobot-ai
+
+# Initialize
+nanobot onboard
+
+# Edit config
+nano ~/.nanobot/config.json
+
+# Start gateway in background
+nohup nanobot gateway > /var/log/nanobot.log 2>&1 &
+```
+
+</Tab>
+</Tabs>
+
+For a proper daemon setup, create a systemd service:
+
+```ini
+[Unit]
+Description=nanobot gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nanobot gateway
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save that to `/etc/systemd/system/nanobot.service`, then:
+
+```bash
+systemctl daemon-reload
+systemctl enable nanobot
+systemctl start nanobot
+```
+
+If you want to run local models alongside nanobot, check our guide on [installing Ollama with Docker](/ollama-docker-install/). nanobot's vLLM provider works with any OpenAI-compatible endpoint, so you can point it at a local Ollama or vLLM server.
+
+## nanobot vs OpenClaw
+
+I run both, so here's a frank comparison:
+
+| Aspect | nanobot | OpenClaw |
+|--------|---------|----------|
+| Codebase size | ~3,700 lines | 430k+ lines |
+| Install method | `pip install` | Custom installer script |
+| Setup time | ~5 minutes | ~20 minutes |
+| Channel support | 9 platforms | 4 platforms |
+| Memory system | File-based (MEMORY.md) | File-based + semantic search |
+| Provider support | 13+ built-in | Several with OAuth options |
+| Skills system | Markdown-based, loaded from workspace | Registry with community sharing |
+| MCP support | Yes | Not yet |
+| Resource usage | Lower (Python, ~100MB RAM) | Higher (Node.js, >1GB RAM) |
+
+OpenClaw has a more polished setup wizard and the OAuth flow for using existing Claude/ChatGPT subscriptions is nice. nanobot is leaner, installs faster, and supports more chat platforms. For details on OpenClaw, see our [full setup guide](/clawdbot-setup-guide/).
+
+For other alternatives, check our [OpenClaw alternatives](/openclaw-alternatives/) roundup. If you want to build something more custom with multi-agent teams, look at our [AI agent Discord bot guide](/create-your-own-ai-agent/) using the Agno framework.
+
+<Accordion label="Frequently asked questions" group="faq" expanded="true">
+
+**How much does it cost to run nanobot?**
+
+VPS: ~$5/month at Hetzner. MiniMax M2.5 Lightning API: roughly $1/hour of continuous use, but real-world costs are much lower since the bot only calls the API when you message it. Expect $5-20/month for personal use depending on how chatty you are.
+
+**Can I use nanobot without any API costs?**
+
+Yes. Configure the vLLM provider and point it at a local model server running Ollama or vLLM. You'll need hardware that can run inference, but there are no API bills.
+
+**Does nanobot work on a Raspberry Pi?**
+
+It runs, but performance depends on your model choice. With a remote API provider (MiniMax, Zhipu), a Pi 4 with 4GB RAM handles the gateway fine. Running local models on a Pi is a different story.
+
+**Can multiple people use one nanobot instance?**
+
+Yes. Add multiple user IDs to `allowFrom` in your channel config. Each person gets their own conversation context through the session system.
+
+**What's the difference between the agent and gateway commands?**
+
+`nanobot agent` is for direct CLI chat. `nanobot gateway` starts the background service that connects to Discord, Telegram, and other chat platforms. For 24/7 use, you want the gateway.
+
+**Can I add Telegram alongside Discord?**
+
+Absolutely. Configure both channels in the same config file and the gateway handles them simultaneously. See the [OpenClaw setup guide](/clawdbot-setup-guide/) for detailed Telegram bot creation steps since the BotFather flow is identical.
+
+</Accordion>
+
+If you want to explore other AI coding tools that pair well with self-hosted bots, our [AI coding tools comparison](/ai-coading-tools/) covers the current landscape. For running agents with Python frameworks, check the [Agno getting started guide](/agno-get-start/).
