@@ -1,0 +1,346 @@
+---
+date: 2026-02-17T00:00:00Z
+title: "Pinchtab: Control del Navegador vía HTTP para Agentes de IA"
+description: "Pinchtab es un binario Go de 12MB que da a cualquier agente de IA control del navegador a través de una API HTTP simple usando árboles de accesibilidad. Sin configuración, agnóstico al framework, y mucho más barato que las capturas de pantalla."
+image: "@assets/images/26/02/pinchtab-browser-ai-agents.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-agents", "browser-automation", "pinchtab"]
+---
+
+import Notice from "@components/widgets/Notice.astro";
+
+Si has intentado darle a un agente de IA acceso al navegador, ya conoces el problema. Playwright MCP te ata a Node. Browser Use necesita Python. El backend de navegador de OpenClaw solo funciona dentro de su propio ecosistema. Cambia de agente, o intenta hacer una solicitud curl rápida para inspeccionar una página, y tendrás que reescribir la integración desde cero.
+
+[Pinchtab](https://github.com/pinchtab/pinchtab) toma un enfoque diferente: es simplemente un servidor HTTP. Un binario Go de 12MB sin Node, sin Python, sin dependencias. Lanza su propio Chrome y expone todo—navegación, clics, relleno de formularios, capturas de pantalla, snapshots de accesibilidad—a través de una API REST simple. Cualquier agente que uses habla HTTP, y esa es toda la historia de integración.
+
+## Por qué árboles de accesibilidad en lugar de capturas de pantalla
+
+La mayoría de la gente recurre primero a las capturas de pantalla porque es obvio: toma una foto, envíala a un modelo de visión, listo. El problema es el costo. Una tarea de 10 pasos usando capturas de pantalla cuesta alrededor de $0.06. La misma tarea con árboles de accesibilidad cuesta aproximadamente $0.015.
+
+La diferencia real aparece a escala. Ejecuta esa misma tarea 1,000 veces y las capturas de pantalla cuestan $60; los árboles de accesibilidad cuestan $15. Ejecuta un trabajo de monitoreo de 50 páginas:
+
+| Método | ~Tokens | Costo est. |
+|--------|---------|-----------|
+| Capturas de pantalla (visión) | ~100,000 | $0.30 |
+| Snapshot completo de a11y | ~525,000 | $0.16 |
+| Pinchtab `?filter=interactive` | ~180,000 | $0.05 |
+| Pinchtab `/text` | ~40,000 | $0.01 |
+
+El endpoint `/text` de Pinchtab extrae contenido legible a aproximadamente 800 tokens por página usando la biblioteca Readability de Mozilla (lo mismo que hay detrás de Firefox Reader View). Eso es 5 veces más barato que un snapshot completo de accesibilidad y 13 veces más barato que las capturas de pantalla. Para trabajo intensivo de lectura, la diferencia se acumula rápidamente.
+
+También hay un argumento de fiabilidad. Los modelos de visión adivinan coordenadas a partir de píxeles. Los árboles de accesibilidad te dan referencias de nodo estables (`e0`, `e1`, `e2`...) vinculadas a los elementos DOM reales. Haz clic en `e5` y acertarás en el botón correcto, independientemente de cómo se renderice la página.
+
+## La API completa
+
+Pinchtab cubre más que la navegación y los clics básicos:
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| `GET` | `/health` | Verifica si el servidor y Chrome responden |
+| `GET` | `/tabs` | Lista todas las pestañas abiertas con sus IDs |
+| `GET` | `/snapshot` | Árbol de accesibilidad como JSON o texto |
+| `GET` | `/screenshot` | Captura de pantalla JPEG con control de calidad |
+| `GET` | `/text` | Texto legible de la página (Readability o innerText sin procesar) |
+| `POST` | `/navigate` | Ir a una URL en una pestaña |
+| `POST` | `/action` | Clic, escribir, rellenar, presionar, enfocar, hover, seleccionar, desplazar |
+| `POST` | `/evaluate` | Ejecutar JavaScript arbitrario |
+| `POST` | `/tab` | Abrir o cerrar pestañas |
+| `POST` | `/tab/lock` | Bloquear una pestaña para acceso exclusivo del agente |
+| `POST` | `/tab/unlock` | Liberar el bloqueo de una pestaña |
+| `POST` | `/cookies` | Inyectar cookies de sesión programáticamente |
+
+El endpoint `/tab/lock` vale la pena mencionar si ejecutas múltiples agentes a la vez. Un agente bloquea una pestaña, hace su trabajo, la desbloquea. Sin escrituras en competencia en el mismo contexto del navegador.
+
+### Parámetros de consulta del snapshot
+
+El endpoint de snapshot tiene varias opciones que reducen el uso de tokens significativamente:
+
+```bash
+# Solo elementos interactivos — ~75% menos nodos
+curl "localhost:9867/snapshot?filter=interactive"
+
+# Formato compacto de una línea por nodo — 56-64% menos tokens que JSON
+curl "localhost:9867/snapshot?format=compact"
+
+# Solo cambios desde el último snapshot
+curl "localhost:9867/snapshot?diff=true"
+
+# Limitar a una sección específica de la página
+curl "localhost:9867/snapshot?selector=main"
+
+# Limitar la salida a aproximadamente N tokens
+curl "localhost:9867/snapshot?maxTokens=2000"
+```
+
+Combinar `filter=interactive` con `format=compact` te da el payload más pequeño posible para tareas orientadas a acciones. Usa `diff=true` para páginas que se actualizan incrementalmente—sondeando un dashboard en vivo, por ejemplo—para que solo envíes lo que realmente cambió.
+
+### Acciones similares a las humanas
+
+Más allá del clic y escritura estándar, Pinchtab tiene acciones `humanClick` y `humanType` que añaden retrasos realistas y patrones de movimiento. Útil cuando accedes a sitios con detección de bots de comportamiento que monitorea el tiempo de interacción.
+
+```bash
+curl -X POST localhost:9867/action \
+  -d '{"kind":"humanType","ref":"e12","text":"hola mundo"}'
+```
+
+## Configuración
+
+Toda la configuración se realiza a través de variables de entorno:
+
+| Variable | Por defecto | Descripción |
+|----------|---------|-------------|
+| `BRIDGE_PORT` | `9867` | Puerto HTTP |
+| `BRIDGE_TOKEN` | *(ninguno)* | Token Bearer para autenticación |
+| `BRIDGE_HEADLESS` | `false` | Ejecutar Chrome sin ventana |
+| `BRIDGE_STEALTH` | `light` | `light` (parche de webdriver) o `full` (spoofing de canvas/WebGL/fuentes) |
+| `BRIDGE_PROFILE` | `~/.pinchtab/chrome-profile` | Directorio del perfil de Chrome |
+| `BRIDGE_STATE_DIR` | `~/.pinchtab` | Almacenamiento de estado y sesión |
+| `BRIDGE_BLOCK_IMAGES` | `false` | Omitir descargas de imágenes |
+| `BRIDGE_BLOCK_MEDIA` | `false` | Bloquear imágenes, fuentes, CSS, video |
+| `BRIDGE_NO_ANIMATIONS` | `false` | Congelar animaciones CSS globalmente |
+| `BRIDGE_TIMEOUT` | `15` | Tiempo de espera de acción en segundos |
+| `BRIDGE_NAV_TIMEOUT` | `30` | Tiempo de espera de navegación en segundos |
+| `BRIDGE_TIMEZONE` | *(sistema)* | Zona horaria de Chrome (p.ej. `America/New_York`) |
+| `CDP_URL` | *(ninguno)* | Conectar a un Chrome existente en lugar de lanzar uno |
+| `CHROME_BINARY` | *(auto)* | Ruta a Chrome o Chromium |
+| `CHROME_FLAGS` | *(ninguno)* | Flags adicionales de lanzamiento de Chrome |
+
+`BRIDGE_BLOCK_MEDIA` es la versión agresiva—omite todo excepto HTML y JavaScript. Útil para scraping masivo donde la fidelidad de la página no importa. `BRIDGE_NO_ANIMATIONS` ayuda si estás tomando snapshots de páginas en medio de una animación y obtienes resultados inconsistentes.
+
+También puedes generar un archivo de configuración si prefieres JSON sobre variables de entorno:
+
+```bash
+pinchtab config init   # crea ~/.pinchtab/config.json
+pinchtab config show   # muestra la configuración efectiva actual
+```
+
+Las variables de entorno anulan el archivo de configuración, por lo que funciona bien junto con secretos de Docker o archivos `.env`.
+
+## Despliegue con Docker
+
+La forma más sencilla de ejecutar Pinchtab en un servidor. Chrome necesita `seccomp=unconfined` en un contenedor, que es la razón principal por la que querrías aislarlo del resto de tu stack.
+
+### Configuración básica de docker-compose
+
+```yaml
+# docker-compose.yml
+services:
+  pinchtab:
+    image: pinchtab/pinchtab:latest
+    container_name: pinchtab
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    mem_limit: 2g
+    cpus: "2.0"
+    environment:
+      - BRIDGE_PORT=9867
+      - BRIDGE_HEADLESS=true
+      - BRIDGE_STEALTH=full
+      - BRIDGE_TOKEN=${PINCHTAB_TOKEN}
+      - BRIDGE_BLOCK_IMAGES=true
+      - BRIDGE_NO_ANIMATIONS=true
+    volumes:
+      - pinchtab-data:/data
+    ports:
+      - "127.0.0.1:9867:9867"
+
+volumes:
+  pinchtab-data:
+```
+
+Algunas cosas a tener en cuenta. El binding de puerto `127.0.0.1:9867:9867` solo expone el servicio en localhost, no a la red. El límite de memoria importa: Chrome con pocas pestañas abiertas fácilmente usa 1-1.5GB. Configurar `BRIDGE_BLOCK_IMAGES=true` ayuda a mantener el uso de memoria más bajo si realizas tareas solo de contenido.
+
+### Detrás de un proxy inverso Caddy
+
+Si quieres exponer Pinchtab sobre HTTPS con un dominio:
+
+```yaml
+# docker-compose.yml
+services:
+  pinchtab:
+    image: pinchtab/pinchtab:latest
+    container_name: pinchtab
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    mem_limit: 2g
+    cpus: "2.0"
+    environment:
+      - BRIDGE_PORT=9867
+      - BRIDGE_HEADLESS=true
+      - BRIDGE_STEALTH=full
+      - BRIDGE_TOKEN=${PINCHTAB_TOKEN}
+      - BRIDGE_BLOCK_IMAGES=true
+    volumes:
+      - pinchtab-data:/data
+    networks:
+      - proxy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    driver: bridge
+
+volumes:
+  pinchtab-data:
+  caddy-data:
+  caddy-config:
+```
+
+```
+# Caddyfile
+pinchtab.tudominio.com {
+    reverse_proxy pinchtab:9867
+}
+```
+
+Caddy gestiona TLS automáticamente. Con `BRIDGE_TOKEN` configurado, las solicitudes necesitan un encabezado `Authorization: Bearer <token>`, por lo que la API no está abierta al público incluso con HTTPS.
+
+```bash
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  https://pinchtab.tudominio.com/health
+```
+
+<Notice type="info" title="Compilar desde fuente vs imagen precompilada">
+El `docker-compose.yml` oficial en el repositorio usa `build: .` que compila desde fuente. Si quieres la imagen precompilada, usa `image: pinchtab/pinchtab:latest` en su lugar. Consulta la [página de lanzamientos](https://github.com/pinchtab/pinchtab/releases) para ver las etiquetas disponibles.
+</Notice>
+
+## Consideraciones de seguridad y mitigaciones
+
+Pinchtab le da a un agente de IA control total de un navegador Chrome real, incluyendo cualquier cuenta en la que hayas iniciado sesión a través de ese navegador. El README es directo al respecto: "Piensa en Pinchtab como darle a alguien tu laptop desbloqueada." Esto es lo que eso significa en la práctica y cómo manejarlo.
+
+### Sin autenticación por defecto
+
+De fábrica, Pinchtab acepta solicitudes de cualquiera que pueda llegar al puerto 9867. En una red compartida o un servidor con IP pública, eso significa cualquiera.
+
+**Mitigación:** Siempre configura `BRIDGE_TOKEN`. Una vez configurado, cada solicitud necesita `Authorization: Bearer <token>` o recibe un 401. Trata este token como una contraseña—genera algo largo y aleatorio, guárdalo en una variable de entorno o gestor de secretos, nunca lo hardcodees.
+
+```bash
+# Generar un token
+openssl rand -hex 32
+```
+
+### Pinchtab se vincula a todas las interfaces
+
+Por defecto, el servidor escucha en `0.0.0.0`, no solo en localhost. En un servidor en la nube, esto significa que el puerto 9867 es alcanzable desde cualquier lugar si tu firewall lo permite.
+
+**Mitigación:** O vincula el puerto solo a localhost (como se muestra en el docker-compose anterior con `127.0.0.1:9867:9867`), o establece una regla de firewall que bloquee el acceso externo al puerto 9867. Usar un proxy inverso como Caddy o Nginx añade otra capa y te permite gestionar TLS correctamente.
+
+### El perfil de Chrome contiene sesiones activas
+
+Cuando inicias sesión en un sitio a través de la ventana Chrome de Pinchtab, esa sesión persiste en `~/.pinchtab/chrome-profile/`. Cookies, contraseñas guardadas, tokens de autenticación. Un agente con acceso a la API puede usar esas sesiones para actuar como tú en cualquier sitio en el que hayas iniciado sesión.
+
+**Mitigación:**
+- Usa un perfil de Chrome dedicado con solo las cuentas que tus agentes realmente necesitan
+- No inicies sesión con cuentas personales (correo, banca, redes sociales) en el perfil de Pinchtab a menos que específicamente necesites automatizarlas
+- Trata `~/.pinchtab/` como sensible y restringe los permisos de archivo: `chmod 700 ~/.pinchtab`
+- En Docker, usa un volumen nombrado y evita montarlo como solo lectura (Pinchtab necesita escribir estado), pero no lo montes donde sea accesible para otros contenedores
+
+### El requisito `seccomp=unconfined`
+
+Chrome necesita un perfil seccomp relajado para ejecutarse en un contenedor. Este es un privilegio real: elimina una capa de filtrado de syscall del kernel.
+
+**Mitigación:** Esto es más difícil de mitigar completamente sin construir un perfil seccomp personalizado para Chromium. El enfoque práctico es aislar el contenedor de Pinchtab—no lo ejecutes en la misma red que contenedores con acceso a bases de datos u otros servicios sensibles. Mantenlo en su propio segmento de red al que solo tu servicio de agente pueda llegar.
+
+### Modelo de confianza del agente
+
+Un agente con acceso a Pinchtab puede hacer cualquier cosa que un humano con ese navegador pueda hacer. Si tu agente toma instrucciones arbitrarias de usuarios o entradas externas, la inyección de prompts es una preocupación real: un sitio web malicioso podría incluir instrucciones en su contenido que engañen al agente para que tome acciones no deseadas.
+
+**Mitigación:**
+- Limita lo que tu agente puede hacer. Si solo necesita leer páginas, no le des capacidades de acción
+- Registra todas las llamadas a `/action` y `/navigate` para que puedas auditar lo que ocurrió
+- Considera ejecutar agentes contra un perfil aislado sin cuentas reales para entradas no confiables
+- Limita la tasa de tu endpoint de Pinchtab—añade limitación de tasa en Caddy o Nginx si lo expones a agentes externos
+
+<Notice type="warning" title="No omitas el token">
+Ejecutar Pinchtab sin `BRIDGE_TOKEN` en cualquier servidor conectado a internet es un riesgo serio. Cualquiera que encuentre el puerto tiene control total del navegador. Configura el token antes de cualquier otra cosa.
+</Notice>
+
+## Un flujo de trabajo típico de agente
+
+```python
+import httpx
+
+BASE = "http://localhost:9867"
+HEADERS = {"Authorization": "Bearer tu-token"}
+
+# Navegar a una página
+httpx.post(f"{BASE}/navigate", json={"url": "https://example.com"}, headers=HEADERS)
+
+# Obtener solo elementos interactivos para mantener bajos los tokens
+snapshot = httpx.get(f"{BASE}/snapshot?filter=interactive&format=compact", headers=HEADERS)
+refs = snapshot.json()
+
+# Hacer clic en un botón por su ref
+httpx.post(f"{BASE}/action", json={"kind": "click", "ref": "e5"}, headers=HEADERS)
+
+# Leer el resultado
+text = httpx.get(f"{BASE}/text", headers=HEADERS)
+print(text.text)
+```
+
+Las refs de nodo son estables dentro de un snapshot. Después de un clic que carga una nueva página, toma un snapshot nuevo—las refs en la nueva página son independientes. Para páginas que se actualizan sin una carga completa (SPAs de React, Vue), usa `?diff=true` para ver qué cambió en lugar de volver a obtener todo el árbol.
+
+Para configuraciones multiagente donde varios agentes comparten una instancia del navegador, usa el bloqueo de pestañas:
+
+```bash
+# Bloquear la pestaña 1 para uso exclusivo
+curl -X POST localhost:9867/tab/lock -d '{"tabId": 1}'
+
+# ... haz tu trabajo ...
+
+# Liberarla
+curl -X POST localhost:9867/tab/unlock -d '{"tabId": 1}'
+```
+
+## Cuándo encaja bien
+
+Pinchtab es una buena opción para agentes que necesitan navegar por la web pero no necesitan estar estrechamente acoplados a un framework de pruebas de navegador. Específicamente:
+
+- Scraping web y monitoreo de contenido a cualquier escala
+- Automatización de formularios (registros, entrada de datos, flujos de trabajo de múltiples pasos)
+- Scraping autenticado después de una configuración de inicio de sesión única
+- Agentes ejecutándose en scripts bash, programas Go, o cualquier lenguaje con soporte HTTP
+- Configuraciones donde quieres cambiar entre diferentes frameworks de agentes sin cambiar la integración del navegador
+
+No es la herramienta adecuada para pruebas visuales de precisión de píxeles (Playwright es mejor ahí), ni para sitios donde el árbol de accesibilidad es escaso o poco fiable. Algunas aplicaciones de página única construidas con componentes personalizados no exponen muchos datos ARIA útiles, y una captura de pantalla completa se convierte en la opción más práctica.
+
+## Primeros pasos
+
+```bash
+# Docker (más fácil, sin necesidad de instalar Chrome)
+docker run -d \
+  -p 127.0.0.1:9867:9867 \
+  --security-opt seccomp=unconfined \
+  -e BRIDGE_TOKEN=tu-token-secreto \
+  -e BRIDGE_HEADLESS=true \
+  pinchtab/pinchtab:latest
+
+curl -H "Authorization: Bearer tu-token-secreto" http://localhost:9867/health
+
+# Compilar desde fuente (requiere Go 1.25+ y Chrome instalado)
+git clone https://github.com/pinchtab/pinchtab.git
+cd pinchtab
+go build -o pinchtab .
+BRIDGE_HEADLESS=true BRIDGE_TOKEN=tu-token-secreto ./pinchtab
+```
+
+El repositorio de GitHub tiene un [skill de OpenClaw](https://github.com/pinchtab/pinchtab/tree/main/skill/pinchtab) que puede instalar y configurar Pinchtab automáticamente si estás usando un agente que soporta skills.
+
+---
+
+*Pinchtab tiene licencia MIT. Código fuente en [GitHub](https://github.com/pinchtab/pinchtab).*
