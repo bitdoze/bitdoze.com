@@ -1,0 +1,595 @@
+---
+date: 2026-02-24T00:00:00Z
+title: "Running OpenClaw with Ollama: Local Models Guide"
+description: "How to run OpenClaw with Ollama for free, private, local LLM inference. Covers hardware requirements, model picks by GPU/RAM tier, Nanbeige4.1-3B for low-end machines, full configuration, and fallback strategies."
+image: "../../assets/images/26/02/openclaw-ollama-local-models.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "openclaw", "self-hosted"]
+canonical: "https://www.bitdoze.com/openclaw-ollama-local-models/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Button from "@components/widgets/Button.astro";
+
+I've been running OpenClaw with API providers for a while now, and the bills add up. Even cheap models like GLM-5 and MiniMax M2.5 still cost something, and every message goes through someone else's server. So I set up Ollama on the same box and pointed OpenClaw at it. Zero cost per token, total privacy, and the latency is actually decent if you pick the right model for your hardware.
+
+This guide covers how to get OpenClaw talking to Ollama, which models work well for different hardware tiers, and what to do when your machine can't handle the bigger ones. Short answer on that last part: Nanbeige4.1-3B is shockingly good for a 3B model.
+
+<Notice type="info" title="What You'll Need">
+<ListCheck>
+<ul>
+<li>OpenClaw installed and running ([setup guide here](/clawdbot-setup-guide/))</li>
+<li>A machine with at least 8GB RAM (16GB+ recommended for good models)</li>
+<li>Ollama installed (one command on Linux/macOS)</li>
+<li>No API keys required — everything runs locally</li>
+</ul>
+</ListCheck>
+</Notice>
+
+## Why Run Local Models with OpenClaw
+
+Three reasons to bother with this instead of just using an API:
+
+<ListCheck>
+<ul>
+<li>**$0 per token** — Ollama is free. No API bills, no rate limits, no usage caps</li>
+<li>**Privacy** — conversations never leave your machine. No third-party logging, no data retention policies to read</li>
+<li>**No internet dependency** — works on an airgapped network, during outages, on a plane</li>
+</ul>
+</ListCheck>
+
+The tradeoff is real: local models are slower and less capable than Claude Opus or GPT-5. But for everyday OpenClaw stuff like answering messages and running scheduled jobs, a decent local model handles it fine.
+
+## Hardware Requirements
+
+This is the part most guides get wrong. They tell you the model size and forget about the actual experience. Here's what I've found running different tiers.
+
+### VRAM Is What Matters
+
+Models run in GPU VRAM when available. If the model doesn't fit in VRAM, it spills into system RAM and gets much slower. CPU-only inference works but expect 5-10x slower responses.
+
+| Hardware Tier | VRAM / RAM | Best Model Size | Response Speed |
+|---|---|---|---|
+| **Low-end** (no GPU, 8GB RAM) | 8GB system | 1B-3B models | Slow (5-15 tok/s) |
+| **Mid-range** (no GPU, 16-32GB RAM) | 16-32GB system | 7B-8B models | Moderate (10-25 tok/s) |
+| **GPU entry** (RTX 3060 12GB / M1 16GB) | 12-16GB | 7B-14B models | Good (30-60 tok/s) |
+| **GPU mid** (RTX 4070 Ti 16GB / M2 Pro 32GB) | 16-32GB | 14B-32B models | Good (40-80 tok/s) |
+| **GPU high** (RTX 4090 24GB / M4 Max 128GB) | 24-128GB | 32B-70B models | Fast (50-100+ tok/s) |
+
+<Notice type="warning" title="Apple Silicon Note">
+M1/M2/M3/M4 Macs share unified memory between CPU and GPU, so Ollama can use all system RAM as VRAM. A Mac Mini M4 with 32GB RAM can comfortably run 14B-32B models. That's why Mac Minis are popular for OpenClaw setups.
+</Notice>
+
+### Recommended Builds
+
+<Tabs>
+<Tab name="Budget ($50-100/mo VPS)">
+
+**Hetzner CAX31 or similar**
+- 8 vCPU (ARM), 32GB RAM, no GPU
+- Runs 7B-8B models at usable speeds
+- Best model: `qwen3:8b` or `gpt-oss:20b`
+- Cost: ~€15/mo on Hetzner
+
+Good enough for a personal assistant handling messages and simple tasks. Don't expect fast responses on complex coding problems.
+
+</Tab>
+<Tab name="Mid-range (Mac Mini)">
+
+**Mac Mini M4 with 32GB RAM**
+- Unified memory acts as VRAM
+- Runs 14B-32B models comfortably
+- Best model: `qwen2.5-coder:32b` or `qwen3:32b`
+- Cost: one-time ~$800
+
+The sweet spot for most people. 32B models handle coding, writing, and tool calls well. This is what I'd buy if starting fresh.
+
+</Tab>
+<Tab name="High-end (GPU Server)">
+
+**RTX 4090 24GB or dual GPU setup**
+- 24GB VRAM for a single 70B quantized model
+- Best model: `llama3.3:70b` or `deepseek-r1:70b`
+- Cost: one-time ~$2000+ for the GPU
+
+The 70B models come close to API-quality responses. Worth it if you're replacing a $100+/mo API habit.
+
+</Tab>
+<Tab name="Minimal (8GB RAM)">
+
+**Any machine with 8GB RAM**
+- CPU-only inference, slow but works
+- Best model: `nanbeige4.1-3b` (see section below)
+- Fallback: `qwen3:1.7b` or `llama3.2:3b`
+
+Surprisingly usable for simple conversations and basic tasks. Not great for coding.
+
+</Tab>
+</Tabs>
+
+---
+
+## Installing Ollama
+
+One command:
+
+```bash
+curl -fsSL https://ollama.ai/install.sh | sh
+```
+
+On macOS, download from [ollama.ai](https://ollama.ai) or use Homebrew:
+
+```bash
+brew install ollama
+```
+
+Check it's running:
+
+```bash
+ollama --version
+ollama list
+```
+
+If `ollama list` works, you're set.
+
+---
+
+## Picking the Right Model
+
+Not every model works well with OpenClaw. You need **tool calling support** (so the agent can use its tools) and ideally **good instruction following**. Here are the models I've tested, ranked by hardware tier.
+
+### Best Models by Tier
+
+| Model | Size | VRAM Needed | Tool Calling | Best For |
+|---|---|---|---|---|
+| `qwen2.5-coder:32b` | 32B | ~20GB | Yes | Coding, complex tasks |
+| `qwen3:32b` | 32B | ~20GB | Yes | General + reasoning |
+| `gpt-oss:20b` | 20B | ~14GB | Yes | General, tool use |
+| `qwen3:8b` | 8B | ~6GB | Yes | General purpose |
+| `llama3.3:70b` | 70B | ~42GB | Yes | Best local quality |
+| `qwen2.5-coder:14b` | 14B | ~10GB | Yes | Coding on mid-range |
+| `deepseek-r1:14b` | 14B | ~10GB | Yes | Reasoning tasks |
+| `mistral-small3.2:24b` | 24B | ~16GB | Yes | Vision + tools |
+| `qwen3:4b` | 4B | ~3GB | Yes | Budget general |
+| `nanbeige4.1-3b`* | 3B | ~2.5GB | Yes | Budget, see below |
+
+\* Community upload on Ollama — see Nanbeige section below.
+
+### My Picks
+
+- **32GB Mac Mini or 16GB+ GPU**: `qwen2.5-coder:32b` as primary, `qwen3:8b` as fallback
+- **16GB RAM, no GPU**: `qwen3:8b` as primary, `qwen3:4b` as fallback
+- **8GB RAM**: `nanbeige4.1-3b` or `qwen3:4b`
+
+Pull your chosen model:
+
+```bash
+ollama pull qwen2.5-coder:32b
+# or for lower-end hardware:
+ollama pull qwen3:8b
+# or for minimal hardware:
+ollama pull tomng/nanbeige4.1
+```
+
+---
+
+## Nanbeige4.1-3B: The Budget Surprise
+
+This model caught me off guard. Nanbeige4.1-3B is a 3B parameter model from Nanbeige Lab (a team at Kanzhun/BOSS Zhipin) that punches way above its weight class. Look at these numbers:
+
+| Benchmark | Nanbeige4.1-3B | Qwen3-4B | Qwen3-8B | Qwen3-32B |
+|---|---|---|---|---|
+| **LiveCodeBench-V6** | **76.9** | 57.4 | 49.4 | 55.7 |
+| **AIME 2026 I** (math) | **87.4** | 81.5 | 70.4 | 75.8 |
+| **GPQA** (science) | **83.8** | 65.8 | 62.0 | 68.4 |
+| **Arena-Hard-v2** (alignment) | **73.2** | 34.9 | 26.3 | 56.0 |
+| **BFCL-V4** (tool use) | **56.5** | 44.9 | 42.2 | 47.9 |
+
+A 3B model beating Qwen3-32B on coding benchmarks. It scores 56.5 on BFCL-V4 (tool use), which matters because OpenClaw relies on tool calling. It can also handle over 500 rounds of tool invocations for deep-search tasks. I don't know of another sub-4B model that can do that.
+
+### When to Use It
+
+- Your machine has 8GB RAM and no GPU
+- You want a backup model that uses minimal resources
+- You're running on a Raspberry Pi 5 or similar ARM board
+- You need an emergency fallback when your main model is too slow
+
+### When NOT to Use It
+
+- You have hardware for bigger models — 8B+ will still give better results on complex tasks
+- You need long creative writing or nuanced conversation
+- You're doing heavy multi-file code refactoring
+
+### Installing Nanbeige4.1-3B
+
+The model is available through community uploads on Ollama. The most popular version with tool support:
+
+```bash
+ollama pull tomng/nanbeige4.1
+```
+
+You can also import the GGUF from HuggingFace if you want a specific quantization:
+
+```bash
+# Download the Q4_K_M quantization (smallest useful size, ~2.3GB)
+# From: huggingface.co/Edge-Quant/Nanbeige4.1-3B-Q4_K_M-GGUF
+
+# Create a Modelfile
+cat > Modelfile << 'EOF'
+FROM ./Nanbeige4.1-3B-Q4_K_M.gguf
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER repeat_penalty 1.0
+TEMPLATE """{{- if .System }}{{ .System }}{{ end }}
+{{- range .Messages }}
+{{- if eq .Role "user" }}
+{{ .Content }}
+{{- else if eq .Role "assistant" }}
+{{ .Content }}
+{{- end }}
+{{- end }}"""
+EOF
+
+ollama create nanbeige4.1-3b -f Modelfile
+```
+
+---
+
+## Configuring OpenClaw for Ollama
+
+### Step 1: Enable Ollama
+
+Set the environment variable that tells OpenClaw to look for Ollama:
+
+```bash
+export OLLAMA_API_KEY="ollama-local"
+```
+
+Or add it permanently to your OpenClaw environment:
+
+```bash
+# Add to ~/.openclaw/.env
+echo 'OLLAMA_API_KEY=ollama-local' >> ~/.openclaw/.env
+```
+
+The value doesn't matter (Ollama doesn't check it), but OpenClaw needs it set to enable the Ollama provider.
+
+### Step 2: Verify Discovery
+
+OpenClaw auto-discovers tool-capable Ollama models. Check what it found:
+
+```bash
+openclaw models list --local
+```
+
+You should see your pulled models listed. If a model doesn't appear, it might not report tool support. You can still use it by adding explicit config (see Step 3).
+
+### Step 3: Set Your Model
+
+For a straightforward setup with one model:
+
+```bash
+openclaw models set ollama/qwen2.5-coder:32b
+```
+
+Or edit your config file (`~/.openclaw/openclaw.json`):
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b"
+      }
+    }
+  }
+}
+```
+
+### Step 4: Set Up Fallbacks
+
+Fallbacks matter more with local models because a single model might be too slow or run out of context. Configure a chain:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b",
+        "fallbacks": [
+          "ollama/qwen3:8b",
+          "ollama/tomng/nanbeige4.1"
+        ]
+      }
+    }
+  }
+}
+```
+
+If the 32B model chokes on a long context, OpenClaw falls through to the 8B, then to Nanbeige.
+
+### Full Config Example (Mid-Range Hardware)
+
+Here's a complete config for a 32GB Mac Mini:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b",
+        "fallbacks": ["ollama/qwen3:8b"]
+      },
+      "imageModel": {
+        "primary": "ollama/mistral-small3.2:24b"
+      }
+    }
+  }
+}
+```
+
+### Full Config Example (Low-End Hardware)
+
+For an 8GB RAM machine or Raspberry Pi:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/tomng/nanbeige4.1",
+        "fallbacks": ["ollama/qwen3:1.7b"]
+      }
+    }
+  }
+}
+```
+
+---
+
+## Explicit Provider Config (Remote Ollama)
+
+If Ollama runs on a different machine (say a GPU server on your LAN), you need explicit config instead of auto-discovery:
+
+```json
+{
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://192.168.1.50:11434",
+        "apiKey": "ollama-local",
+        "api": "ollama",
+        "models": [
+          {
+            "id": "qwen2.5-coder:32b",
+            "name": "Qwen 2.5 Coder 32B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b"
+      }
+    }
+  }
+}
+```
+
+<Notice type="warning" title="Security Reminder">
+If you're exposing Ollama over the network, make sure it's on a trusted network (Tailscale, LAN behind firewall). Ollama has no built-in authentication. See the [OpenClaw security guide](/openclaw-security-guide/) for hardening your setup.
+</Notice>
+
+---
+
+## Hybrid Setup: Local + API Fallback
+
+The setup I actually recommend is a hybrid. Local model as primary, cheap API as fallback for when the local model struggles. You get privacy and zero cost for 90% of messages, and API quality is there when you need it.
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5-coder:32b",
+        "fallbacks": [
+          "ollama/qwen3:8b",
+          "zai/glm-5"
+        ]
+      }
+    }
+  }
+}
+```
+
+With this config, OpenClaw tries the local 32B first. If context is too long or the model errors, it falls to the local 8B. If that also fails, it hits the GLM-5 API (which is cheap). You can set up GLM-5 or MiniMax M2.5 as your API fallback following the [best open source models guide](/best-opensource-models-for-openclaw/).
+
+---
+
+## Switching Models On the Fly
+
+You don't have to restart OpenClaw to change models. Use the `/model` command in chat:
+
+```
+/model                        # Show available models
+/model list                   # Full list with providers
+/model ollama/qwen3:8b        # Switch to a different model
+/model status                 # Check current model + auth
+```
+
+Good for testing: pull a new model with `ollama pull`, and it shows up in `/model list` automatically (with auto-discovery enabled).
+
+---
+
+## Performance Tuning
+
+### Context Window
+
+Ollama reports the context window from the model metadata. You can override it in explicit config:
+
+```json
+{
+  "models": {
+    "providers": {
+      "ollama": {
+        "models": [{
+          "id": "qwen2.5-coder:32b",
+          "contextWindow": 65536,
+          "maxTokens": 16384
+        }]
+      }
+    }
+  }
+}
+```
+
+Larger context windows use more VRAM. If you're hitting memory limits, reduce `contextWindow`.
+
+### Running Multiple Models
+
+Ollama can keep multiple models loaded if you have the VRAM. Set `OLLAMA_NUM_PARALLEL` to control concurrency:
+
+```bash
+OLLAMA_NUM_PARALLEL=2 ollama serve
+```
+
+With enough VRAM, you can run a coding model and a general model simultaneously, switching between them with `/model` in OpenClaw.
+
+### GPU Layers
+
+If you have a GPU but not enough VRAM for the full model, Ollama automatically offloads some layers to CPU. You can control this:
+
+```bash
+OLLAMA_GPU_LAYERS=35 ollama serve
+```
+
+More layers on GPU = faster but more VRAM. Experiment to find your sweet spot.
+
+---
+
+## Troubleshooting
+
+<Accordion label="Common Problems" group="troubleshooting" expanded="true">
+
+**Model doesn't show up in `openclaw models list`**
+
+OpenClaw auto-discovery only shows models with tool support. Either pull a tool-capable model or define it explicitly in `models.providers.ollama`. Check with:
+```bash
+ollama list
+curl http://localhost:11434/api/tags
+```
+
+**Responses are extremely slow**
+
+Your model is probably running on CPU. Check if the model fits in your available VRAM/RAM. Solutions:
+- Switch to a smaller model (`qwen3:8b` instead of `qwen3:32b`)
+- On Mac: close other apps to free unified memory
+- On Linux with GPU: check `nvidia-smi` for VRAM usage
+
+**"Connection refused" errors**
+
+Ollama isn't running. Start it:
+```bash
+ollama serve
+```
+Or on macOS, open the Ollama app. Check the API is accessible:
+```bash
+curl http://localhost:11434/api/tags
+```
+
+**Tool calls failing or being ignored**
+
+The model might not support tool calling well. Switch to a model known to handle tools: `qwen2.5-coder`, `qwen3`, `gpt-oss`, or `llama3.3`. Avoid older models like `llama2` or `codellama` for OpenClaw.
+
+**Out of memory crashes**
+
+The model is too large. Either:
+- Pull a smaller quantization: `ollama pull qwen3:8b-q4_0`
+- Switch to a smaller model
+- Add more RAM/swap (not ideal but works)
+
+**Nanbeige4.1-3B not found**
+
+It's a community upload, not in the official library. Pull with the namespace:
+```bash
+ollama pull tomng/nanbeige4.1
+```
+
+</Accordion>
+
+---
+
+## Security Considerations
+
+Running models locally is inherently more private than API calls, but don't skip the basics:
+
+- **Ollama has no auth**: anyone on your network who can reach port 11434 can use your models. Bind to localhost or use a firewall.
+- **Model downloads**: Ollama pulls models from ollama.com. If you're security-conscious, verify model checksums or use airgapped installs.
+- **OpenClaw security**: local models don't change the OpenClaw threat model. Still follow the [security hardening guide](/openclaw-security-guide/) for gateway binding, sandbox mode, and skill vetting.
+
+---
+
+## Related Guides
+
+- [OpenClaw Setup Guide](/clawdbot-setup-guide/) — full installation on Hetzner VPS or Mac Mini
+- [Best Open Source Models for OpenClaw](/best-opensource-models-for-openclaw/) — API-based models (GLM-5, MiniMax M2.5) for when local isn't enough
+- [DuckDuckGo Search for OpenClaw](/duckduckgo-openclaw-search/) — free web search that pairs well with local models
+- [OpenClaw Security Guide](/openclaw-security-guide/) — hardening your instance, especially relevant when running on a LAN
+- [Best OpenClaw Dashboards](/best-openclaw-dashboards/) — dashboards that show model usage and cost (useful for tracking $0 local usage vs API fallback spend)
+- [OpenClaw Alternatives](/openclaw-alternatives/) — other platforms with their own local model support
+
+---
+
+<Accordion label="Frequently Asked Questions" group="faq" expanded="true">
+
+**Can I run OpenClaw entirely offline with Ollama?**
+
+Yes, once the models are pulled and OpenClaw is installed. No internet required for inference. You won't have web search or channel integrations (Telegram, WhatsApp), but CLI and local sessions work fine.
+
+**Which model gives the best quality per dollar?**
+
+There are no dollars involved — Ollama is free. The question is quality per hardware. On a 32GB Mac Mini, `qwen2.5-coder:32b` gives the best results I've seen. On 8GB RAM, `nanbeige4.1-3b` is the best tradeoff between speed and capability.
+
+**How does Nanbeige4.1-3B compare to API models like GLM-5?**
+
+GLM-5 is still better for complex tasks, especially multi-step coding. Nanbeige4.1-3B is competitive on benchmarks, but real-world OpenClaw usage means long contexts and multi-turn conversations where bigger models have an edge. Use Nanbeige for quick tasks and messages, API models for the heavy stuff.
+
+**Can I use Ollama and API providers at the same time?**
+
+Yes, and I recommend it. Set an Ollama model as primary and a cheap API model as fallback. OpenClaw handles the switching automatically when a model fails or can't handle the context.
+
+**Does tool calling work with all Ollama models?**
+
+No. OpenClaw's auto-discovery only shows models that report tool support. Older models and some smaller ones don't support it. The models listed in this guide all support tool calling. You can check with `ollama show <model>` and look for `tools` in the capabilities.
+
+**What about running Ollama on a Raspberry Pi?**
+
+A Raspberry Pi 5 with 8GB RAM can run 1B-3B models. Nanbeige4.1-3B or `qwen3:1.7b` are your best options. Responses will be slow (2-5 tokens/second) but functional for simple tasks. Don't expect it to handle coding questions.
+
+**Is vLLM better than Ollama for OpenClaw?**
+
+vLLM gives better throughput on multi-GPU setups and production workloads. Ollama is simpler to set up and better for single-user scenarios. For a personal OpenClaw instance, Ollama is the right choice. If you're running multiple agents or need concurrent inference, look at vLLM.
+
+**How much RAM do I actually need for X model?**
+
+Rough formula: model parameters × 0.6GB for Q4 quantization. So a 7B model needs ~4.2GB, a 14B needs ~8.4GB, a 32B needs ~19.2GB. Add 2-4GB headroom for the system and Ollama overhead. These are minimums — more RAM means larger context windows.
+
+</Accordion>
+
+Local models with Ollama won't replace Claude Opus for complex work. But they cover 80-90% of what I use OpenClaw for: answering messages, running cron jobs, lookups, automations. The hybrid setup (local primary + API fallback) means privacy and zero cost most of the time, with API quality when you actually need it.
+
+Start with whatever model fits your hardware. If you've got a Mac Mini, go straight to `qwen2.5-coder:32b`. If you're on a budget VPS with 8GB RAM, pull Nanbeige4.1-3B and be surprised.
+
+For the rest of the OpenClaw stack: [setup guide](/clawdbot-setup-guide/), [API model recommendations](/best-opensource-models-for-openclaw/), [free web search](/duckduckgo-openclaw-search/), [security hardening](/openclaw-security-guide/), [dashboards](/best-openclaw-dashboards/), and [alternative platforms](/openclaw-alternatives/).

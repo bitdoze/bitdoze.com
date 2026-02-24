@@ -1,0 +1,431 @@
+---
+date: 2026-02-24T00:00:00Z
+title: "OpenClaw Security Guide: CVE-2026-25253, Malicious Skills, and 40+ Fixes"
+description: "A practical security hardening guide for OpenClaw covering CVE-2026-25253 (the ClawHub supply chain attack), the 40+ vulnerability fixes shipped in recent releases, trust model fundamentals, and step-by-step lockdown procedures."
+image: "../../assets/images/26/02/openclaw-security-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "openclaw", "security"]
+canonical: "https://www.bitdoze.com/openclaw-security-guide/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Button from "@components/widgets/Button.astro";
+
+OpenClaw runs 24/7 on your server with full shell access, API keys sitting in its config, and the ability to install and run skills from a community marketplace. Security isn't something you get around to later. In February 2026, researchers found that 12% of skills on ClawHub were infected with malware. The project's CHANGELOG lists over 40 security fixes across recent releases. If you're running OpenClaw, you should know about both.
+
+I've gone through the CVE, the patched vulnerabilities, the trust model, and the hardening options. Here's what actually matters.
+
+<Notice type="error" title="Action Required If You Installed ClawHub Skills">
+If you installed any skills from ClawHub (openclawdir.com) before mid-February 2026, run `openclaw security audit --deep` immediately and check the malicious skill indicators listed below. The supply chain attack affected 341 out of 2,857 audited skills (12% infection rate).
+</Notice>
+
+## CVE-2026-25253: The ClawHub Supply Chain Attack
+
+On February 13, 2026, security researchers reported ([GitHub issue #16052](https://github.com/openclaw/openclaw/issues/16052)) that 341 skills on ClawHub, the community skill marketplace, were compromised in a coordinated supply chain attack. The CVE got a CVSS score of 8.8 (HIGH).
+
+### How the Attack Worked
+
+The malicious skills looked like normal tools. The most documented example, `deeps-agnw6h`, posed as a "Deep-Agent/Deep-Search" research tool. Infected skills contained up to three attack vectors:
+
+**1. macOS Dropper (Base64-Encoded Shell)**
+
+A base64 payload decoded to a curl command that downloaded and executed arbitrary code from an attacker-controlled server at `91.92.242.30` (Bulgarian hosting range, linked to info-stealer infrastructure).
+
+**2. Fake Windows Installer**
+
+A GitHub repository (`toolitletolate/openclaw_windriver`) hosted a malicious MSI installer disguised as a driver package.
+
+**3. MCP Backdoor**
+
+A hidden MCP server endpoint routed through `bore.pub` tunneling to attacker infrastructure, giving remote access to any machine running the infected skill.
+
+### Indicators of Compromise
+
+If you suspect your instance may be affected, check for these:
+
+| Type | Value | Notes |
+|------|-------|-------|
+| **IP address** | `91.92.242.30` | macOS payload delivery server |
+| **URL path** | `http://91.92.242.30/6wioz8285kcbax6v` | Dropper payload |
+| **Tunnel domain** | `bore.pub` | Reverse tunneling for MCP backdoor |
+| **Tunnel port** | `44876` | MCP backdoor endpoint |
+| **GitHub repo** | `toolitletolate/openclaw_windriver` | Fake Windows installer |
+
+Check your network logs for connections to these addresses. If you find matches, assume compromise and rotate all API keys and credentials stored in your OpenClaw config.
+
+### What To Do Right Now
+
+<ListCheck>
+<ul>
+<li>Update OpenClaw to the latest release (`npm update -g openclaw`)</li>
+<li>Run `openclaw security audit --deep` and review every finding</li>
+<li>Check installed skills: `openclaw skills list` — remove anything you don't recognize</li>
+<li>Search your network logs for `91.92.242.30` and `bore.pub`</li>
+<li>If compromised: rotate all API keys, gateway tokens, and channel credentials</li>
+<li>Review open connections: `ss -tlnp | grep openclaw` on Linux to check for unexpected listeners</li>
+</ul>
+</ListCheck>
+
+---
+
+## The soul-evil Hook: A Built-In Risk
+
+Separate from the ClawHub attack, researchers flagged another problem in [issue #8776](https://github.com/openclaw/openclaw/issues/8776): OpenClaw shipped with a bundled hook called `soul-evil` that could silently swap the agent's core system prompt (`SOUL.md`) with an alternate file (`SOUL_EVIL.md`). Disabled by default, but the code was there in every installation.
+
+Here's what made it bad: an attacker with prompt injection access could chain the `write` tool to create `SOUL_EVIL.md` and then use `config.patch` to enable the hook. The agent would then run under attacker-controlled instructions with no notification. Even worse when paired with CVE-2026-25253, since an exfiltrated gateway token could enable this hook remotely.
+
+The issue was closed in version 2026.2.1. Verify you're running at least that version:
+
+```bash
+openclaw --version
+```
+
+---
+
+## 40+ Security Fixes Across Recent Releases
+
+I counted over 40 security fixes in the OpenClaw CHANGELOG across the 2026.2.x releases. Here's what was patched, grouped by category.
+
+### Exec Approval Bypasses (7 Fixes)
+
+The execution approval system, the layer that asks "should OpenClaw run this command?", had multiple bypass paths:
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Cross-node replay | Approved `system.run` requests could be replayed across different nodes |
+| Orphaned approvals | Two-phase approval registration had a race condition that let approvals skip the wait step |
+| `env -S` bypass | `env --split-string` wrapper interpretation mismatch let commands bypass allowlist checks |
+| `busybox`/`toybox` applets | Multiplexer binaries weren't recognized in wrapper analysis, allowing allow-always bypasses |
+| `autoAllowSkills` path collision | Absolute-path basename collisions could satisfy skill auto-allow checks |
+| Safe-bin flag denylist gaps | Unknown GNU long-option abbreviations and filesystem-dependent `sort` flags weren't blocked |
+| Obfuscated command detection | Obfuscated commands weren't checked before exec allowlist decisions |
+
+### Sandbox and Path Traversal Escapes (4 Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| `apply_patch` workspace escape | Sandbox-mounted paths like `/agent` allowed writes/deletes outside the workspace boundary |
+| Image tool path traversal | `tools.fs.workspaceOnly` wasn't enforced for sandboxed `image` path resolution |
+| Shell env fallback | Trusted-prefix shell-path fallback allowed untrusted shells; now only `/etc/shells` entries are trusted |
+| Config path traversal | Prototype-key segments and inherited-property traversal weren't rejected in `config get/set/unset` paths |
+
+### XSS and Injection (5 Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Session export HTML injection | Raw HTML markdown tokens in exported session viewer weren't escaped |
+| Export image data-URL injection | Image MIME/base64 fields in exported HTML weren't validated |
+| Skill HTML gallery XSS | `openai-image-gen` skill didn't escape user-controlled values in generated HTML |
+| Skill packaging symlink escape | `skill-creator` didn't skip symlinks or reject paths escaping the skill root |
+| iOS deep link exfiltration | `openclaw://agent` requests forwarded to gateway without local confirmation |
+
+### Prototype Pollution and Config Safety (3 Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Account-ID normalization | Reserved prototype keys weren't blocked in account-id normalization |
+| Config write mutations | `unsetPaths` could mutate caller-provided objects |
+| CLI config credential leakage | `openclaw config get` output wasn't redacted before printing |
+
+### Channel and Access Control (5 Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Command sender spoofing | `commands.allowFrom` matched conversation-shaped `From` identities (channels, groups, threads) |
+| Mutable name matching | `allowFrom` matched on mutable names/tags/emails instead of stable IDs |
+| Name-matching policy inconsistency | `dangerouslyAllowNameMatching` checks varied between core and extension channels |
+| ACP auto-approval scope | Unknown tool names and out-of-scope file reads were auto-approved |
+| `selfChatMode` bypass | WhatsApp inbound access control didn't honor `selfChatMode` setting |
+
+### SSRF and Network (2 Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Telegram media SSRF | RFC2544 benchmark range (`198.18.0.0/15`) wasn't blocked by default for media downloads |
+| Browser SSRF policy | Private network access defaulted to allowed without explicit config |
+
+### Voice, Webhooks, and Other (4+ Fixes)
+
+| Fix | What Was Wrong |
+|-----|---------------|
+| Twilio webhook replay | Provider event IDs weren't preserved through normalization, allowing replay attacks |
+| OTEL credential leakage | API keys and tokens were included in OTLP export diagnostics |
+| Reasoning/thinking leakage | Internal reasoning blocks leaked as user-visible replies in WhatsApp, Discord, Web |
+| Session reset credential leakage | `/new` and `/reset` confirmation messages exposed API key prefixes |
+
+<Notice type="warning" title="This List Isn't Complete">
+These are the security fixes documented in the CHANGELOG for the 2026.2.22 and 2026.2.23 releases plus unreleased patches. Older releases contain additional fixes. Always run the latest version.
+</Notice>
+
+---
+
+## Understanding the OpenClaw Trust Model
+
+Before changing any settings, know what OpenClaw considers in-scope vs. out-of-scope for security. Misunderstanding this leads to either false confidence or wasted effort.
+
+### Core principles
+
+<Tabs>
+<Tab name="What's Trusted">
+
+- **Authenticated gateway callers** are treated as trusted operators
+- **Session identifiers** (sessionKey, session IDs, labels) are routing controls, not authorization boundaries
+- **Plugins/extensions** run in-process with full OS privileges
+- **Workspace memory files** (MEMORY.md, memory/*.md) are treated as trusted local operator state
+- **Exec approvals** are operator guardrails, not a multi-tenant authorization boundary
+
+</Tab>
+<Tab name="What's NOT a Boundary">
+
+- One gateway is NOT a multi-tenant, adversarial user boundary
+- If one operator can view data from another on the same gateway, that's expected
+- Memory search returning content written by another process is expected behavior
+- Plugins having the same OS privileges as the OpenClaw process is by design
+
+</Tab>
+<Tab name="Recommended Setup">
+
+- **One user per machine/host** (or VPS)
+- **One gateway per user** with one or more agents inside
+- For multiple users: use separate VPS instances or OS user boundaries
+- For remote access: SSH tunnel or Tailscale, not public internet exposure
+
+</Tab>
+</Tabs>
+
+### What this means in practice
+
+If someone shares a gateway with you, they can see your conversations, your API keys, and your memory files. That's by design. OpenClaw's security boundary is the machine/OS user level, not the gateway level. Separate trust domains need separate instances.
+
+---
+
+## Hardening guide
+
+In order of importance, here's what to configure.
+
+### 1. Keep OpenClaw Updated
+
+Most of the 40+ fixes above ship in the npm release. Check your version and update:
+
+```bash
+openclaw --version
+npm update -g openclaw
+```
+
+### 2. Run the Built-In Security Audit
+
+OpenClaw has a built-in security scanner:
+
+```bash
+openclaw security audit --deep
+```
+
+It checks for risky configuration patterns, mutable allowlists, exposed credentials, and known problems. Add `--fix` to auto-remediate what it can:
+
+```bash
+openclaw security audit --deep --fix
+```
+
+### 3. Bind the Gateway to Loopback
+
+The gateway HTTP surface (Control UI, canvas, API endpoints) isn't hardened for the public internet. Keep it on localhost:
+
+```json
+{
+  "gateway": {
+    "bind": "loopback"
+  }
+}
+```
+
+For remote access, use SSH tunneling or Tailscale:
+
+```bash
+# SSH tunnel
+ssh -L 3000:localhost:3000 root@your-server
+
+# Or Tailscale serve
+tailscale serve --https=443 http://localhost:3000
+```
+
+### 4. Enable Sandbox Mode
+
+By default, `agents.defaults.sandbox.mode` is `off`. Turn it on:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "on"
+      }
+    }
+  }
+}
+```
+
+### 5. Restrict filesystem access
+
+Keep tools inside the workspace directory:
+
+```json
+{
+  "tools": {
+    "fs": {
+      "workspaceOnly": true
+    },
+    "exec": {
+      "applyPatch": {
+        "workspaceOnly": true
+      }
+    }
+  }
+}
+```
+
+### 6. Switch Channel Allowlists to Stable IDs
+
+After the breaking change in the unreleased version, `allowFrom` matching is ID-only by default. If you're on an older version, migrate your allowlists from names to IDs:
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "allowFrom": ["123456789"]
+    }
+  }
+}
+```
+
+Mutable names (usernames, display names, email addresses) in allowlists are dangerous. Anyone can change their display name at any time. Use stable numeric IDs.
+
+### 7. Set Explicit Control UI Origins
+
+For non-loopback deployments, specify allowed origins:
+
+```json
+{
+  "gateway": {
+    "controlUi": {
+      "allowedOrigins": ["https://your-tailscale-domain.ts.net"]
+    }
+  }
+}
+```
+
+Without this, the gateway will refuse to start (fail-closed behavior).
+
+### 8. Vet Skills Before Installing
+
+After CVE-2026-25253, treat every ClawHub skill as potentially hostile until verified:
+
+<ListCheck>
+<ul>
+<li>Read the skill source code before installing</li>
+<li>Check for base64-encoded payloads or obfuscated commands</li>
+<li>Look for outbound network connections to unknown hosts</li>
+<li>Verify the skill author's identity and history</li>
+<li>Prefer skills with significant community usage and reviews</li>
+<li>Consider running skills in a sandboxed environment first</li>
+</ul>
+</ListCheck>
+
+### 9. Docker Hardening
+
+If running OpenClaw in Docker, use restrictive settings:
+
+```bash
+docker run --read-only --cap-drop=ALL \
+  -v openclaw-data:/app/data \
+  openclaw/openclaw:latest
+```
+
+The official image runs as a non-root `node` user. `--read-only` prevents filesystem writes outside mounted volumes, and `--cap-drop=ALL` drops Linux capabilities.
+
+### 10. Node.js Version
+
+OpenClaw requires Node.js 22.12.0 or later. Older versions have known vulnerabilities:
+
+```bash
+node --version  # Should be v22.12.0 or later
+```
+
+---
+
+## Security Audit Checklist
+
+Use this as a periodic review checklist:
+
+| Check | Command / Action | Expected |
+|-------|-----------------|----------|
+| OpenClaw version | `openclaw --version` | Latest release |
+| Node.js version | `node --version` | v22.12.0+ |
+| Security audit | `openclaw security audit --deep` | No critical findings |
+| Gateway binding | Check config `gateway.bind` | `loopback` |
+| Sandbox mode | Check config `agents.defaults.sandbox.mode` | `on` |
+| Workspace-only FS | Check config `tools.fs.workspaceOnly` | `true` |
+| Channel allowlists | Check for name-based entries | IDs only |
+| Installed skills | `openclaw skills list` | Only recognized skills |
+| Network connections | `ss -tlnp \| grep openclaw` | Only expected listeners |
+| API key rotation | Review key ages | Rotated within 90 days |
+
+---
+
+## Related guides
+
+The rest of the OpenClaw stack:
+
+- [OpenClaw Setup Guide](/clawdbot-setup-guide/) covers the full installation on Hetzner VPS or Mac Mini, including gateway token configuration
+- [Best Open Source Models for OpenClaw](/best-opensource-models-for-openclaw/) covers GLM-5 and MiniMax M2.5 setup, cost comparison, and why routing subscriptions through OpenClaw gets you banned
+- [DuckDuckGo Search for OpenClaw](/duckduckgo-openclaw-search/) walks through adding free web search without API keys
+- [OpenClaw Alternatives](/openclaw-alternatives/) covers NanoClaw, IronClaw, NullClaw, and others with their own security approaches
+- [Best OpenClaw Dashboards](/best-openclaw-dashboards/) ranks nine dashboards, including the security-hardened OpenClaw Dashboard with TOTP MFA
+
+---
+
+<Accordion label="Frequently Asked Questions" group="faq" expanded="true">
+
+**Was my data stolen in the CVE-2026-25253 attack?**
+
+If you installed one of the 341 infected skills, the malware had access to everything OpenClaw could access — your API keys, conversation history, files in the workspace, and potentially the entire machine if sandbox mode was off. Assume full compromise and rotate all credentials.
+
+**How do I know if I installed a malicious skill?**
+
+Run `openclaw skills list` and check each skill against the ClawHub audit results. Search your system logs and network traffic for the IoC addresses listed above (`91.92.242.30`, `bore.pub:44876`). The `openclaw security audit --deep` command also checks for known malicious patterns.
+
+**Is OpenClaw safe to run on the public internet?**
+
+No. The gateway HTTP surface is not hardened for public exposure. Bind to loopback and use SSH tunneling or Tailscale for remote access. Multiple CHANGELOG entries note fixes for issues that only matter with network exposure.
+
+**Should I enable `dangerouslyAllowNameMatching`?**
+
+No, unless you have no other option. Name-based allowlists are vulnerable because users can change their display names, usernames, or email addresses at any time. Migrate to stable IDs.
+
+**What's the difference between `sandbox.mode` and `workspaceOnly`?**
+
+`sandbox.mode` controls whether the agent runs in an isolated container (Docker/Apple Container). `workspaceOnly` restricts file operations to the workspace directory even without a sandbox runtime. Both should be enabled for maximum protection. They complement each other.
+
+**How often should I run `openclaw security audit`?**
+
+After every OpenClaw update, after installing any new skill, and at least weekly for actively used instances. Add `--deep` for the thorough scan that checks network exposure and credential patterns.
+
+**Does the trust model mean OpenClaw is insecure?**
+
+No, it means the security boundary is at the machine/OS user level rather than the gateway level. This is common for self-hosted tools. The key is understanding that everyone with gateway access has full operator privileges — plan your deployment accordingly.
+
+**Can prompt injection compromise my OpenClaw instance?**
+
+Prompt injection is listed as out-of-scope in OpenClaw's security model when it doesn't bypass a boundary. But the `soul-evil` hook showed how prompt injection can chain with other features to achieve persistent compromise. Keep the attack surface small: sandbox on, workspace-only filesystem, skills audited.
+
+</Accordion>
+
+The 2026.2.x releases fixed a lot. But the ClawHub attack showed that the skill ecosystem is a real threat, and many of the patched vulnerabilities had been there since the early releases. I expect more security fixes to land through 2026.
+
+Keep OpenClaw updated and run `openclaw security audit --deep` regularly. That's the single highest-value thing you can do. The rest of this guide is defense-in-depth on top of that.
+
+For everything else: [setup guide](/clawdbot-setup-guide/), [model recommendations](/best-opensource-models-for-openclaw/), [free web search](/duckduckgo-openclaw-search/), [dashboards](/best-openclaw-dashboards/), [local models with Ollama](/openclaw-ollama-local-models/), and [alternative platforms](/openclaw-alternatives/).
