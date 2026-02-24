@@ -1,0 +1,599 @@
+---
+date: 2026-02-22T00:00:00Z
+title: "Guia de Despliegue de NanoClaw: Agente Claude Aislado en Contenedor en Tu VPS"
+description: "Guia paso a paso para desplegar NanoClaw en un VPS Linux con integracion de WhatsApp, agent swarms y aislamiento en contenedores. Cubre configuracion de Docker, skills, tareas programadas y seguridad."
+image: "@assets/images/26/02/nanoclaw-deploy-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "vps", "claude"]
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+[NanoClaw](https://github.com/qwibitai/nanoclaw) me llamo la atencion porque maneja la seguridad de forma diferente a cualquier otro bot auto-alojado que he probado. En lugar de verificaciones de permisos a nivel de aplicacion, ejecuta cada agente en un contenedor Linux real. El agente solo puede ver lo que se monta explicitamente. Los comandos Bash se ejecutan dentro del contenedor, no en tu host. Tambien soporta [Agent Swarms](https://code.claude.com/docs/en/agent-teams), donde multiples agentes trabajan juntos en la misma tarea.
+
+Esta guia te lleva paso a paso para desplegar NanoClaw en un VPS con integracion de WhatsApp, tareas programadas y aislamiento adecuado en contenedores.
+
+<Button text="NanoClaw en GitHub" link="https://github.com/qwibitai/nanoclaw" variant="solid" color="purple" size="md" icon="github" />
+
+<Notice type="info" title="Lo que cubre esta guia">
+<ListCheck>
+<ul>
+<li>Instalar NanoClaw via el comando /setup de Claude Code</li>
+<li>Configuracion de contenedores Docker para aislamiento de agentes</li>
+<li>Configuracion del canal de WhatsApp con Baileys</li>
+<li>Configurar agent swarms para tareas multi-agente</li>
+<li>Sistema de skills y personalizacion</li>
+<li>Tareas programadas y aislamiento de contexto por grupo</li>
+<li>Modelo de seguridad y mejores practicas</li>
+</ul>
+</ListCheck>
+</Notice>
+
+Si estas comparando opciones de bots auto-alojados, nuestro articulo de [alternativas a OpenClaw](/es/alternativas-openclaw/) incluye NanoClaw junto con ZeroClaw, nanobot, memU y PicoClaw.
+
+
+## Que es NanoClaw realmente
+
+NanoClaw es una alternativa ligera a OpenClaw que se ejecuta sobre el Agent SDK de Claude. La diferencia clave con otros bots es el modelo de aislamiento. Los agentes se ejecutan en contenedores Linux (Docker en Linux/macOS, Apple Container en macOS) con directorios montados explicitamente. El agente no puede escapar del contenedor, y solo puede acceder a lo que tu permitas.
+
+La arquitectura se ve asi:
+
+```
+WhatsApp (Baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+```
+
+Un unico proceso Node.js. Colas de mensajes por grupo. IPC via sistema de archivos. Sin microservicios, sin colas de mensajes, sin capas de abstraccion. El codebase completo es lo suficientemente pequeño como para leerlo de una sentada.
+
+### Como se compara
+
+| | OpenClaw | nanobot | NanoClaw 🐾 |
+|---|---|---|---|
+| **Lenguaje** | TypeScript | Python | **TypeScript** |
+| **Aislamiento** | Nivel de app | Nivel de app | **Nivel de contenedor** |
+| **Agent SDK** | Personalizado | LiteLLM | **Claude Agent SDK** |
+| **Agent Swarms** | No | No | **Si (primero)** |
+| **Canales** | 4 plataformas | 9 plataformas | **6+ (via skills)** |
+| **Instalacion** | Script personalizado | `pip install` | **Claude Code /setup** |
+| **Personalizacion** | Archivos de config | Config + archivos | **Skills + codigo** |
+
+## Filosofia: Por que existe NanoClaw
+
+OpenClaw tiene 52+ modulos, 8 archivos de gestion de configuracion, 45+ dependencias, y abstracciones para 15 proveedores de canales. Todo se ejecuta en un proceso Node con memoria compartida. La seguridad es a nivel de aplicacion — listas de permitidos y codigos de emparejamiento, no aislamiento a nivel de SO.
+
+NanoClaw toma un enfoque diferente:
+
+**Lo suficientemente pequeño para entender.** Un proceso, unos pocos archivos fuente. El codebase es lo suficientemente pequeño como para que Claude Code te lo explique y lo modifique de forma segura.
+
+**Seguro por aislamiento.** Los agentes se ejecutan en contenedores Linux. Solo pueden ver lo que se monta explicitamente. El acceso a Bash es seguro porque los comandos se ejecutan dentro del contenedor, no en tu host.
+
+**Construido para un usuario.** Esto no es un framework. Es software funcional que forkeas y haces que Claude Code personalice para tus necesidades exactas.
+
+**Nativo de IA.** Sin asistente de instalacion. Claude Code guia la configuracion. Sin panel de monitoreo. Preguntale a Claude que esta pasando. Sin herramientas de depuracion. Describe el problema, Claude lo arregla.
+
+**Skills en lugar de funcionalidades.** Los contribuidores no agregan funcionalidades al codebase. Contribuyen skills de Claude Code como `/add-telegram` que transforman tu fork. Terminas con codigo limpio que hace exactamente lo que necesitas.
+
+## Requisitos
+
+Antes de empezar, asegurate de tener:
+
+| Requisito | Por que |
+|-----------|---------|
+| macOS o Linux | NanoClaw se ejecuta en sistemas tipo Unix |
+| Node.js 20+ | Entorno de ejecucion |
+| [Claude Code](https://claude.ai/download) | Asistente de configuracion y orquestacion de agentes |
+| Docker o Apple Container | Runtime de contenedores para aislamiento de agentes |
+| Clave API de Anthropic | Acceso a Claude via Agent SDK |
+
+Para esta guia de despliegue en VPS, asumo Ubuntu 24.04 con Docker.
+
+## Instalacion
+
+NanoClaw usa Claude Code para la configuracion. No hay un `npm install` o `pip install` como asistente. Clonas el repo y dejas que Claude se encargue de todo.
+
+```bash
+git clone https://github.com/qwibitai/NanoClaw.git
+cd NanoClaw
+claude
+```
+
+Luego ejecuta `/setup`. Claude Code se encarga de:
+
+1. Instalar dependencias de Node.js
+2. Autenticacion de WhatsApp
+3. Deteccion y configuracion del runtime de contenedores
+4. Configuracion del servicio
+5. Configuracion inicial de skills
+
+El proceso de configuracion es interactivo. Claude te hara preguntas y configurara todo basandose en tus respuestas.
+
+<Notice type="info" title="Configuracion con Claude Code">
+NanoClaw esta diseñado alrededor de Claude Code como interfaz de configuracion. Si no has usado Claude Code antes, es la herramienta CLI de Anthropic que puede ejecutar comandos y modificar archivos. El comando `/setup` es un skill que guia toda la instalacion.
+</Notice>
+
+## Aislamiento en contenedores
+
+Esta es la principal caracteristica que diferencia a NanoClaw. Los agentes se ejecutan en contenedores, no en el proceso principal.
+
+### Como funciona
+
+Cuando envias un mensaje a NanoClaw:
+
+1. El mensaje llega via WhatsApp (libreria Baileys)
+2. El mensaje se almacena en SQLite con contexto de grupo
+3. El bucle de polling recoge el mensaje
+4. El container runner genera un contenedor aislado
+5. El Claude Agent SDK procesa el mensaje dentro del contenedor
+6. La respuesta se escribe en el sistema de archivos IPC
+7. El proceso principal envia la respuesta de vuelta a WhatsApp
+
+El contenedor no tiene acceso a red por defecto. Solo puede ver los directorios que montes explicitamente. Los comandos shell se ejecutan dentro del contenedor, asi que incluso si el agente intenta algo peligroso, esta contenido.
+
+### Configuracion de Docker
+
+En Linux, NanoClaw usa Docker para el aislamiento en contenedores. El container runner genera un nuevo contenedor para cada invocacion del agente:
+
+```typescript
+// src/container-runner.ts (simplified)
+const container = await docker.createContainer({
+  Image: 'nanoclaw-agent',
+  Cmd: ['node', 'agent-entrypoint.js'],
+  HostConfig: {
+    Binds: [`${groupDir}:/workspace:rw`],
+    NetworkMode: 'none', // No network by default
+  },
+});
+```
+
+Cada grupo tiene su propio directorio montado. El contenedor solo puede ver los archivos de ese grupo.
+
+### Apple Container (macOS)
+
+En macOS, puedes opcionalmente cambiar a Apple Container para un runtime nativo mas ligero:
+
+```
+/convert-to-apple-container
+```
+
+Esto modifica la configuracion para usar el runtime de contenedores de Apple en lugar de Docker. El modelo de aislamiento es el mismo, pero la sobrecarga es menor en macOS.
+
+## Configuracion de WhatsApp
+
+NanoClaw soporta WhatsApp, Telegram, Discord, Slack, Signal y operacion headless. WhatsApp via la libreria Baileys es el canal por defecto, con otros disponibles a traves de skills.
+
+### Autenticacion
+
+Ejecuta el comando de configuracion en Claude Code:
+
+```
+/setup
+```
+
+Claude te guiara a traves de la autenticacion de WhatsApp. El proceso genera un codigo QR que escaneas con tu telefono:
+
+1. Abre WhatsApp en tu telefono
+2. Ve a Configuracion → Dispositivos vinculados
+3. Toca "Vincular un dispositivo"
+4. Escanea el codigo QR mostrado por NanoClaw
+
+La sesion de autenticacion se almacena localmente. Permaneceras conectado hasta que cierres sesion explicitamente o la sesion expire.
+
+### Aislamiento de grupos
+
+Cada grupo de WhatsApp tiene su propio contexto:
+
+| Aislamiento | Que significa |
+|-------------|---------------|
+| `CLAUDE.md` | Cada grupo tiene su propio archivo de memoria |
+| Sistema de archivos | Los archivos de cada grupo estan en directorios separados |
+| Contenedor | Cada grupo se ejecuta en su propio sandbox de contenedor |
+| Historial | Las conversaciones no se comparten entre grupos |
+
+El canal principal (tu chat contigo mismo) es especial. Desde ahi puedes gestionar grupos y tareas:
+
+```
+@Andy list all scheduled tasks across groups
+@Andy pause the Monday briefing task
+@Andy join the Family Chat group
+```
+
+### Palabra de activacion
+
+Por defecto, el bot responde a `@Andy`. Cambiala diciendole a Claude Code:
+
+```
+Change the trigger word to @Bob
+```
+
+O ejecuta `/customize` para cambios guiados.
+
+## Agent Swarms
+
+NanoClaw soporta [Agent Swarms](https://code.claude.com/docs/en/agent-teams), donde multiples agentes se reparten el trabajo en una sola solicitud.
+
+### Que son los Agent Swarms
+
+En lugar de que un agente maneje todo, puedes crear un equipo:
+
+```
+@Andy research the latest React patterns and have the code reviewer check if our codebase follows them
+```
+
+Esto podria generar:
+- **Agente investigador**: Busca los ultimos patrones de React
+- **Agente revisor de codigo**: Analiza tu codebase contra los patrones
+- **Coordinador**: Sintetiza los hallazgos en una respuesta
+
+Cada agente se ejecuta en su propio contenedor con acceso a las herramientas y archivos relevantes.
+
+### Configurar swarms
+
+Los agent swarms se configuran a traves de skills. Dile a Claude Code que tipo de equipo quieres:
+
+```
+Create a swarm for daily news briefing with separate agents for:
+- Tech news fetching
+- AI news fetching  
+- Summary writing
+```
+
+Claude creara los archivos de skill y la configuracion necesarios.
+
+## Sistema de skills
+
+NanoClaw no usa archivos de configuracion para la personalizacion. Usa skills.
+
+### Que son los skills
+
+Los skills son instrucciones que le enseñan a Claude Code como transformar tu instalacion de NanoClaw. Son archivos Markdown en `.claude/skills/`:
+
+```
+.claude/skills/
+├── add-telegram/SKILL.md
+├── customize/SKILL.md
+├── setup/SKILL.md
+└── ...
+```
+
+### Skills incluidos
+
+| Skill | Que hace |
+|-------|----------|
+| `/setup` | Instalacion y configuracion inicial |
+| `/customize` | Personalizacion guiada del comportamiento |
+| `/add-gmail` | Agregar integracion con Gmail |
+| `/add-telegram` | Agregar Telegram como canal (contribuido) |
+| `/add-slack` | Agregar integracion con Slack (contribuido) |
+| `/create-skill` | Meta-skill para crear nuevos skills |
+
+### Personalizar comportamiento
+
+No hay archivos de configuracion que aprender. Solo dile a Claude Code lo que quieres:
+
+```
+Change the trigger word to @Bob
+Remember to make responses shorter and more direct
+Add a custom greeting when I say good morning
+Store conversation summaries weekly
+```
+
+El codebase es lo suficientemente pequeño como para que Claude pueda modificarlo de forma segura. Cada personalizacion se convierte en parte de tu fork.
+
+### Contribuir skills
+
+**No agregues funcionalidades. Agrega skills.**
+
+Si quieres agregar soporte para Telegram, no crees un PR que agregue Telegram junto a WhatsApp. En cambio, contribuye un archivo de skill que le enseñe a Claude Code como transformar una instalacion de NanoClaw para usar Telegram.
+
+Los usuarios luego ejecutan `/add-telegram` en su fork y obtienen codigo limpio que hace exactamente lo que necesitan.
+
+## Tareas programadas
+
+NanoClaw tiene un planificador de tareas integrado para trabajos recurrentes.
+
+### Crear tareas programadas
+
+Dile al bot lo que quieres programar:
+
+```
+@Andy send an overview of the sales pipeline every weekday morning at 9am
+@Andy review the git history for the past week each Friday and update the README if there's drift
+@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+```
+
+El bot crea tareas programadas que ejecutan Claude y te pueden enviar mensajes de vuelta.
+
+### Gestionar tareas
+
+Desde el canal principal (tu chat contigo mismo):
+
+```
+@Andy list all scheduled tasks across groups
+@Andy pause the Monday briefing task
+@Andy resume the Friday git review
+```
+
+Las tareas se almacenan en SQLite y persisten entre reinicios.
+
+## Sistema de memoria
+
+Cada grupo tiene su propio archivo `CLAUDE.md` para memoria:
+
+```
+groups/
+├── main/
+│   └── CLAUDE.md
+├── family-chat/
+│   └── CLAUDE.md
+└── work-team/
+    └── CLAUDE.md
+```
+
+El agente lee este archivo al inicio de cada conversacion y puede actualizarlo. Dile que recuerde algo y lo escribe en el archivo.
+
+### Archivos de contexto
+
+Como otros bots en este espacio, NanoClaw usa archivos de workspace para dar forma al comportamiento:
+
+| Archivo | Proposito |
+|---------|-----------|
+| `CLAUDE.md` | Memoria y contexto por grupo |
+| `IDENTITY.md` | Quien es el agente |
+| `SOUL.md` | Personalidad y valores centrales |
+
+Estos son archivos Markdown simples que puedes editar directamente o hacer que Claude los modifique.
+
+## Modelo de seguridad
+
+La seguridad de NanoClaw se basa en aislamiento a nivel de SO, no en verificaciones a nivel de aplicacion.
+
+### Sandboxing en contenedores
+
+| Capa | Proteccion |
+|------|------------|
+| Red | Los contenedores no tienen red por defecto |
+| Sistema de archivos | Solo los directorios montados explicitamente son visibles |
+| Proceso | El proceso del contenedor no puede acceder a procesos del host |
+| Usuario | El contenedor se ejecuta como usuario no-root |
+
+Incluso si el agente intenta ejecutar comandos peligrosos, esta contenido. El sistema host esta protegido.
+
+### Lo que aun deberias revisar
+
+El aislamiento en contenedores es fuerte, pero aun deberias revisar:
+
+1. **Que directorios montas** — Solo monta directorios que el agente realmente necesita
+2. **Que skills instalas** — Los skills pueden modificar el codebase
+3. **Tareas programadas** — Las tareas se ejecutan automaticamente con los permisos que tenga el agente
+
+Ve `docs/SECURITY.md` en el repositorio para el modelo de seguridad completo.
+
+## Despliegue en VPS
+
+Para uso en produccion en un VPS, aqui tienes una configuracion de despliegue completa.
+
+### Requisitos del servidor
+
+| Especificacion | Minimo | Recomendado |
+|----------------|--------|-------------|
+| CPU | 1 nucleo | 2+ nucleos |
+| RAM | 1GB | 2GB+ |
+| Almacenamiento | 10GB | 20GB+ |
+| SO | Ubuntu 22.04 | Ubuntu 24.04 |
+
+NanoClaw en si es ligero. El principal consumidor de recursos es Docker para el aislamiento en contenedores.
+
+### Despliegue rapido
+
+```bash
+ssh root@YOUR_SERVER_IP
+
+# Update system
+apt update && apt upgrade -y
+
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker $USER
+
+# Install Node.js 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
+
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Clone NanoClaw
+git clone https://github.com/qwibitai/NanoClaw.git
+cd NanoClaw
+
+# Run setup
+claude
+# Then type: /setup
+```
+
+### Servicio systemd
+
+Crea un servicio systemd para inicio automatico:
+
+```bash
+cat > /etc/systemd/system/nanoclaw.service << 'EOF'
+[Unit]
+Description=NanoClaw AI Assistant
+After=docker.service network.target
+
+[Service]
+Type=simple
+User=dragos
+WorkingDirectory=/home/dragos/nanoclaw
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable nanoclaw
+systemctl start nanoclaw
+```
+
+### Variables de entorno
+
+Crea un archivo `.env` con tus claves API:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+El proceso de configuracion te pedira esto, pero tambien puedes configurarlo manualmente.
+
+## Solucion de problemas
+
+NanoClaw esta diseñado para depurarse a traves de Claude Code. Sin visores de logs ni paneles de depuracion.
+
+### Usando /debug
+
+Si algo no funciona:
+
+```
+/debug
+```
+
+Claude Code analizara los logs, verificara la configuracion y sugerira soluciones. Si encuentra un problema que probablemente afecte a otros usuarios, puedes abrir un PR para modificar el skill de setup.
+
+### Problemas comunes
+
+<Accordion label="Problemas comunes" group="troubleshooting" expanded="false">
+
+**WhatsApp no conecta**
+
+Ejecuta `/debug` y Claude verificara:
+- Validez del archivo de sesion
+- Conectividad de red
+- Estado de la libreria Baileys
+
+Puede que necesites re-escanear el codigo QR si la sesion expiro.
+
+**El contenedor no inicia**
+
+Verifica que Docker este ejecutandose:
+```bash
+docker ps
+```
+
+Si Docker esta ejecutandose pero los contenedores no se generan, revisa los logs:
+```bash
+journalctl -u nanoclaw -f
+```
+
+**Las tareas programadas no se ejecutan**
+
+Desde el canal principal:
+```
+@Andy why isn't the scheduler running?
+```
+
+El agente puede diagnosticar sus propios problemas del planificador.
+
+**Las respuestas del agente son lentas**
+
+El inicio del contenedor agrega latencia. Para respuestas mas rapidas:
+- Usa una imagen base mas pequeña
+- Habilita la reutilizacion de contenedores (avanzado)
+- Verifica los limites de recursos de Docker
+
+</Accordion>
+
+## Analisis profundo de la arquitectura
+
+Para quienes quieran entender el codebase:
+
+```
+src/
+├── index.ts           # Orchestrator: state, message loop, agent invocation
+├── channels/
+│   └── whatsapp.ts    # WhatsApp connection, auth, send/receive
+├── ipc.ts             # IPC watcher and task processing
+├── router.ts          # Message formatting and outbound routing
+├── group-queue.ts     # Per-group queue with global concurrency limit
+├── container-runner.ts # Spawns streaming agent containers
+├── task-scheduler.ts  # Runs scheduled tasks
+└── db.ts              # SQLite operations (messages, groups, sessions, state)
+```
+
+Patrones clave:
+
+- **Proceso unico**: Todo se ejecuta en un unico proceso Node.js
+- **Colas por grupo**: Cada grupo tiene su propia cola de mensajes con control de concurrencia
+- **IPC via sistema de archivos**: La comunicacion entre el proceso principal y los contenedores usa archivos
+- **Respuestas en streaming**: La salida del contenedor se transmite de vuelta a WhatsApp en tiempo real
+
+## NanoClaw vs ZeroClaw vs nanobot
+
+Uso los tres, asi que aqui va una comparacion directa:
+
+| Aspecto | NanoClaw 🐾 | ZeroClaw 🦀 | nanobot 🐍 |
+|---------|------------|------------|-----------|
+| Lenguaje | TypeScript | Rust | Python |
+| Aislamiento | Contenedores | Nivel de app | Nivel de app |
+| Agent SDK | Claude Agent | Personalizado | LiteLLM |
+| Agent Swarms | Si | No | No |
+| Canales | 6+ (via skills) | 8+ | 9 |
+| Metodo de instalacion | Claude Code | `cargo install` | `pip install` |
+| Personalizacion | Skills | Config + codigo | Config + archivos |
+| Uso de RAM | ~200MB | < 5MB | ~100MB |
+
+NanoClaw gana en aislamiento y capacidades de agente. ZeroClaw es mas eficiente en recursos. nanobot tiene soporte mas amplio de canales y la configuracion mas facil.
+
+<Accordion label="Preguntas frecuentes" group="faq" expanded="true">
+
+**¿Por que solo WhatsApp?**
+
+El autor usa WhatsApp. La idea es que forkees el proyecto y ejecutes un skill para cambiarlo si quieres otra cosa. Esa es la filosofia de diseño.
+
+**¿Puedo ejecutar esto sin Docker?**
+
+No. El aislamiento en contenedores es fundamental para el modelo de seguridad. El agente se ejecuta dentro de contenedores, no como parte del proceso principal.
+
+**¿En que se diferencia de simplemente ejecutar Claude Code?**
+
+Claude Code es un CLI interactivo. NanoClaw es un asistente siempre activo al que le envias mensajes desde tu telefono. Tiene memoria, tareas programadas y contexto de grupo que persiste entre conversaciones.
+
+**¿Pueden varias personas usar una instancia de NanoClaw?**
+
+Si, pero cada persona deberia estar en un grupo diferente. Los grupos estan aislados entre si. El canal principal (chat contigo mismo) es para control de administracion.
+
+**¿Cuanto cuesta ejecutar NanoClaw?**
+
+VPS: ~$5/mes en Hetzner. API de Claude: depende del uso. El Agent SDK usa tokens de Claude, asi que espera $10-50/mes para uso personal dependiendo de cuanto interactues con el.
+
+**¿Puedo usar un LLM diferente?**
+
+NanoClaw esta construido para el Agent SDK de Claude. No soporta otros LLMs de fabrica. Si quieres soporte multi-modelo con proveedores como [MiniMax M2.5 o GLM-5](/es/mejores-modelos-opensource-openclaw/), mira [nanobot](/es/guia-configuracion-nanobot/), [NullClaw](/es/guia-despliegue-nullclaw/) o [ZeroClaw](/es/guia-configuracion-zeroclaw/) en su lugar.
+
+**¿Como agrego Telegram/Discord/Slack?**
+
+Ejecuta el skill correspondiente:
+```
+/add-telegram
+/add-slack
+/add-discord
+```
+
+Estos son skills contribuidos que le enseñan a Claude Code como transformar tu instalacion.
+
+</Accordion>
+
+Si quieres una alternativa basada en Zig que se ejecuta en hardware de $5 con 22+ proveedores, ve nuestra [guia de despliegue de NullClaw](/es/guia-despliegue-nullclaw/). Para una opcion basada en Python con soporte para MiniMax M2.5 y GLM-5, revisa la [guia de configuracion de nanobot](/es/guia-configuracion-nanobot/). Para recomendaciones de modelos que funcionan en estas plataformas, ve [mejores modelos open source para OpenClaw](/es/mejores-modelos-opensource-openclaw/).
+
+Si quieres explorar otras herramientas de codificacion con IA, nuestra [comparacion de herramientas de codificacion con IA](/ai-coading-tools/) cubre el panorama actual. Para conceptos basicos de MCP que funcionan en todos estos asistentes, revisa la [introduccion a MCP para principiantes](/mcp-introduction-beginners/).
+
+Este articulo tambien esta disponible en ingles: [NanoClaw Deploy Guide](/nanoclaw-deploy-guide/)
