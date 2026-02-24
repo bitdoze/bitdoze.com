@@ -4,9 +4,9 @@ Date: 06 October 2025
 
 ## Commands
 
-- **dev**: `npm run dev` - Start development server on localhost:4321
-- **build**: `npm run build` - Build for production
-- **preview**: `npm run preview` - Preview production build
+- **dev**: `bun run dev` - Start development server on localhost:4321
+- **build**: `bun run build` - Build for production
+- **preview**: `bun run preview` - Preview production build
 - **no tests**: No test scripts configured in package.json
 
 ## Architecture
