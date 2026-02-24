@@ -5,7 +5,7 @@ Date: 06 October 2025
 ## Commands
 
 - **dev**: `bun run dev` - Start development server on localhost:4321
-- **build**: `bun run build` - Build for production
+- **build**: `bun run build:ci` - Build for production
 - **preview**: `bun run preview` - Preview production build
 - **no tests**: No test scripts configured in package.json
 
