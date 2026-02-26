@@ -3,6 +3,20 @@ import { formatDate } from '@utils/date';
 import { getEntrySlug } from '@utils/content';
 import { isPostIdInLocale } from '@utils/i18n';
 
+const SEARCH_CONTENT_LIMIT = 450;
+
+function normalizeSearchContent(input: string) {
+  return input
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+    .replace(/\[[^\]]+]\([^)]+\)/g, '$1')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, SEARCH_CONTENT_LIMIT);
+}
+
 export async function GET() {
   // Get all posts
   const posts = await getCollection('posts', ({ id, data }) => !data.draft && isPostIdInLocale(id, 'en'));
@@ -24,7 +38,7 @@ export async function GET() {
       image: imageData,
       categories: post.data.categories || [],
       tags: post.data.tags || [],
-      content: post.body
+      content: normalizeSearchContent(post.body ?? '')
     };
   });
 
