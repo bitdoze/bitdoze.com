@@ -1,0 +1,653 @@
+---
+date: 2026-03-02T00:00:00Z
+title: "OpenFang Setup Guide: GLM-5, MiniMax M2.5, Hands, and Discord on Your VPS"
+description: "Step-by-step guide to installing OpenFang on a Linux VPS with GLM-5, MiniMax M2.5, Discord integration, autonomous Hands, and 16 security layers. Covers config.toml, providers, channels, and Docker deployment."
+image: "../../assets/images/26/03/openfang-setup-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "vps"]
+canonical: "https://www.bitdoze.com/openfang-setup-guide/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+I've been running [OpenFang](https://github.com/RightNow-AI/openfang) for about two weeks now, side by side with my [OpenClaw setup](/clawdbot-setup-guide/) and [nanobot instance](/nanobot-setup-guide/). OpenFang is different from everything else I've tested. It calls itself an "Agent Operating System," and after using it I think that label fits. It ships autonomous agents called Hands that run on schedules without you having to prompt them, backed by 16 security layers and 40 chat channel adapters, all in a single Rust binary.
+
+This guide walks through getting OpenFang running on a VPS with GLM-5 and MiniMax M2.5 as your LLM providers, Discord as the chat channel, and the Researcher Hand activated.
+
+<Button text="OpenFang GitHub" link="https://github.com/RightNow-AI/openfang" variant="solid" color="blue" size="md" icon="github" />
+
+<Notice type="info" title="What this guide covers">
+<ListCheck>
+<ul>
+<li>Installing OpenFang via the install script or from source</li>
+<li>Configuring GLM-5 (Zhipu) and MiniMax M2.5 as LLM providers</li>
+<li>Setting up Discord as a chat channel</li>
+<li>Activating the Researcher Hand for autonomous tasks</li>
+<li>Security settings, MCP support, and the Hands system</li>
+<li>Docker deployment and systemd service setup</li>
+</ul>
+</ListCheck>
+</Notice>
+
+If you want to compare OpenFang against other self-hosted bots, our [OpenClaw alternatives](/openclaw-alternatives/) roundup covers NanoClaw, nanobot, PicoClaw, ZeroClaw, NullClaw, and now OpenFang. For MCP basics, check the [MCP introduction for beginners](/mcp-introduction-beginners/).
+
+## What OpenFang actually is
+
+OpenFang is an open-source project from [RightNow AI](https://www.rightnowai.co/), built entirely in Rust. It's structured as a 14-crate workspace totaling about 137,000 lines of code with 1,767+ tests and zero clippy warnings. The whole thing compiles down to a single ~32MB binary.
+
+The architecture looks like this:
+
+```
+You (Discord / Telegram / Slack / WhatsApp / 36 more)
+    ↓
+OpenFang Daemon (running on your VPS)
+    ↓
+┌─────────────────────────────────┐
+│  Kernel: orchestration, RBAC,   │
+│  scheduling, budget tracking    │
+├─────────────────────────────────┤
+│  Runtime: agent loop, 53 tools, │
+│  WASM sandbox, MCP, A2A         │
+├─────────────────────────────────┤
+│  LLM Provider (27 supported)    │
+│  MiniMax, Zhipu, Anthropic, etc │
+└─────────────────────────────────┘
+    ↓
+Hands (autonomous agents on schedules)
+```
+
+Messages come in from your chat app and get routed to whichever LLM you configured. Agents can use 53 built-in tools, connect to MCP servers, and run inside a WASM sandbox. The part I keep coming back to is Hands. These are autonomous agents that wake up on a schedule, do their job, and report back to your dashboard without you ever sending a message.
+
+## Why GLM-5 and MiniMax M2.5
+
+Both models work well with OpenFang's provider system and keep costs low for always-on agent setups.
+
+### GLM-5
+
+GLM-5 from Zhipu AI is a 744B MoE model with about 40-44B active parameters. It ranks first among open-source models on BrowseComp, which measures web search and research tasks — a good match for OpenFang's Researcher Hand.
+
+| Spec | Value |
+|------|-------|
+| Architecture | 744B MoE, ~40B active |
+| Context window | 200K tokens |
+| SWE-Bench Verified | 77.8% |
+| BrowseComp | #1 open-source |
+| License | MIT |
+
+The 200K context window handles long research tasks without running into limits.
+
+### MiniMax M2.5
+
+MiniMax M2.5 is a 230B MoE model with only 10B active parameters per pass. It's faster and cheaper than GLM-5, and the 1M token context window is hard to ignore:
+
+| Spec | Value |
+|------|-------|
+| Architecture | 230B MoE, 10B active |
+| Context window | 1M tokens |
+| Speed (Lightning) | 100 tokens/sec |
+| Cost (Lightning) | $0.30/M input, $2.40/M output |
+| SWE-Bench Verified | 80.2% |
+| License | Modified MIT (open-source) |
+
+MiniMax M2.5 scores 80.2% on SWE-Bench Verified, which puts it alongside Claude Opus 4.6 at a fraction of the price. The 1M context is overkill for chat but helpful when Hands are processing large amounts of research data.
+
+Both models are available through their direct APIs and through OpenRouter.
+
+## Installation
+
+Three paths to get OpenFang running.
+
+<Tabs>
+<Tab name="Install script (recommended)">
+
+The fastest way. Works on macOS and Linux.
+
+```bash
+curl -fsSL https://openfang.sh/install | sh
+```
+
+This downloads the prebuilt binary for your platform and puts it in your PATH.
+
+</Tab>
+<Tab name="From source">
+
+If you want the latest code or plan to contribute:
+
+```bash
+# Install Rust if you don't have it
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Clone and build
+git clone https://github.com/RightNow-AI/openfang.git
+cd openfang
+cargo build --workspace --release
+
+# The binary is at target/release/openfang
+sudo cp target/release/openfang /usr/local/bin/
+```
+
+</Tab>
+<Tab name="Windows">
+
+PowerShell:
+
+```powershell
+irm https://openfang.sh/install.ps1 | iex
+```
+
+</Tab>
+</Tabs>
+
+After installing, initialize the workspace and config:
+
+```bash
+openfang init
+```
+
+This creates the `~/.openfang/` directory with a default `config.toml`, sets up the SQLite database for memory, and walks you through picking an LLM provider.
+
+Check that it's working:
+
+```bash
+openfang status
+```
+
+## Configuring GLM-5 (Zhipu)
+
+OpenFang uses a `config.toml` file at `~/.openfang/config.toml`. All provider settings go there.
+
+### Get an API key
+
+1. Go to [z.ai](https://z.ai/manage-apikey/apikey-list)
+2. Register and create an API key
+
+<Notice type="success" title="Z.AI GLM coding plan — 10% off">
+Z.AI offers [GLM coding plans](https://z.ai/subscribe?ic=NKNUNYDRZT) designed for continuous developer workloads. Use our link for 10% off.
+</Notice>
+
+<Notice type="info" title="Zhipu coding plan endpoint">
+If you're on Zhipu's coding plan, set `api_base = "https://api.z.ai/api/coding/paas/v4"` in your zhipu provider config. This routes through their coding-optimized endpoint.
+</Notice>
+
+### Add to config
+
+```toml
+[providers.zhipu]
+api_key = "your-zhipu-api-key"
+api_base = "https://api.z.ai/api/coding/paas/v4"
+
+[agents.defaults]
+model = "glm-5"
+```
+
+OpenFang's provider system recognizes the `glm` keyword and routes it to Zhipu automatically. Internally it handles the correct API format and prefixing.
+
+### Test it
+
+```bash
+openfang chat
+> What's 42 * 17?
+```
+
+If you get a response, GLM-5 is wired up correctly. Type `exit` to leave the chat.
+
+## Configuring MiniMax M2.5
+
+### Get an API key
+
+1. Go to [platform.minimax.io](https://platform.minimax.io) (global) or [minimaxi.com](https://www.minimaxi.com) (mainland China)
+2. Create an account and generate an API key
+3. Note which platform you're on since the API base URL differs
+
+<Notice type="success" title="MiniMax coding plan — 10% off">
+MiniMax offers coding plans priced for developer workloads. [Get 10% off with our referral link](https://go.bitdoze.com/minimax). For details on how GLM-5 and MiniMax M2.5 compare for always-on bots, see our [best open source models for OpenClaw](/best-opensource-models-for-openclaw/) breakdown.
+</Notice>
+
+### Add to config
+
+For the global platform:
+
+```toml
+[providers.minimax]
+api_key = "your-minimax-api-key"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+```
+
+For the mainland China platform, add the API base override:
+
+```toml
+[providers.minimax]
+api_key = "your-minimax-api-key"
+api_base = "https://api.minimaxi.com/v1"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+```
+
+OpenFang detects the `minimax` keyword in the model name and routes requests to the MiniMax API. The provider system handles authentication and request formatting.
+
+### Using both providers
+
+Configure both and switch between them by changing the default model:
+
+```toml
+[providers.zhipu]
+api_key = "your-zhipu-key"
+api_base = "https://api.z.ai/api/coding/paas/v4"
+
+[providers.minimax]
+api_key = "your-minimax-key"
+
+[agents.defaults]
+model = "glm-5"
+```
+
+Change `model` to `"MiniMax-M2.5"` whenever you want to switch. You can also set per-channel model overrides, so Discord could use GLM-5 while Telegram uses MiniMax:
+
+```toml
+[channels.discord]
+model = "glm-5"
+
+[channels.telegram]
+model = "MiniMax-M2.5"
+```
+
+## Discord setup
+
+Discord is straightforward with OpenFang since it's one of 40 supported channel adapters.
+
+### Create a Discord bot
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Click **New Application**, give it a name
+3. Go to **Bot** in the left sidebar, click **Add Bot**
+4. Copy the bot token
+
+### Enable intents
+
+Still in the Bot settings page:
+
+1. Scroll down to **Privileged Gateway Intents**
+2. Enable **MESSAGE CONTENT INTENT** (required for the bot to read messages)
+3. Optionally enable **SERVER MEMBERS INTENT** if you plan to use allow lists
+
+### Get your user ID
+
+1. Open Discord Settings → **Advanced** → enable **Developer Mode**
+2. Right-click your avatar anywhere in Discord
+3. Click **Copy User ID**
+
+### Configure OpenFang
+
+```toml
+[channels.discord]
+enabled = true
+token = "YOUR_DISCORD_BOT_TOKEN"
+allow_from = ["YOUR_USER_ID"]
+```
+
+The `allow_from` array restricts who can talk to the bot. Leave it empty to let anyone in your server use it, or add specific user IDs. I keep it restricted for personal bots.
+
+### Invite the bot to your server
+
+1. In the Discord developer portal, go to **OAuth2** → **URL Generator**
+2. Under **Scopes**, check `bot`
+3. Under **Bot Permissions**, check `Send Messages` and `Read Message History`
+4. Copy the generated URL and open it in your browser
+5. Select the server you want to add the bot to
+
+### Start the daemon
+
+```bash
+openfang start
+```
+
+Send a message in Discord. The bot should respond. The dashboard is also live at `http://localhost:4200`.
+
+## Full config example
+
+Here's what a complete `~/.openfang/config.toml` looks like with GLM-5, MiniMax M2.5 as a fallback, and Discord:
+
+```toml
+[providers.zhipu]
+api_key = "your-zhipu-api-key"
+api_base = "https://api.z.ai/api/coding/paas/v4"
+
+[providers.minimax]
+api_key = "your-minimax-api-key"
+
+[agents.defaults]
+model = "glm-5"
+max_tokens = 8192
+temperature = 0.7
+
+[channels.discord]
+enabled = true
+token = "YOUR_DISCORD_BOT_TOKEN"
+allow_from = ["YOUR_USER_ID"]
+
+[dashboard]
+host = "0.0.0.0"
+port = 4200
+
+[security]
+wasm_sandbox = true
+audit_trail = true
+```
+
+### Config settings explained
+
+| Setting | Default | What it does |
+|---------|---------|-------------|
+| `agents.defaults.model` | — | Which model handles your messages |
+| `agents.defaults.max_tokens` | `8192` | Max tokens per LLM response |
+| `agents.defaults.temperature` | `0.7` | Randomness (lower = more deterministic) |
+| `dashboard.port` | `4200` | Port the dashboard listens on |
+| `security.wasm_sandbox` | `true` | Run tool code in WASM sandbox |
+| `security.audit_trail` | `true` | Merkle hash-chain audit trail for all actions |
+
+## The provider system
+
+OpenFang ships with 3 native LLM drivers (Anthropic, Gemini, OpenAI-compatible) that route to 27 providers. When you set a model name, OpenFang:
+
+1. Matches keywords in the name against its provider registry
+2. Checks that the matched provider has an API key
+3. Routes through the correct native driver
+4. Handles authentication, rate limiting, and cost tracking
+
+Here are the supported providers:
+
+| Provider | What it covers |
+|----------|---------------|
+| Anthropic | Claude models (native driver) |
+| Gemini | Google Gemini (native driver) |
+| OpenAI | GPT models (native driver) |
+| Groq | Fast inference |
+| DeepSeek | DeepSeek models |
+| OpenRouter | Gateway to any model |
+| Together | Open-source model hosting |
+| Mistral | Mistral models |
+| Fireworks | Fast inference |
+| Cohere | Command models |
+| Perplexity | Search-augmented models |
+| xAI | Grok models |
+| Ollama | Local models |
+| vLLM | Local model serving |
+| LM Studio | Local models |
+| MiniMax | MiniMax M2.5 and others |
+| Zhipu | GLM-5 and others |
+| Moonshot | Kimi models |
+| Qwen / DashScope | Qwen models |
+| Bedrock | AWS-hosted models |
+
+OpenFang routes requests based on task complexity scoring, falls back to another provider if one fails, and tracks per-model costs in the dashboard.
+
+## The Hands system
+
+Hands are the reason I keep running OpenFang alongside my other bots. They're pre-built autonomous agents that run on schedules without you sending messages. You activate a Hand, it goes to work, and you check its progress on the dashboard.
+
+Each Hand comes bundled in the binary with:
+- **HAND.toml** — manifest declaring required tools and settings
+- **System prompt** — a multi-phase operational playbook (500+ words, not a one-liner)
+- **SKILL.md** — domain expertise loaded into context at runtime
+- **Guardrails** — approval gates for sensitive actions
+
+### The 7 bundled Hands
+
+| Hand | What it does |
+|------|-------------|
+| **Clip** | Takes YouTube URLs, cuts them into vertical shorts with captions and thumbnails, publishes to Telegram/WhatsApp |
+| **Lead** | Daily lead generation — discovers, enriches, scores, and deduplicates qualified prospects |
+| **Collector** | OSINT intelligence — monitors targets with change detection, sentiment tracking, knowledge graphs |
+| **Predictor** | Superforecasting — collects signals, builds reasoning chains, tracks accuracy with Brier scores |
+| **Researcher** | Deep research — cross-references sources, CRAAP fact-checking, cited reports in multiple languages |
+| **Twitter** | X/Twitter management — 7 content formats, scheduling, engagement tracking, approval queue |
+| **Browser** | Web automation — navigates sites, fills forms, handles workflows (mandatory purchase approval gate) |
+
+### Activating a Hand
+
+```bash
+# Activate the Researcher Hand
+openfang hand activate researcher
+
+# Check progress
+openfang hand status researcher
+
+# List all available Hands
+openfang hand list
+
+# Pause without losing state
+openfang hand pause researcher
+```
+
+I'd start with the Researcher Hand. It runs on its own, cross-references sources, evaluates credibility using CRAAP criteria, and generates cited reports. Pair it with GLM-5 (which ranks #1 on BrowseComp) and the research output is genuinely useful without any babysitting.
+
+## Security model
+
+OpenFang has 16 security systems, each running independently. Here are the ones that matter for a personal setup:
+
+### WASM sandbox
+
+Every tool runs inside a WebAssembly sandbox with fuel metering. If a tool tries to run forever, the watchdog kills it:
+
+```toml
+[security]
+wasm_sandbox = true
+```
+
+This is enabled by default. Unlike application-level permission checks, the tool physically cannot escape the sandbox.
+
+### Audit trail
+
+Every action gets added to a Merkle hash-chain. Tamper with one entry and the entire chain breaks:
+
+```toml
+[security]
+audit_trail = true
+```
+
+### Channel allowlists
+
+Same concept as nanobot — restrict who can interact with the bot:
+
+```toml
+[channels.discord]
+allow_from = ["123456789"]
+```
+
+### Secret zeroization
+
+API keys are automatically wiped from memory the moment they're no longer needed. OpenFang uses `Zeroizing<String>` throughout the codebase, so secrets don't linger in RAM.
+
+## MCP and A2A support
+
+OpenFang supports both [Model Context Protocol](/mcp-introduction-beginners/) for tool servers and Agent-to-Agent (A2A) communication. It ships with 25 MCP templates and an AES-256-GCM credential vault for storing MCP server credentials.
+
+### Adding an MCP server
+
+```toml
+[tools.mcp.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents"]
+
+[tools.mcp.remote_server]
+url = "https://mcp.example.com/sse"
+```
+
+MCP tools get discovered automatically when OpenFang starts. The LLM can use them alongside the 53 built-in tools.
+
+## Docker deployment
+
+OpenFang publishes container images:
+
+```bash
+# Pull the image
+docker pull ghcr.io/rightnow-ai/openfang:latest
+
+# Initialize config (first time)
+docker run -v ~/.openfang:/root/.openfang --rm \
+  ghcr.io/rightnow-ai/openfang:latest init
+
+# Edit config on host
+nano ~/.openfang/config.toml
+
+# Run the daemon
+docker run -d \
+  -v ~/.openfang:/root/.openfang \
+  -p 4200:4200 \
+  --name openfang \
+  ghcr.io/rightnow-ai/openfang:latest start
+```
+
+The dashboard is accessible at `http://your-server-ip:4200` after starting.
+
+## VPS hosting
+
+OpenFang uses about 40MB of RAM at idle, far less than OpenClaw's 394MB. I'm running it on a [Hetzner CX22](/hetzner-cloud-review/) (2 vCPU, 4GB RAM) at €4.35/month alongside nanobot with no issues.
+
+<Notice type="success" title="Hetzner discount">
+[Get €20 credit](https://go.bitdoze.com/hetzner) when you sign up through our referral link. That covers around 4 months of a CX22.
+</Notice>
+
+Quick setup on a fresh Ubuntu 24.04 VPS:
+
+```bash
+ssh root@YOUR_SERVER_IP
+
+# Update system
+apt update && apt upgrade -y
+
+# Install OpenFang
+curl -fsSL https://openfang.sh/install | sh
+
+# Initialize
+openfang init
+
+# Edit config
+nano ~/.openfang/config.toml
+
+# Start daemon in background
+openfang start
+```
+
+For a proper daemon setup, create a systemd service:
+
+```ini
+[Unit]
+Description=OpenFang Agent OS
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/openfang start
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save that to `/etc/systemd/system/openfang.service`, then:
+
+```bash
+systemctl daemon-reload
+systemctl enable openfang
+systemctl start openfang
+```
+
+The dashboard will be live at `http://your-server-ip:4200`. You can add more channel adapters later without restarting — OpenFang hot-reloads config changes for channels.
+
+## OpenFang vs nanobot vs OpenClaw
+
+I run all three, so here's a direct comparison:
+
+| Aspect | OpenFang | nanobot | OpenClaw |
+|--------|----------|---------|----------|
+| Language | Rust | Python | TypeScript |
+| Codebase | 137K LOC | ~3,700 lines | 430k+ lines |
+| Install method | `curl` one-liner | `pip install` | Custom installer |
+| Binary size | ~32MB | N/A (Python) | ~500MB |
+| RAM (idle) | ~40MB | ~100MB | >394MB |
+| Cold start | under 200ms | >30s | ~6s |
+| Chat channels | 40 | 9 | 13 |
+| LLM providers | 27 | 13+ | 10 |
+| Security layers | 16 | Basic | 3 |
+| Autonomous agents | 7 Hands | No | No |
+| Dashboard | Built-in (Tauri) | No | Community |
+| MCP support | Yes + A2A | Yes | Not yet |
+
+OpenClaw has the biggest community and most documentation. nanobot installs faster and covers more chat platforms per line of code. OpenFang has the Hands system, more security layers than anything else here, and 40 channel adapters. The tradeoff is that OpenFang is newer (v0.1.0) and you will probably hit rough edges before v1.0. Pin to a specific commit if you're using it for anything critical.
+
+## CLI reference
+
+| Command | What it does |
+|---------|-------------|
+| `openfang init` | Initialize config and workspace |
+| `openfang start` | Start the daemon (dashboard + channels) |
+| `openfang stop` | Stop the daemon |
+| `openfang status` | Show current status |
+| `openfang chat` | Interactive chat mode |
+| `openfang chat researcher` | Chat with a specific agent |
+| `openfang agent spawn coder` | Spawn a pre-built agent |
+| `openfang hand list` | List available Hands |
+| `openfang hand activate <name>` | Activate a Hand |
+| `openfang hand status <name>` | Check Hand progress |
+| `openfang hand pause <name>` | Pause a Hand |
+| `openfang migrate --from openclaw` | Migrate from OpenClaw |
+
+## Migrating from OpenClaw
+
+If you're already running OpenClaw, OpenFang has a built-in migration tool:
+
+```bash
+# Dry run to see what would change
+openfang migrate --from openclaw --dry-run
+
+# Run the migration
+openfang migrate --from openclaw
+
+# Or specify a custom path
+openfang migrate --from openclaw --path ~/.openclaw
+```
+
+This imports your agents, conversation history, skills, and configuration. OpenFang reads SKILL.md natively and is compatible with ClawHub skills.
+
+<Accordion label="Frequently asked questions" group="faq" expanded="true">
+
+**How much does it cost to run OpenFang?**
+
+VPS: ~$5/month at Hetzner. GLM-5 through Z.AI's coding plan or MiniMax M2.5 Lightning at roughly $0.30/M input tokens. Expect $5-25/month for personal use depending on how active your Hands are and how much you chat.
+
+**Can I run OpenFang without API costs?**
+
+Yes. Configure the Ollama or vLLM provider and point it at a local model server. You need hardware that can run inference, but there are no API bills. OpenFang's 40MB idle footprint leaves plenty of room for a local model on the same machine.
+
+**Does OpenFang work on a Raspberry Pi?**
+
+The ~32MB binary and 40MB idle RAM mean it runs fine on a Pi 4 with 4GB RAM when using remote API providers. Running local models on a Pi is a different situation.
+
+**Can multiple people use one OpenFang instance?**
+
+Yes. OpenFang has per-channel allowlists, DM/group policies, and role-based access control. Each channel adapter supports independent user restrictions.
+
+**How stable is OpenFang for production use?**
+
+It's v0.1.0 — the first public release. Architecture is solid and the test suite has 1,767+ tests, but breaking changes can happen between minor versions. Pin to a specific commit for production and watch the GitHub releases.
+
+**Can Hands work with any LLM provider?**
+
+Yes. Hands use whichever model you configure as the default, or you can set per-Hand model overrides. The Researcher Hand works well with GLM-5 given its BrowseComp scores, while Clip and Lead work fine with MiniMax M2.5.
+
+</Accordion>
+
+For other self-hosted bot options, check our [OpenClaw alternatives](/openclaw-alternatives/) roundup. If you want a lighter option, the [nanobot setup guide](/nanobot-setup-guide/) covers a 3,700-line Python alternative. For container-isolated agents, see the [NanoClaw deploy guide](/nanoclaw-deploy-guide/). For the smallest possible binary, the [NullClaw deploy guide](/nullclaw-deploy-guide/) covers a 678KB Zig option.
