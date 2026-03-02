@@ -1,0 +1,699 @@
+---
+date: 2026-03-02T00:00:00Z
+title: "Guia de Configuracion de OpenFang: GLM-5, MiniMax M2.5, Hands y Discord en tu VPS"
+description: "Guia paso a paso para instalar OpenFang en un VPS Linux con GLM-5, MiniMax M2.5, integracion Discord, Hands autonomos y 16 capas de seguridad. Cubre config.toml, proveedores, canales y despliegue Docker."
+image: "@assets/images/26/03/openfang-setup-guide.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-tools", "self-hosted", "vps"]
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+He estado ejecutando [OpenFang](https://github.com/RightNow-AI/openfang) durante unas dos semanas ahora, junto con mi [configuracion de OpenClaw](/es/guia-configuracion-openclaw/) y mi instancia de [nanobot](/es/guia-configuracion-nanobot/). OpenFang es diferente de todo lo demas que he probado. Se llama a si mismo un "Sistema Operativo de Agentes", y despues de usarlo creo que esa etiqueta encaja. Trae agentes autonomos llamados Hands que se ejecutan en horarios sin que tengas que preguntarles, respaldados por 16 capas de seguridad y 40 adaptadores de canales de chat, todo en un unico binario Rust.
+
+Esta guia te lleva a traves de como poner OpenFang en funcionamiento en un VPS con GLM-5 y MiniMax M2.5 como tus proveedores LLM, Discord como canal de chat, y el Hand Researcher activado.
+
+<Button text="OpenFang GitHub" link="https://github.com/RightNow-AI/openfang" variant="solid" color="blue" size="md" icon="github" />
+
+<Notice type="info" title="Lo que cubre esta guia">
+<ListCheck>
+<ul>
+<li>Instalar OpenFang via el script de instalacion o desde el codigo fuente</li>
+<li>Configurar GLM-5 (Zhipu) y MiniMax M2.5 como proveedores LLM</li>
+<li>Configurar Discord como canal de chat</li>
+<li>Activar el Hand Researcher para tareas autonomas</li>
+<li>Configuracion de seguridad, soporte MCP y el sistema Hands</li>
+<li>Despliegue Docker y configuracion del servicio systemd</li>
+</ul>
+</ListCheck>
+</Notice>
+
+Si quieres comparar OpenFang contra otros bots autoalojados, nuestro resumen de [alternativas a OpenClaw](/es/alternativas-openclaw/) cubre NanoClaw, nanobot, PicoClaw, ZeroClaw, NullClaw y ahora OpenFang. Para lo basico de MCP, revisa la [introduccion a MCP para principiantes](/mcp-introduction-beginners/).
+
+## Que es realmente OpenFang
+
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/JX-MbP0qMCk"
+  label="Conoce OpenFang: Mejor Alternativa Open-Source a OpenClaw"
+/>
+
+OpenFang es un proyecto de codigo abierto de [RightNow AI](https://www.rightnowai.co/), construido completamente en Rust. Esta estructurado como un workspace de 14 crates con un total de aproximadamente 137,000 lineas de codigo con 1,767+ pruebas y cero advertencias de clippy. Todo compila en un unico binario de ~32MB.
+
+La arquitectura se ve asi:
+
+```
+Tu (Discord / Telegram / Slack / WhatsApp / 36 mas)
+    ↓
+OpenFang Daemon (ejecutandose en tu VPS)
+    ↓
+┌─────────────────────────────────┐
+│  Kernel: orquestacion, RBAC,   │
+│  programacion, seguimiento de  │
+│  presupuesto                   │
+├─────────────────────────────────┤
+│  Runtime: loop de agente, 53   │
+│  herramientas, sandbox WASM,   │
+│  MCP, A2A                      │
+├─────────────────────────────────┤
+│  Proveedor LLM (27 soportados) │
+│  MiniMax, Zhipu, Anthropic, etc│
+└─────────────────────────────────┘
+    ↓
+Hands (agentes autonomos en horarios)
+```
+
+Los mensajes llegan desde tu app de chat y se enrutan hacia cualquier LLM que hayas configurado. Los agentes pueden usar 53 herramientas integradas, conectarse a servidores MCP y ejecutarse dentro de un sandbox WASM. La parte a la que siempre vuelvo es Hands. Estos son agentes autonomos que se activan en un horario, hacen su trabajo y reportan a tu dashboard sin que nunca envies un mensaje.
+
+## Por que GLM-5 y MiniMax M2.5
+
+Ambos modelos funcionan bien con el sistema de proveedores de OpenFang y mantienen los costos bajos para configuraciones de agentes siempre activos.
+
+### GLM-5
+
+GLM-5 de Zhipu AI es un modelo MoE de 744B con aproximadamente 40-44B parametros activos. Ocupa el primer lugar entre modelos de codigo abierto en BrowseComp, que mide tareas de busqueda e investigacion web — una buena combinacion para el Hand Researcher de OpenFang.
+
+| Especificacion | Valor |
+|------|-------|
+| Arquitectura | 744B MoE, ~40B activos |
+| Ventana de contexto | 200K tokens |
+| SWE-Bench Verified | 77.8% |
+| BrowseComp | #1 codigo abierto |
+| Licencia | MIT |
+
+La ventana de contexto de 200K maneja tareas de investigacion largas sin encontrarse con limites.
+
+### MiniMax M2.5
+
+MiniMax M2.5 es un modelo MoE de 230B con solo 10B parametros activos por pasada. Es mas rapido y economico que GLM-5, y la ventana de contexto de 1M tokens es dificil de ignorar:
+
+| Especificacion | Valor |
+|------|-------|
+| Arquitectura | 230B MoE, 10B activos |
+| Ventana de contexto | 1M tokens |
+| Velocidad (Lightning) | 100 tokens/seg |
+| Costo (Lightning) | $0.30/M entrada, $2.40/M salida |
+| SWE-Bench Verified | 80.2% |
+| Licencia | MIT modificado (codigo abierto) |
+
+MiniMax M2.5 obtiene 80.2% en SWE-Bench Verified, lo que lo pone junto a Claude Opus 4.6 a una fraccion del precio. El contexto de 1M es excesivo para chat pero util cuando los Hands estan procesando grandes cantidades de datos de investigacion.
+
+Ambos modelos estan disponibles a traves de sus APIs directas y a traves de OpenRouter.
+
+## Instalacion
+
+Tres caminos para poner OpenFang en funcionamiento.
+
+<Tabs>
+<Tab name="Script de instalacion (recomendado)">
+
+La forma mas rapida. Funciona en macOS y Linux.
+
+```bash
+curl -fsSL https://openfang.sh/install | sh
+```
+
+Esto descarga el binario precompilado para tu plataforma y lo pone en tu PATH.
+
+</Tab>
+<Tab name="Desde el codigo fuente">
+
+Si quieres el codigo mas reciente o planeas contribuir:
+
+```bash
+# Instala Rust si no lo tienes
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Clona y compila
+git clone https://github.com/RightNow-AI/openfang.git
+cd openfang
+cargo build --workspace --release
+
+# El binario esta en target/release/openfang
+sudo cp target/release/openfang /usr/local/bin/
+```
+
+</Tab>
+<Tab name="Windows">
+
+PowerShell:
+
+```powershell
+irm https://openfang.sh/install.ps1 | iex
+```
+
+</Tab>
+</Tabs>
+
+Despues de instalar, inicializa el workspace y configuracion:
+
+```bash
+openfang init
+```
+
+Esto crea el directorio `~/.openfang/` con un `config.toml` predeterminado, configura el workspace local y te guia para elegir un proveedor LLM.
+
+Verifica que funciona:
+
+```bash
+openfang status
+```
+
+## Configurar GLM-5 (Zhipu)
+
+OpenFang usa un archivo `config.toml` en `~/.openfang/config.toml`. En la practica, la configuracion mas limpia es definir el modelo seleccionado en `[default_model]`, luego mantener las credenciales y endpoints API especificos del proveedor en el bloque `[providers.<nombre>]` correspondiente.
+
+### Obtener una clave API
+
+1. Ve a [z.ai](https://z.ai/manage-apikey/apikey-list)
+2. Registrate y crea una clave API
+
+<Notice type="success" title="Plan de codificacion Z.AI GLM — 10% de descuento">
+Z.AI ofrece [planes de codificacion GLM](https://z.ai/subscribe?ic=NKNUNYDRZ) disenados para cargas de trabajo continuas de desarrolladores. Usa nuestro enlace para obtener 10% de descuento.
+</Notice>
+
+<Notice type="info" title="Endpoint del plan de codificacion Zhipu">
+Si estas en el plan de codificacion de Zhipu, configura `api_base = "https://api.z.ai/api/coding/paas/v4"` en tu configuracion del proveedor zhipu. Esto enruta a traves de su endpoint optimizado para codificacion.
+</Notice>
+
+### Agregar a la configuracion
+
+```toml
+[default_model]
+provider = "openai"
+model = "glm-5"
+api_key = "tu-clave-api-zhipu"
+base_url = "https://api.z.ai/api/coding/paas/v4"
+```
+
+Zhipu se configura a traves del proveedor `openai` de OpenFang porque el endpoint GLM es compatible con OpenAI. La documentacion pone `provider`, `model`, `api_key` y cualquier `base_url` personalizado en el mismo bloque `[default_model]`.
+
+### Probarlo
+
+```bash
+openfang chat
+> ¿Cuanto es 42 * 17?
+```
+
+Si obtienes una respuesta, GLM-5 esta configurado correctamente. Escribe `exit` para salir del chat.
+
+## Configurar MiniMax M2.5
+
+### Obtener una clave API
+
+1. Ve a [platform.minimax.io](https://platform.minimax.io) (global) o [minimaxi.com](https://www.minimaxi.com) (China continental)
+2. Crea una cuenta y genera una clave API
+3. Anota en que plataforma estas ya que la URL base de la API difiere
+
+<Notice type="success" title="Plan de codificacion MiniMax — 10% de descuento">
+MiniMax ofrece planes de codificacion con precios para cargas de trabajo de desarrolladores. [Obtén 10% de descuento con nuestro enlace de referido](https://go.bitdoze.com/minimax). Para detalles sobre como se comparan GLM-5 y MiniMax M2.5 para bots siempre activos, ve nuestro analisis de [mejores modelos open source para OpenClaw](/es/mejores-modelos-opensource-openclaw/).
+</Notice>
+
+### Agregar a la configuracion
+
+Para la plataforma global, usa el estilo de configuracion especifico del proveedor:
+
+```toml
+[default_model]
+provider = "minimax"
+model = "MiniMax-M2.5"
+
+[memory]
+decay_rate = 0.05
+
+[providers.minimax]
+api_key_env = "MINIMAX_API_KEY"
+api_base = "https://api.minimax.io/v1"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+```
+
+Para la plataforma de China continental, agrega la sobreescritura de la base API:
+
+```toml
+[default_model]
+provider = "minimax"
+model = "MiniMax-M2.5"
+
+[memory]
+decay_rate = 0.05
+
+[providers.minimax]
+api_key_env = "MINIMAX_API_KEY"
+api_base = "https://api.minimaxi.com/v1"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+```
+
+Esto mantiene la declaracion del proveedor explicita: `default_model` selecciona MiniMax, `[providers.minimax]` contiene la configuracion de la API, y `[agents.defaults]` mantiene el modelo de agente predeterminado alineado con el proveedor.
+
+### Configurar ambos proveedores
+
+Si quieres ambos proveedores disponibles en la misma configuracion, mantén cada uno en su propio bloque de proveedor y apunta tu modelo predeterminado al que quieres usar primero:
+
+```toml
+[default_model]
+provider = "zhipu"
+model = "glm-5"
+
+[providers.zhipu]
+api_key = "tu-clave-zhipu"
+api_base = "https://api.z.ai/api/coding/paas/v4"
+
+[providers.minimax]
+api_key_env = "MINIMAX_API_KEY"
+api_base = "https://api.minimax.io/v1"
+
+[agents.defaults]
+model = "glm-5"
+```
+
+Para cambiar a MiniMax, cambia `default_model.provider` a `"minimax"` y configura `agents.defaults.model` a `"MiniMax-M2.5"`.
+
+## Configuracion de Discord
+
+Discord es directo con OpenFang ya que es uno de los 40 adaptadores de canal soportados.
+
+### Crear un bot de Discord
+
+1. Ve a [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Haz clic en **New Application**, dale un nombre
+3. Ve a **Bot** en la barra lateral izquierda, haz clic en **Add Bot**
+4. Copia el token del bot
+
+### Habilitar intents
+
+Todavia en la pagina de configuracion del Bot:
+
+1. Desplazate hacia abajo hasta **Privileged Gateway Intents**
+2. Habilita **MESSAGE CONTENT INTENT** (requerido para que el bot lea mensajes)
+3. Opcionalmente habilita **SERVER MEMBERS INTENT** si planeas usar listas de permitidos
+
+### Obtener tu ID de usuario
+
+1. Abre Configuracion de Discord → **Advanced** → habilita **Developer Mode**
+2. Haz clic derecho en tu avatar en cualquier lugar de Discord
+3. Haz clic en **Copy User ID**
+
+### Configurar OpenFang
+
+Luego usa el formato de canal de la documentacion:
+
+```toml
+[channels.discord]
+enabled = true
+token = "TU_TOKEN_DEL_BOT_DISCORD"
+allowed_users = ["TU_ID_DE_USUARIO"]
+```
+
+`allowed_users` es la clave de lista de permitidos actual en la documentacion. Dejala vacia para permitir que cualquiera en el servidor use el bot, o agrega IDs de usuario especificos si quieres un bot privado.
+
+### Invitar el bot a tu servidor
+
+1. En el portal de desarrolladores de Discord, ve a **OAuth2** → **URL Generator**
+2. En **Scopes**, marca `bot`
+3. En **Bot Permissions**, marca `Send Messages` y `Read Message History`
+4. Copia la URL generada y abrela en tu navegador
+5. Selecciona el servidor al que quieres agregar el bot
+
+### Iniciar el daemon
+
+```bash
+openfang start
+```
+
+Envia un mensaje en Discord. El bot deberia responder. El dashboard escucha en `127.0.0.1:5555` por defecto a menos que cambies `dashboard_listen`.
+
+## Ejemplo de configuracion completa
+
+Asi se ve un `~/.openfang/config.toml` completo con MiniMax M2.5, Discord y el servidor API expuesto externamente con una contrasena API mientras se mantienen los puertos predeterminados:
+
+```toml
+api_listen = "0.0.0.0:50051"
+api_key = "cambia-esta-contrasena-larga-y-aleatoria"
+
+[default_model]
+provider = "minimax"
+model = "MiniMax-M2.5"
+max_tokens = 8192
+temperature = 0.7
+
+[memory]
+decay_rate = 0.05
+
+[providers.minimax]
+api_key_env = "MINIMAX_API_KEY"
+api_base = "https://api.minimaxi.com/v1"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+
+[channels.discord]
+enabled = true
+token = "TU_TOKEN_DEL_BOT_DISCORD"
+allowed_users = ["TU_ID_DE_USUARIO"]
+```
+
+### Configuracion explicada
+
+| Configuracion | Predeterminado | Que hace |
+|---------|---------|-------------|
+| `default_model.provider` | — | Que proveedor usa OpenFang primero |
+| `memory.decay_rate` | predeterminado de la app | Controla que tan rapido se desvanece la memoria almacenada |
+| `providers.minimax.api_key_env` | — | Variable de entorno que almacena la clave MiniMax |
+| `providers.minimax.api_base` | predeterminado del proveedor | Endpoint de API MiniMax para tu region |
+| `agents.defaults.model` | — | Modelo predeterminado usado por agentes y hands generados |
+| `api_listen` | `127.0.0.1:50051` | Direccion a la que se vincula el servidor API |
+| `api_key` | none | Token Bearer requerido para acceso API |
+| `channels.discord.allowed_users` | vacio | Restringe quien puede hablar con el bot |
+
+### Ejemplo de API externa MiniMax M2.5
+
+Si quieres ejecutar OpenFang solo con MiniMax M2.5 y permitir que clientes externos se conecten a traves de la API, este es el patron de configuracion mas limpio manteniendo los puertos predeterminados:
+
+```toml
+[default_model]
+provider = "minimax"
+model = "MiniMax-M2.5"
+
+[memory]
+decay_rate = 0.05
+
+[providers.minimax]
+api_key_env = "MINIMAX_API_KEY"
+api_base = "https://api.minimaxi.com/v1"
+
+[agents.defaults]
+model = "MiniMax-M2.5"
+temperature = 0.7
+max_tokens = 8192
+
+api_listen = "0.0.0.0:50051"
+api_key = "reemplaza-con-una-contrasena-api-larga-y-aleatoria"
+
+[channels.discord]
+enabled = true
+token = "TU_TOKEN_DEL_BOT_DISCORD"
+allowed_users = ["TU_ID_DE_USUARIO"]
+```
+
+Esto mantiene el puerto API predeterminado (`50051`) y solo cambia la direccion de vinculacion para que sea accesible remotamente. Exporta `MINIMAX_API_KEY` en el shell o tu gestor de servicios antes de iniciar OpenFang, y mantén el puerto API bloqueado en tu firewall a IPs de confianza.
+
+## El sistema de proveedores
+
+OpenFang viene con 3 controladores LLM nativos (Anthropic, Gemini, compatible con OpenAI) que enrutan a 27 proveedores. Cuando configuras un nombre de modelo, OpenFang:
+
+1. Coincide palabras clave en el nombre contra su registro de proveedores
+2. Verifica que el proveedor coincidente tiene una clave API
+3. Enruta a traves del controlador nativo correcto
+4. Maneja autenticacion, limitacion de velocidad y seguimiento de costos
+
+Aqui estan los proveedores soportados:
+
+| Proveedor | Que cubre |
+|----------|---------------|
+| Anthropic | Modelos Claude (controlador nativo) |
+| Gemini | Google Gemini (controlador nativo) |
+| OpenAI | Modelos GPT (controlador nativo) |
+| Groq | Inferencia rapida |
+| DeepSeek | Modelos DeepSeek |
+| OpenRouter | Gateway a cualquier modelo |
+| Together | Hosting de modelos open source |
+| Mistral | Modelos Mistral |
+| Fireworks | Inferencia rapida |
+| Cohere | Modelos Command |
+| Perplexity | Modelos aumentados con busqueda |
+| xAI | Modelos Grok |
+| Ollama | Modelos locales |
+| vLLM | Servir modelos locales |
+| LM Studio | Modelos locales |
+| MiniMax | MiniMax M2.5 y otros |
+| Zhipu | GLM-5 y otros |
+| Moonshot | Modelos Kimi |
+| Qwen / DashScope | Modelos Qwen |
+| Bedrock | Modelos alojados en AWS |
+
+OpenFang enruta solicitudes basandose en puntuacion de complejidad de tarea, recurre a otro proveedor si uno falla, y rastrea costos por modelo en el dashboard.
+
+## El sistema Hands
+
+Hands son la razon por la que sigo ejecutando OpenFang junto con mis otros bots. Son agentes autonomos preconstruidos que se ejecutan en horarios sin que tu envies mensajes. Activas un Hand, va a trabajar, y revisas su progreso en el dashboard.
+
+Cada Hand viene incluido en el binario con:
+- **HAND.toml** — manifiesto que declara herramientas y configuraciones requeridas
+- **Prompt de sistema** — un manual operativo multifase (500+ palabras, no una sola linea)
+- **SKILL.md** — experiencia de dominio cargada en contexto en tiempo de ejecucion
+- **Guardrails** — puertas de aprobacion para acciones sensibles
+
+### Los 7 Hands incluidos
+
+| Hand | Que hace |
+|------|-------------|
+| **Clip** | Toma URLs de YouTube, los corta en shorts verticales con subtitulos y miniaturas, publica en Telegram/WhatsApp |
+| **Lead** | Generacion de leads diaria — descubre, enriquece, califica y deduplica prospectos calificados |
+| **Collector** | Inteligencia OSINT — monitorea objetivos con deteccion de cambios, seguimiento de sentimiento, graficos de conocimiento |
+| **Predictor** | Superforecasting — colecta senales, construye cadenas de razonamiento, rastrea precision con puntuaciones Brier |
+| **Researcher** | Investigacion profunda — referencruzada de fuentes, verificacion de hechos CRAAP, informes citados en multiples idiomas |
+| **Twitter** | Gestion de X/Twitter — 7 formatos de contenido, programacion, seguimiento de compromiso, cola de aprobacion |
+| **Browser** | Automatizacion web — navega sitios, llena formularios, maneja flujos de trabajo (puerta de aprobacion de compra obligatoria) |
+
+### Activar un Hand
+
+```bash
+# Activar el Hand Researcher
+openfang hand activate researcher
+
+# Revisar progreso
+openfang hand status researcher
+
+# Listar todos los Hands disponibles
+openfang hand list
+
+# Pausar sin perder estado
+openfang hand pause researcher
+```
+
+Empezaria con el Hand Researcher. Se ejecuta por si solo, referencruza fuentes, evalua credibilidad usando criterios CRAAP y genera informes citados. Combinalo con GLM-5 (que ocupa el #1 en BrowseComp) y la salida de investigacion es genuinamente util sin ninguna supervision.
+
+## Modelo de seguridad
+
+OpenFang tiene 16 sistemas de seguridad, cada uno ejecutandose independientemente. Aqui estan los que importan para una configuracion personal:
+
+### Sandbox WASM
+
+Cada herramienta se ejecuta dentro de un sandbox WebAssembly con medicion de combustible. Si una herramienta intenta ejecutarse para siempre, el watchdog la mata.
+
+Esto esta habilitado por defecto. A diferencia de las verificaciones de permisos a nivel de aplicacion, la herramienta fisicamente no puede escapar del sandbox.
+
+### Rastro de auditoria
+
+Cada accion se agrega a una cadena hash Merkle. Manipula una entrada y toda la cadena se rompe.
+
+### Listas de permitidos de canal
+
+Mismo concepto que nanobot — restringe quien puede interactuar con el bot:
+
+```toml
+[channels.discord]
+allowed_users = ["123456789"]
+```
+
+### Zeroizacion de secretos
+
+Las claves API se borran automaticamente de la memoria en el momento en que ya no se necesitan. OpenFang usa `Zeroizing<String>` en todo el codigo, por lo que los secretos no permanecen en RAM.
+
+## Soporte MCP y A2A
+
+OpenFang soporta tanto [Model Context Protocol](/mcp-introduction-beginners/) para servidores de herramientas como comunicacion Agent-to-Agent (A2A). Viene con 25 plantillas MCP y una bodega de credenciales AES-256-GCM para almacenar credenciales de servidores MCP.
+
+### Agregar un servidor MCP
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/usuario/documentos"]
+
+[[mcp_servers]]
+name = "remote_server"
+url = "https://mcp.ejemplo.com/sse"
+```
+
+Las herramientas MCP se descubren automaticamente cuando OpenFang inicia. El LLM puede usarlas junto con las 53 herramientas integradas.
+
+## Despliegue Docker
+
+OpenFang publica imagenes de contenedor:
+
+```bash
+# Descargar la imagen
+docker pull ghcr.io/rightnow-ai/openfang:latest
+
+# Inicializar configuracion (primera vez)
+docker run -v ~/.openfang:/root/.openfang --rm \
+  ghcr.io/rightnow-ai/openfang:latest init
+
+# Editar configuracion en el host
+nano ~/.openfang/config.toml
+
+# Ejecutar el daemon
+docker run -d \
+  -v ~/.openfang:/root/.openfang \
+  -p 50051:50051 \
+  -p 5555:5555 \
+  --name openfang \
+  ghcr.io/rightnow-ai/openfang:latest start
+```
+
+El dashboard es accesible en `http://ip-de-tu-servidor:5555` despues de iniciar si vinculas `dashboard_listen` externamente. Si mantienes el predeterminado mas seguro de `127.0.0.1:5555`, accede a el a traves de tunel SSH o un proxy inverso en su lugar.
+
+## Hosting VPS
+
+OpenFang usa aproximadamente 40MB de RAM en reposo, mucho menos que los 394MB de OpenClaw. Lo estoy ejecutando en un [Hetzner CX22](/hetzner-cloud-review/) (2 vCPU, 4GB RAM) a €4.35/mes junto con nanobot sin problemas.
+
+<Notice type="success" title="Descuento Hetzner">
+[Obtén €20 de credito](https://go.bitdoze.com/hetzner) cuando te registras a traves de nuestro enlace de referido. Eso cubre aproximadamente 4 meses de un CX22.
+</Notice>
+
+Configuracion rapida en un VPS Ubuntu 24.04 fresco:
+
+```bash
+ssh root@IP_DE_TU_SERVIDOR
+
+# Actualizar sistema
+apt update && apt upgrade -y
+
+# Instalar OpenFang
+curl -fsSL https://openfang.sh/install | sh
+
+# Inicializar
+openfang init
+
+# Editar configuracion
+nano ~/.openfang/config.toml
+
+# Iniciar daemon en segundo plano
+openfang start
+```
+
+Para una configuracion de daemon apropiada, crea un servicio systemd:
+
+```ini
+[Unit]
+Description=OpenFang Agent OS
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/openfang start
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Guarda eso en `/etc/systemd/system/openfang.service`, luego:
+
+```bash
+systemctl daemon-reload
+systemctl enable openfang
+systemctl start openfang
+```
+
+El dashboard estara activo en `http://ip-de-tu-servidor:5555` si vinculas `dashboard_listen` externamente. Puedes agregar mas adaptadores de canal despues sin reiniciar.
+
+## OpenFang vs nanobot vs OpenClaw
+
+Ejecuto los tres, asi que aqui hay una comparacion directa:
+
+| Aspecto | OpenFang | nanobot | OpenClaw |
+|--------|----------|---------|----------|
+| Lenguaje | Rust | Python | TypeScript |
+| Codigo | 137K LOC | ~3,700 lineas | 430k+ lineas |
+| Metodo de instalacion | `curl` una linea | `pip install` | Instalador personalizado |
+| Tamano del binario | ~32MB | N/A (Python) | ~500MB |
+| RAM (reposo) | ~40MB | ~100MB | >394MB |
+| Inicio en frio | menos de 200ms | >30s | ~6s |
+| Canales de chat | 40 | 9 | 13 |
+| Proveedores LLM | 27 | 13+ | 10 |
+| Capas de seguridad | 16 | Basico | 3 |
+| Agentes autonomos | 7 Hands | No | No |
+| Dashboard | Integrado (Tauri) | No | Comunidad |
+| Soporte MCP | Si + A2A | Si | Todavia no |
+
+OpenClaw tiene la comunidad mas grande y mas documentacion. nanobot instala mas rapido y cubre mas plataformas de chat por linea de codigo. OpenFang tiene el sistema Hands, mas capas de seguridad que cualquier otra cosa aqui, y 40 adaptadores de canal. La contrapartida es que OpenFang es mas nuevo (v0.1.0) y probablemente encontrares bordes asperos antes de v1.0. Fija a un commit especifico si lo estas usando para algo critico.
+
+## Referencia CLI
+
+| Comando | Que hace |
+|---------|-------------|
+| `openfang init` | Inicializar configuracion y workspace |
+| `openfang start` | Iniciar el daemon (dashboard + canales) |
+| `openfang stop` | Detener el daemon |
+| `openfang status` | Mostrar estado actual |
+| `openfang chat` | Modo de chat interactivo |
+| `openfang chat researcher` | Chatear con un agente especifico |
+| `openfang agent spawn coder` | Generar un agente preconstruido |
+| `openfang hand list` | Listar Hands disponibles |
+| `openfang hand activate <nombre>` | Activar un Hand |
+| `openfang hand status <nombre>` | Revisar progreso de Hand |
+| `openfang hand pause <nombre>` | Pausar un Hand |
+| `openfang migrate --from openclaw` | Migrar desde OpenClaw |
+
+## Migrar desde OpenClaw
+
+Si ya estas ejecutando OpenClaw, OpenFang tiene una herramienta de migracion integrada:
+
+```bash
+# Ejecucion de prueba para ver que cambiaria
+openfang migrate --from openclaw --dry-run
+
+# Ejecutar la migracion
+openfang migrate --from openclaw
+
+# O especificar una ruta personalizada
+openfang migrate --from openclaw --path ~/.openclaw
+```
+
+Esto importa tus agentes, historial de conversaciones, skills y configuracion. OpenFang lee SKILL.md nativamente y es compatible con skills de ClawHub.
+
+<Accordion label="Preguntas frecuentes" group="faq" expanded="true">
+
+**¿Cuanto cuesta ejecutar OpenFang?**
+
+VPS: ~$5/mes en Hetzner. GLM-5 a traves del plan de codificacion de Z.AI o MiniMax M2.5 Lightning a aproximadamente $0.30/M tokens de entrada. Espera $5-25/mes para uso personal dependiendo de que tan activos esten tus Hands y cuanto chatees.
+
+**¿Puedo ejecutar OpenFang sin costos de API?**
+
+Si. Configura el proveedor Ollama o vLLM y apuntalo a un servidor de modelo local. Necesitas hardware que pueda ejecutar inferencia, pero no hay facturas de API. La huella de 40MB en reposo de OpenFang deja mucho espacio para un modelo local en la misma maquina.
+
+**¿Funciona OpenFang en una Raspberry Pi?**
+
+El binario de ~32MB y los 40MB de RAM en reposo significan que funciona bien en una Pi 4 con 4GB RAM cuando se usan proveedores de API remotos. Ejecutar modelos locales en una Pi es una situacion diferente.
+
+**¿Pueden multiples personas usar una instancia de OpenFang?**
+
+Si. OpenFang tiene listas de permitidos por canal, politicas de DM/grupo y control de acceso basado en roles. Cada adaptador de canal soporta restricciones de usuario independientes.
+
+**¿Que tan estable es OpenFang para uso en produccion?**
+
+Es v0.1.0 — el primer lanzamiento publico. La arquitectura es solida y el conjunto de pruebas tiene 1,767+ pruebas, pero pueden ocurrir cambios importantes entre versiones menores. Fija a un commit especifico para produccion y vigila los lanzamientos de GitHub.
+
+**¿Pueden los Hands trabajar con cualquier proveedor LLM?**
+
+Si. Los Hands usan cualquier modelo que configures como predeterminado, o puedes configurar sobreescrituras de modelo por Hand. El Hand Researcher funciona bien con GLM-5 dado sus puntuaciones BrowseComp, mientras Clip y Lead funcionan bien con MiniMax M2.5.
+
+</Accordion>
+
+Para otras opciones de bots autoalojados, revisa nuestro resumen de [alternativas a OpenClaw](/es/alternativas-openclaw/). Si quieres una opcion mas ligera, la [guia de configuracion de nanobot](/es/guia-configuracion-nanobot/) cubre una alternativa Python de 3,700 lineas. Para agentes aislados en contenedores, ve la [guia de despliegue de NanoClaw](/es/guia-despliegue-nanoclaw/). Para el binario mas pequeno posible, la [guia de despliegue de NullClaw](/es/guia-despliegue-nullclaw/) cubre una opcion Zig de 678KB.
