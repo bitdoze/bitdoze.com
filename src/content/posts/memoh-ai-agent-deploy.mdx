@@ -1,0 +1,615 @@
+---
+date: 2026-03-04T00:00:00Z
+title: "How To Deploy Memoh AI Agent Platform with Docker Compose"
+description: "Deploy Memoh, an open-source multi-bot AI agent system, using Dokploy or Docker Compose. Run isolated AI bots with persistent memory, MCP tool support, and multi-platform channels."
+image: "../../assets/images/26/03/memoh-ai-agent-deploy.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["self-hosted", "ai-agents", "docker"]
+canonical: "https://www.bitdoze.com/memoh-ai-agent-deploy/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+If you want AI agents that stay on your hardware and don't phone home to some SaaS, Memoh is worth a look. It lets you spin up multiple AI bots, each inside its own container, with built-in memory and tool use. Below I cover two ways to deploy it: through Dokploy and with a plain Docker Compose setup.
+
+## What is Memoh?
+
+[Memoh](https://github.com/memohai/Memoh) is an open-source, containerized AI agent system built with Go and Vue 3. You create bots, each running in its own isolated containerd container with persistent memory and access to external tools through MCP (Model Context Protocol). Bots can chat on Telegram, Discord, Lark, Email, or the built-in Web UI, and they remember conversations across sessions.
+
+### What Memoh does
+
+| Feature | What it does |
+| --- | --- |
+| Container isolation | Each bot runs inside its own containerd sandbox with a separate filesystem, network, and process tree |
+| Persistent memory | Hybrid retrieval using vector search (Qdrant) and keyword search, plus LLM-driven fact extraction |
+| Multi-platform channels | Telegram, Discord, Lark (Feishu), Email, Web, CLI |
+| MCP tool support | Bots can browse the web, run commands, edit files, call external tools |
+| Multi-user awareness | Bots recognize individual users in group chats and track context per person |
+| Web UI | Vue 3 dashboard with real-time streaming, a container file manager, and visual config |
+
+### Key features
+
+<ListCheck>
+- Create and manage multiple AI bots from a single dashboard
+- Container-level isolation per bot using containerd
+- Hybrid memory engine with dense vector search and BM25 keyword search
+- MCP support for connecting external tools (HTTP, SSE, Stdio)
+- Scheduled tasks and heartbeat-based autonomous actions
+- Works with any OpenAI-compatible, Anthropic, or Google AI provider
+- Role-based access control with ownership transfer
+- Cross-platform identity binding across all channels
+</ListCheck>
+
+<Notice type="info" title="Privileged container">
+The Memoh server container runs in privileged mode because it embeds containerd to manage bot containers. Only deploy this on servers you trust and control.
+</Notice>
+
+## Architecture overview
+
+Memoh has six services managed by Docker Compose:
+
+| Service | Image | Role |
+| --- | --- | --- |
+| `postgres` | `postgres:18-alpine` | Main database for users, bots, channels, and configuration |
+| `qdrant` | `qdrant/qdrant:latest` | Vector database for semantic memory search |
+| `migrate` | `memohai/server:latest` | One-shot service that runs database migrations, then exits |
+| `server` | `memohai/server:latest` | Go backend with embedded containerd (privileged) |
+| `agent` | `memohai/agent:latest` | Agent Gateway (Bun/Elysia) for AI chat, tool execution, and SSE streaming |
+| `web` | `memohai/web:latest` | Vue 3 web UI served by Nginx |
+
+Startup order: PostgreSQL and Qdrant start first. Once both pass their health checks, the migrate service applies database migrations. The server starts after migration finishes, then the agent gateway and web UI come up last.
+
+## Prerequisites
+
+<ListCheck>
+- A Linux VPS or dedicated server with Docker and Docker Compose v2 installed
+- At least 4 GB RAM (the server runs containerd plus PostgreSQL and Qdrant)
+- Root or sudo access (required for privileged container mode)
+- An API key from an OpenAI-compatible, Anthropic, or Google AI provider
+</ListCheck>
+
+<Button text="Try Hetzner Cloud Now" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+
+## Option 1: Deploy with Dokploy
+
+Dokploy takes care of domains and SSL for you. If you don't have it set up yet, follow the [Dokploy install guide](https://www.bitdoze.com/dokploy-install/) first.
+
+### Step 1: Create the config file
+
+Before deploying, you need a `config.toml` file on your server. SSH into your machine and create it:
+
+```bash
+mkdir -p /opt/memoh
+cat > /opt/memoh/config.toml << 'EOF'
+[log]
+level = "info"
+format = "text"
+
+[server]
+addr = "server:8080"
+
+[admin]
+username = "admin"
+password = "CHANGE_THIS_PASSWORD"
+email = "admin@yourdomain.com"
+
+[auth]
+jwt_secret = "GENERATE_WITH_openssl_rand_-base64_32"
+jwt_expires_in = "168h"
+
+[containerd]
+socket_path = "/run/containerd/containerd.sock"
+namespace = "default"
+
+[mcp]
+image = "memohai/mcp:latest"
+snapshotter = "overlayfs"
+data_root = "/opt/memoh/data"
+
+[postgres]
+host = "postgres"
+port = 5432
+user = "memoh"
+password = "YOUR_DB_PASSWORD"
+database = "memoh"
+sslmode = "disable"
+
+[qdrant]
+base_url = "http://qdrant:6334"
+api_key = ""
+timeout_seconds = 10
+
+[agent_gateway]
+host = "agent"
+port = 8081
+server_addr = "server:8080"
+
+[web]
+host = "127.0.0.1"
+port = 8082
+EOF
+```
+
+Generate a proper JWT secret:
+
+```bash
+openssl rand -base64 32
+```
+
+Replace `GENERATE_WITH_openssl_rand_-base64_32` and `YOUR_DB_PASSWORD` with actual values.
+
+### Step 2: Create the Dokploy service
+
+1. Open your Dokploy project
+2. Click **Add Service** and choose **Compose**
+3. Name it `memoh`
+
+### Step 3: Paste the compose file
+
+```yaml
+name: "memoh"
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: memoh
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: YOUR_DB_PASSWORD
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: memoh-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    expose:
+      - "6333"
+      - "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  migrate:
+    image: memohai/server:latest
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - /opt/memoh/config.toml:/app/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - dokploy-network
+
+  server:
+    image: memohai/server:latest
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    volumes:
+      - /opt/memoh/config.toml:/app/config.toml:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  agent:
+    image: memohai/agent:latest
+    container_name: memoh-agent
+    volumes:
+      - /opt/memoh/config.toml:/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8081"
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  web:
+    image: memohai/web:latest
+    container_name: memoh-web
+    expose:
+      - "8082"
+    depends_on:
+      - server
+      - agent
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  containerd_data:
+  memoh_data:
+  server_cni_state:
+```
+
+### Step 4: Domain and port
+
+Create a domain in Dokploy and map it to the `web` service on port **8082**. After deploying, open `https://your-domain.com` to access the dashboard.
+
+**Notes about the Dokploy setup**
+
+- All services use `expose` instead of `ports` since Dokploy handles external routing through its proxy.
+- The `config.toml` is mounted from `/opt/memoh/config.toml` on the host. Make sure the database password matches in both the config file and the `POSTGRES_PASSWORD` environment variable.
+- The server container needs `privileged: true` and `pid: host` for containerd to manage bot containers.
+
+<Notice type="warning" title="Security">
+Change all default passwords in `config.toml` before deploying. The default admin password is `admin123`, so replace it with something strong.
+</Notice>
+
+## Option 2: Docker Compose (standalone)
+
+This is the standard way to run Memoh on any Linux server with Docker.
+
+### Step 1: Create a project directory
+
+```bash
+mkdir -p /opt/memoh && cd /opt/memoh
+```
+
+### Step 2: Create the config file
+
+```bash
+cat > config.toml << 'EOF'
+[log]
+level = "info"
+format = "text"
+
+[server]
+addr = "server:8080"
+
+[admin]
+username = "admin"
+password = "CHANGE_THIS_PASSWORD"
+email = "admin@yourdomain.com"
+
+[auth]
+jwt_secret = "GENERATE_WITH_openssl_rand_-base64_32"
+jwt_expires_in = "168h"
+
+[containerd]
+socket_path = "/run/containerd/containerd.sock"
+namespace = "default"
+
+[mcp]
+image = "memohai/mcp:latest"
+snapshotter = "overlayfs"
+data_root = "/opt/memoh/data"
+
+[postgres]
+host = "postgres"
+port = 5432
+user = "memoh"
+password = "YOUR_DB_PASSWORD"
+database = "memoh"
+sslmode = "disable"
+
+[qdrant]
+base_url = "http://qdrant:6334"
+api_key = ""
+timeout_seconds = 10
+
+[agent_gateway]
+host = "agent"
+port = 8081
+server_addr = "server:8080"
+
+[web]
+host = "127.0.0.1"
+port = 8082
+EOF
+```
+
+Generate real values for the secrets:
+
+```bash
+# Generate JWT secret
+openssl rand -base64 32
+
+# Generate database password
+openssl rand -base64 16
+```
+
+Update `config.toml` with the generated values.
+
+### Step 3: Create the environment file
+
+```bash
+cat > .env << 'EOF'
+POSTGRES_PASSWORD=YOUR_DB_PASSWORD
+MEMOH_CONFIG=./config.toml
+EOF
+```
+
+Make sure `POSTGRES_PASSWORD` matches what you put in `config.toml` under `[postgres] password`.
+
+### Step 4: Create the compose file
+
+```yaml
+name: "memoh"
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: memoh
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoh123}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: memoh-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    expose:
+      - "6333"
+      - "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  migrate:
+    image: memohai/server:latest
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - ${MEMOH_CONFIG:-./config.toml}:/app/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - memoh-network
+
+  server:
+    image: memohai/server:latest
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    volumes:
+      - ${MEMOH_CONFIG:-./config.toml}:/app/config.toml:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  agent:
+    image: memohai/agent:latest
+    container_name: memoh-agent
+    volumes:
+      - ${MEMOH_CONFIG:-./config.toml}:/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "8081:8081"
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  web:
+    image: memohai/web:latest
+    container_name: memoh-web
+    ports:
+      - "8082:8082"
+    depends_on:
+      - server
+      - agent
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+volumes:
+  postgres_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  containerd_data:
+    driver: local
+  memoh_data:
+    driver: local
+  server_cni_state:
+    driver: local
+
+networks:
+  memoh-network:
+    driver: bridge
+```
+
+### Step 5: Start the stack
+
+```bash
+sudo docker compose up -d
+```
+
+First startup takes a couple of minutes while images download and services initialize. Check progress with:
+
+```bash
+sudo docker compose logs -f
+```
+
+Once everything is up, open `http://your-server-ip:8082` in your browser. Log in with the admin credentials you set in `config.toml`.
+
+## After deployment
+
+### Log in and add a provider
+
+After logging in, go to **Settings > Providers** and add your API key for OpenAI, Anthropic, Google, or any compatible endpoint. Bots won't do anything useful without a provider configured.
+
+### Create your first bot
+
+1. Click **Bots** in the sidebar
+2. Click **Create Bot**
+3. Give it a name and select a model from your configured provider
+4. The bot gets its own containerd container automatically
+
+You can now chat with the bot from the Web UI, or connect external channels like Telegram or Discord.
+
+### Connect messaging channels
+
+Memoh supports several external channels:
+
+| Channel | What you need |
+| --- | --- |
+| Telegram | A bot token from @BotFather |
+| Discord | A bot application token from the Discord Developer Portal |
+| Lark (Feishu) | App ID and App Secret |
+| Email | SMTP credentials or a Mailgun API key |
+
+Configure channels from **Settings > Channels** in the web UI.
+
+### Bot memory
+
+Bots remember conversations on their own. Memoh pairs Qdrant for vector-based semantic search with PostgreSQL for structured data and BM25 keyword search. The last 24 hours of context load by default. You can trigger memory compaction and rebuild from the bot settings.
+
+## Managing data
+
+All persistent data lives in Docker named volumes:
+
+| Volume | Contents |
+| --- | --- |
+| `postgres_data` | PostgreSQL database files |
+| `qdrant_data` | Qdrant vector storage |
+| `containerd_data` | Bot container images and snapshots |
+| `memoh_data` | Bot container data |
+| `server_cni_state` | CNI network state for container networking |
+
+These volumes survive `docker compose down`. To wipe everything and start fresh:
+
+```bash
+sudo docker compose down -v
+```
+
+### Useful commands
+
+```bash
+# Check service status
+sudo docker compose ps
+
+# View logs for a specific service
+sudo docker compose logs -f server
+
+# Restart the stack
+sudo docker compose restart
+
+# Update to latest images
+sudo docker compose pull && sudo docker compose up -d
+```
+
+The `migrate` service runs on every startup, so database schema updates are applied automatically when you pull new images.
+
+## Production checklist
+
+<ListCheck>
+- Replace all default passwords in `config.toml` (admin, JWT secret, PostgreSQL)
+- Set up HTTPS through a reverse proxy (Dokploy handles this, or use Nginx/Caddy)
+- Restrict firewall rules to expose only the ports you need
+- Set memory and CPU limits on containers for stability
+- Back up PostgreSQL and Qdrant volumes regularly
+- Monitor disk usage, because bot containers and vector data grow over time
+</ListCheck>
+
+<Notice type="warning" title="Privileged mode">
+The server container runs with `privileged: true` and `pid: host` because it embeds containerd. This gives it broad access to the host system. Keep the server behind a firewall and limit SSH access.
+</Notice>
+
+## FAQ
+
+<Accordion label="Why does the server container need privileged mode?" group="faq" expanded="true">
+Memoh embeds containerd inside the server container to give each bot its own sandbox. Containerd needs access to Linux kernel features (namespaces, cgroups) that require elevated privileges. There's no way around this if you want per-bot container isolation.
+</Accordion>
+
+<Accordion label="Can I use Memoh without an AI provider API key?" group="faq">
+You can deploy it and poke around the UI, but bots won't generate any responses until you add at least one provider. Any OpenAI-compatible, Anthropic, or Google endpoint works.
+</Accordion>
+
+<Accordion label="How much RAM does Memoh need?" group="faq">
+The base stack (PostgreSQL, Qdrant, server, agent, web) sits around 2-3 GB at idle. Each bot container adds overhead depending on what tools and models it uses. 4 GB is the minimum I'd recommend; go higher if you plan on running several bots at once.
+</Accordion>
+
+<Accordion label="Can I expose only the web UI and keep the API internal?" group="faq">
+Yes. In the standalone compose file, remove the `ports` mapping for the `server` and `agent` services. The web UI container communicates with them internally over the Docker network. Only expose port 8082 (or route through a reverse proxy).
+</Accordion>
+
+<Accordion label="How do I update Memoh?" group="faq">
+Pull the latest images and restart. The migrate service runs automatically on startup to apply schema changes:
+
+```bash
+sudo docker compose pull && sudo docker compose up -d
+```
+</Accordion>
+
+## Wrapping up
+
+Memoh is one of those projects that packs a lot into a single Docker Compose stack. You get per-bot container isolation, persistent memory, and multi-platform messaging without stitching together a half-dozen separate tools. The Dokploy route is the fastest if you already use it; otherwise, the standalone compose file works on any Linux box with Docker. From there, everything else happens in the browser.
+
+<Button text="View Memoh on GitHub" link="https://github.com/memohai/Memoh" variant="solid" color="blue" size="md" icon="arrow-right" />
