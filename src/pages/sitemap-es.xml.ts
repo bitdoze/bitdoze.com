@@ -1,5 +1,6 @@
 import type { APIContext } from 'astro';
 import { getCollection } from 'astro:content';
+import { getServices } from '@config/services';
 import { siteConfig } from '@config/site';
 import { getEntryHref } from '@utils/content';
 import { isPostIdInLocale } from '@utils/i18n';
@@ -22,6 +23,7 @@ export async function GET(context: APIContext) {
     '/es/resources/',
     '/es/contact/',
     '/es/series/',
+    '/es/services/',
     '/es/advertise/',
     '/es/authors/',
     '/es/categories/',
@@ -29,9 +31,11 @@ export async function GET(context: APIContext) {
     '/es/privacy/',
     '/es/terms/',
   ];
+  const services = getServices('es').map((service) => `/es/services/${service.slug.es}/`);
 
   const urls = [
     ...staticPages,
+    ...services,
     ...posts.map((post) => getEntryHref(post)),
   ].map((path) => new URL(path, site).toString());
 

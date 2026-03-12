@@ -1,3 +1,4 @@
+import { services } from "@config/services";
 import type { SupportedLocale } from "@utils/i18n";
 import { buildArchivePagePath, buildArchivePath } from "@utils/slugs";
 
@@ -12,6 +13,7 @@ const EN_TO_ES_EXACT: Record<string, string> = {
   "/search/": "/es/search/",
   "/blog/": "/es/blog/",
   "/series/": "/es/series/",
+  "/services/": "/es/services/",
   "/authors/": "/es/authors/",
   "/categories/": "/es/categories/",
   "/tags/": "/es/tags/",
@@ -105,6 +107,12 @@ function mapArchivePath(path: string, targetLocale: SupportedLocale): string | n
 
 export function localizeInternalPath(path: string, targetLocale: SupportedLocale): string {
   const normalized = normalizePath(path);
+  const servicePath = mapServicePath(normalized, targetLocale);
+
+  if (servicePath) {
+    return servicePath;
+  }
+
   const paginated = mapPaginatedPath(normalized, targetLocale);
 
   if (paginated) {
@@ -121,4 +129,21 @@ export function localizeInternalPath(path: string, targetLocale: SupportedLocale
   }
 
   return ES_TO_EN_EXACT[normalized] || normalized;
+}
+
+function mapServicePath(path: string, targetLocale: SupportedLocale): string | null {
+  if (path === "/services/" || path === "/es/services/") {
+    return targetLocale === "es" ? "/es/services/" : "/services/";
+  }
+
+  for (const service of services) {
+    const enPath = `/services/${service.slug.en}/`;
+    const esPath = `/es/services/${service.slug.es}/`;
+
+    if (path === enPath || path === esPath) {
+      return targetLocale === "es" ? esPath : enPath;
+    }
+  }
+
+  return null;
 }
