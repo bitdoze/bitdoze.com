@@ -1,4 +1,8 @@
 import type { SupportedLocale } from "@utils/i18n";
+import { buildArchivePagePath, buildArchivePath } from "@utils/slugs";
+
+type ArchiveType = "blog" | "tags" | "categories" | "authors";
+type TaxonomyArchiveType = Exclude<ArchiveType, "blog">;
 
 const EN_TO_ES_EXACT: Record<string, string> = {
   "/": "/es/",
@@ -42,20 +46,61 @@ export function normalizePath(path: string): string {
 function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string | null {
   const normalized = normalizePath(path);
 
-  if (targetLocale === "es") {
-    const enMatch = normalized.match(/^\/blog\/page\/(\d+)\/$/);
-    if (enMatch) {
-      return `/es/blog/page/${enMatch[1]}/`;
-    }
+  const paginatedMatch = normalized.match(
+    /^\/(?:(es)\/)?(blog|tags|categories|authors)(?:\/([^/]+))?\/page\/(\d+)\/$/,
+  );
+
+  if (!paginatedMatch) {
     return null;
   }
 
-  const esMatch = normalized.match(/^\/es\/blog\/page\/(\d+)\/$/);
-  if (esMatch) {
-    return `/blog/page/${esMatch[1]}/`;
+  const [, localePrefix, archiveType, archiveSlug, page] = paginatedMatch as [
+    string,
+    string | undefined,
+    ArchiveType,
+    string | undefined,
+    string,
+  ];
+  const currentLocale: SupportedLocale = localePrefix === "es" ? "es" : "en";
+
+  if (currentLocale === targetLocale) {
+    return normalized;
   }
 
-  return null;
+  if (archiveType === "blog") {
+    return buildArchivePagePath("blog", targetLocale, page);
+  }
+
+  if (!archiveSlug) {
+    return null;
+  }
+
+  return buildArchivePagePath(archiveType, targetLocale, page, archiveSlug);
+}
+
+function mapArchivePath(path: string, targetLocale: SupportedLocale): string | null {
+  const normalized = normalizePath(path);
+  const archiveMatch = normalized.match(
+    /^\/(?:(es)\/)?(tags|categories|authors)\/([^/]+)\/$/,
+  );
+
+  if (!archiveMatch) {
+    return null;
+  }
+
+  const [, localePrefix, archiveType, archiveSlug] = archiveMatch as [
+    string,
+    string | undefined,
+    TaxonomyArchiveType,
+    string,
+  ];
+  const currentLocale: SupportedLocale = localePrefix === "es" ? "es" : "en";
+
+  if (currentLocale === targetLocale) {
+    return normalized;
+  }
+
+  return buildArchivePath(archiveType, archiveSlug, targetLocale);
 }
 
 export function localizeInternalPath(path: string, targetLocale: SupportedLocale): string {
@@ -64,6 +109,11 @@ export function localizeInternalPath(path: string, targetLocale: SupportedLocale
 
   if (paginated) {
     return paginated;
+  }
+
+  const archivePath = mapArchivePath(normalized, targetLocale);
+  if (archivePath) {
+    return archivePath;
   }
 
   if (targetLocale === "es") {

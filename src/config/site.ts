@@ -3,9 +3,9 @@ import config from './config.json';
 // Site configuration
 export const siteConfig = {
   // Site details
-  name: "Bit Doze Website",
-  description: "Providing valuable resources and tutorials for web developers and tech enthusiasts.",
-  url: "https://bitdoze.com",
+  name: "Bitdoze",
+  description: "Practical DevOps, programming, and self-hosting guides for developers and operators.",
+  url: "https://www.bitdoze.com",
   
   // Pagination settings
   postsPerPage: 10, // Number of posts per page
@@ -18,7 +18,7 @@ export const siteConfig = {
   },
   
   // Default social image
-  defaultImage: "/images/default-og.jpg",
+  defaultImage: "/images/default-og.svg",
 };
 
 // View Transitions configuration

@@ -12,6 +12,8 @@ type VideoEntry = {
   publicationDate?: string;
 };
 
+const isDefined = <T>(value: T | null): value is T => value !== null;
+
 const YOUTUBE_EMBED_REGEX = /<YouTubeEmbed[\s\S]*?\/>/g;
 const ATTRIBUTE_REGEX = (name: string) =>
   new RegExp(`${name}=("|')(.*?)\\1`);
@@ -57,7 +59,7 @@ const extractVideosFromBody = (
         publicationDate: publicationDate?.toISOString(),
       };
     })
-    .filter((entry): entry is VideoEntry => Boolean(entry));
+    .filter(isDefined);
 };
 
 export async function GET(context: APIContext) {

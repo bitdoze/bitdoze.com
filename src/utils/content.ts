@@ -1,6 +1,14 @@
 const EXTENSION_REGEX = /\.(md|mdx|markdown)$/i;
 
-function extractCanonical(entry: any): string | undefined {
+type SluggableEntry = {
+  slug?: string;
+  id?: string;
+  data?: Record<string, unknown> & {
+    canonical?: string;
+  };
+};
+
+function extractCanonical(entry: SluggableEntry): string | undefined {
   const canonical = entry?.data?.canonical;
   if (!canonical) {
     return undefined;
@@ -14,13 +22,13 @@ function extractCanonical(entry: any): string | undefined {
   }
 }
 
-export function getEntrySlug(entry: any): string {
+export function getEntrySlug(entry: SluggableEntry): string {
   const canonical = extractCanonical(entry);
   const raw = canonical || entry?.slug || entry?.id || "";
   return raw.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(EXTENSION_REGEX, "");
 }
 
-export function getEntryHref(entry: any): string {
+export function getEntryHref(entry: SluggableEntry): string {
   const slug = getEntrySlug(entry);
   return `/${slug ? `${slug}/` : ""}`;
 }

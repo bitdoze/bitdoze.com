@@ -1,4 +1,5 @@
 import Fuse from "fuse.js";
+import { toTaxonomySlug } from "../utils/slugs";
 
 const SPINNER = `<div class="flex justify-center py-10">
     <svg class="animate-spin h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -131,7 +132,7 @@ const displayResults = (results, query, searchResults, noResults, searchInfo) =>
                 .slice(0, 3)
                 .map(
                   (tag) => `
-                  <a href="${localePrefix}/tags/${tag.toLowerCase()}/" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-xs hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors duration-300">
+                  <a href="${localePrefix}/tags/${toTaxonomySlug(tag)}/" class="px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-xs hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors duration-300">
                     #${tag}
                   </a>
                 `

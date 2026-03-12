@@ -16,7 +16,7 @@ export async function GET(context: APIContext) {
 
   return rss({
     title: `${siteConfig.name} (Espanol)`,
-    description: 'Articulos en espanol de BitDoze',
+    description: 'Articulos en espanol de Bitdoze',
     site: context.site || siteConfig.url,
     items: sortedPosts.map((post) => ({
       title: post.data.title,

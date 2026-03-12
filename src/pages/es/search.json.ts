@@ -33,7 +33,7 @@ export async function GET() {
       slug: getEntrySlug(post),
       title: post.data.title,
       description: post.data.description || '',
-      date: post.data.date ? formatDate(post.data.date) : '',
+      date: post.data.date ? formatDate(post.data.date, 'es') : '',
       image: imageData,
       categories: post.data.categories || [],
       tags: post.data.tags || [],

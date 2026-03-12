@@ -1,3 +1,4 @@
+import type { CollectionEntry } from "astro:content";
 import { getEntrySlug } from "@utils/content";
 
 export const DEFAULT_LOCALE = "en";
@@ -23,7 +24,7 @@ export function isPostIdInLocale(id: string, locale: SupportedLocale): boolean {
   return locale === "es" ? isSpanish : !isSpanish;
 }
 
-export function getPostLocale(post: any): SupportedLocale {
+export function getPostLocale(post: CollectionEntry<"posts">): SupportedLocale {
   if (post?.data?.locale === "es") {
     return "es";
   }
@@ -32,7 +33,7 @@ export function getPostLocale(post: any): SupportedLocale {
   return getLocaleFromSlug(slug);
 }
 
-export function getPostTranslationKey(post: any): string {
+export function getPostTranslationKey(post: CollectionEntry<"posts">): string {
   const configured = post?.data?.translationKey;
   if (configured && typeof configured === "string") {
     return configured.trim();
