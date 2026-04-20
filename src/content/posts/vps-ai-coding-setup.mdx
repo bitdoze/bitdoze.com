@@ -1,0 +1,431 @@
+---
+date: 2026-04-20T00:00:00Z
+title: "VPS Setup for AI Coding Agents: Secure, Accessible, Ready to Code"
+meta_title: "How to Set Up a VPS Server for AI Coding Agents"
+description: "Set up a VPS to run AI coding agents like opencode, lock it down with CrowdSec, and access it from your Mac through Zed, VS Code, or a browser terminal."
+image: "../../assets/images/26/04/vps-ai-coding-setup.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["vps", "ai-tools", "self-hosted"]
+canonical: https://www.bitdoze.com/vps-ai-coding-setup/
+---
+
+Running AI coding agents on your laptop is fine until your fan sounds like a jet engine and your battery drops 30% in an hour. A VPS fixes all of that. You get a machine that runs 24/7, handles the compute load, and lets you connect from anywhere — your desk, a café, or your phone.
+
+This guide walks through the full setup: creating SSH keys, adding a locked-down user, securing the server with CrowdSec, setting up a nice terminal with Starship, installing opencode, and connecting from your Mac through Zed, VS Code, or a browser terminal with Termix.
+
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 Free Credit" />
+<Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
+
+> A VPS with 2 vCPUs and 4 GB RAM is enough to get started. opencode itself is lightweight — the heavy lifting happens in the LLM APIs, not on your server.
+
+## What you need before starting
+
+- A VPS running Ubuntu 22.04 or 24.04 (any provider works)
+- A Mac as your local machine
+- An API key for at least one LLM provider (Anthropic, OpenAI, Google, etc.)
+- Basic comfort with the terminal
+
+## Step 1: Create SSH keys on your Mac
+
+Before touching the server, generate a key pair on your local machine. You'll use this key to log in without passwords.
+
+Open Terminal on your Mac and run:
+
+```sh
+ssh-keygen -t ed25519 -C "your-email@example.com"
+```
+
+Press Enter to accept the default path (`~/.ssh/id_ed25519`), then set a passphrase when asked. You can leave it blank, but a passphrase adds a useful layer of protection if someone gets your laptop.
+
+Check that the keys were created:
+
+```sh
+ls ~/.ssh/
+# id_ed25519  id_ed25519.pub
+```
+
+The `.pub` file is your public key. That goes on the server. The other file never leaves your machine.
+
+### Add the key to your SSH agent
+
+So you don't have to type the passphrase every time:
+
+```sh
+eval "$(ssh-agent -s)"
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+```
+
+## Step 2: First login and server prep
+
+Log into your VPS as root using the temporary password or key your provider gave you:
+
+```sh
+ssh root@your_server_ip
+```
+
+Update the system first:
+
+```sh
+apt update && apt upgrade -y
+```
+
+### Add swap space
+
+Most budget VPS plans have limited RAM. Swap prevents out-of-memory crashes:
+
+```sh
+fallocate -l 2G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+```
+
+## Step 3: Create a user and add them to sudo
+
+Running everything as root is asking for trouble. Create a regular user for daily work:
+
+```sh
+adduser aidev
+```
+
+Follow the prompts — set a password, skip the rest of the fields.
+
+Add the user to the sudo group:
+
+```sh
+usermod -aG sudo aidev
+```
+
+Allow sudo without a password (since you'll be using SSH key auth, not passwords):
+
+```sh
+echo "aidev ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/aidev
+chmod 0440 /etc/sudoers.d/aidev
+```
+
+### Copy your SSH public key to the new user
+
+```sh
+mkdir -p /home/aidev/.ssh
+cp /root/.ssh/authorized_keys /home/aidev/.ssh/
+chown -R aidev:aidev /home/aidev/.ssh
+chmod 700 /home/aidev/.ssh
+chmod 600 /home/aidev/.ssh/authorized_keys
+```
+
+If your root account didn't have an `authorized_keys` file (you logged in with a password), paste the contents of your local `~/.ssh/id_ed25519.pub` into `/home/aidev/.ssh/authorized_keys` manually.
+
+### Test the new user before doing anything else
+
+Open a second terminal on your Mac and verify the connection works:
+
+```sh
+ssh aidev@your_server_ip
+```
+
+Once inside, confirm sudo works:
+
+```sh
+sudo whoami
+# root
+```
+
+Keep both terminal windows open until you've finished locking things down.
+
+## Step 4: Harden SSH access
+
+Switch to the `aidev` session for the rest of this guide. Now tighten SSH so it only accepts keys and ignores passwords.
+
+```sh
+sudo nano /etc/ssh/sshd_config
+```
+
+Find and set these lines:
+
+```
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+```
+
+Also add a 15-minute idle timeout so abandoned sessions don't pile up:
+
+```
+ClientAliveInterval 900
+ClientAliveCountMax 0
+```
+
+Save the file, then restart SSH:
+
+```sh
+sudo systemctl restart ssh
+```
+
+Try connecting again from your Mac to confirm it still works. If it does, your key auth is solid.
+
+## Step 5: Secure the server with CrowdSec
+
+CrowdSec watches your logs for brute-force attempts, port scans, and other bad behavior. When it spots something suspicious, it blocks the source IP. It's free and surprisingly effective.
+
+### Install CrowdSec
+
+```sh
+curl -s https://install.crowdsec.net | sudo sh
+sudo apt update && sudo apt install crowdsec -y
+```
+
+### Install the firewall bouncer
+
+The bouncer is what actually drops traffic from blocked IPs:
+
+```sh
+sudo apt install crowdsec-firewall-bouncer-iptables -y
+```
+
+### Set up firewall rules
+
+Allow only what you need:
+
+```sh
+# Keep existing connections alive
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow loopback
+sudo iptables -A INPUT -i lo -j ACCEPT
+
+# Allow SSH
+sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Allow HTTP and HTTPS (if you later add a web service)
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+
+# Drop everything else
+sudo iptables -P INPUT DROP
+```
+
+### Make firewall rules survive reboots
+
+```sh
+sudo apt install iptables-persistent -y
+# Select Yes when asked to save IPv4 and IPv6 rules
+sudo netfilter-persistent save
+```
+
+### Verify CrowdSec is running
+
+```sh
+sudo systemctl status crowdsec
+sudo cscli collections list   # should show crowdsecurity/sshd
+sudo cscli bouncers list       # should show the firewall bouncer
+```
+
+CrowdSec automatically monitors SSH login attempts. Anything that looks like a brute-force attack gets banned without you lifting a finger.
+
+Useful commands to check on it later:
+
+```sh
+sudo cscli decisions list   # active bans
+sudo cscli alerts list      # recent events
+```
+
+## Step 6: Set up Starship with Catppuccin theme
+
+A good prompt makes a big difference when you're spending hours in a terminal. [Starship](https://www.bitdoze.com/starship-ghostty-terminal/) is fast, informative, and easy to customize.
+
+Install Starship as the `aidev` user:
+
+```sh
+curl -sS https://starship.rs/install.sh | sh
+```
+
+Add it to your shell's config. For bash:
+
+```sh
+echo 'eval "$(starship init bash)"' >> ~/.bashrc
+```
+
+### Apply the Catppuccin Mocha theme
+
+Download the theme palette directly into your Starship config:
+
+```sh
+mkdir -p ~/.config
+curl -o ~/.config/starship.toml \
+  https://raw.githubusercontent.com/catppuccin/starship/refs/heads/main/themes/mocha.toml
+```
+
+Reload your shell:
+
+```sh
+source ~/.bashrc
+```
+
+Your prompt now shows Git status, the current directory, language versions, and exit codes — all in Catppuccin Mocha colors. The full setup walkthrough, including [Ghostty terminal configuration, is in this guide](https://www.bitdoze.com/starship-ghostty-terminal/).
+
+## Step 7: Install opencode
+
+opencode is an open-source AI coding agent that runs in your terminal. It supports Anthropic, OpenAI, Google, and 70+ other LLM providers.
+
+```sh
+curl -fsSL https://opencode.ai/install | bash
+```
+
+Once installed, set your API key. For Anthropic:
+
+```sh
+export ANTHROPIC_API_KEY="your-key-here"
+```
+
+To make it permanent:
+
+```sh
+echo 'export ANTHROPIC_API_KEY="your-key-here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Start opencode in any directory:
+
+```sh
+opencode
+```
+
+It opens an interactive terminal UI where you can ask it to write code, explain errors, refactor files, or anything else you'd use an AI coding assistant for.
+
+### Run opencode in a persistent session with tmux
+
+If you want opencode to keep running after you disconnect, use tmux:
+
+```sh
+sudo apt install tmux -y
+```
+
+Start a named session:
+
+```sh
+tmux new -s coding
+```
+
+Run opencode inside it, then detach with `Ctrl+B, D`. When you reconnect later, reattach with:
+
+```sh
+tmux attach -t coding
+```
+
+Your session and whatever opencode was doing will be exactly where you left it.
+
+## Step 8: Configure SSH on your Mac
+
+Now make connecting to the server as easy as typing its name. Edit your local SSH config:
+
+```sh
+nano ~/.ssh/config
+```
+
+Add this block:
+
+```
+Host ai-server
+    HostName your_server_ip
+    User aidev
+    IdentityFile ~/.ssh/id_ed25519
+    AddKeysToAgent yes
+    UseKeychain yes
+```
+
+Now you can connect with just:
+
+```sh
+ssh ai-server
+```
+
+No IP address, no username, no key path to remember.
+
+## Step 9: Connect with Zed IDE
+
+Zed has built-in remote development support. Your Mac runs the editor UI, while the actual files and processes live on the server. This means the editor is fast and responsive even if the server is across the world.
+
+1. [Download and install Zed](https://zed.dev) on your Mac
+2. Open Zed and press `Cmd+Shift+P`, then search for "Remote Projects"
+3. Click **Connect New Server**
+4. Enter your SSH host: `ssh://ai-server` (using the alias you set in `~/.ssh/config`)
+5. Zed installs a small headless server on your VPS automatically
+6. Once connected, choose a folder to open (e.g., `/home/aidev/projects`)
+
+You get a full editor experience — file tree, terminal, AI features — but all the heavy work happens on the server. You can also open it from the terminal:
+
+```sh
+zed ssh://ai-server/home/aidev/projects/my-project
+```
+
+The terminal inside Zed connects directly to your server, so you can run opencode right there alongside your editor.
+
+## Step 10: Connect with VS Code
+
+If you prefer VS Code, the Remote SSH extension gives you a similar experience.
+
+1. Install the [Remote - SSH extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) from the extensions panel
+2. Press `Cmd+Shift+P` and search for **Remote-SSH: Connect to Host**
+3. Select `ai-server` (it reads your `~/.ssh/config` automatically)
+4. VS Code installs its server component on the VPS and opens a remote window
+5. Open a folder on the server and you're in
+
+The integrated terminal connects to the server, so you can run opencode, git, or anything else right alongside your editor. Extensions run on the server side, so Python linting, formatters, and language servers work exactly as they would locally.
+
+## Step 11: Access from anywhere with Termix
+
+Zed and VS Code are great when you're at your computer, but sometimes you want to jump into a terminal from a browser or another device without installing anything. [Termix](https://www.bitdoze.com/termix-self-host/) is a self-hosted web terminal you can run on your VPS.
+
+The full setup is covered in the [Termix self-hosting guide](https://www.bitdoze.com/termix-self-host/). The short version: deploy Termix on your server, put it behind a reverse proxy with HTTPS, and you get a full terminal in any browser.
+
+Once it's running, you can:
+- SSH into sessions from your iPad or phone
+- Share a terminal link with a collaborator
+- Access your opencode sessions without installing anything on the client
+
+<Notice type="info" title="Security note">
+Put Termix behind authentication. The guide covers this, but worth emphasizing: a web terminal with no auth is a wide-open door. Use HTTP basic auth, an auth proxy, or Termix's built-in token system.
+</Notice>
+
+## What to do next
+
+With the server running, here are a few things worth setting up:
+
+**Nerd Fonts for Starship icons** — Starship uses icons that only render correctly with a Nerd Font. Install one like [FiraCode Nerd Font](https://www.nerdfonts.com/) in your terminal and configure it in Zed or VS Code.
+
+**Node.js or other runtimes** — If you're working on JavaScript projects, install Node.js via `nvm` so you can switch versions easily:
+
+```sh
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install --lts
+```
+
+**Git configuration** — Set your name and email on the server so commits look right:
+
+```sh
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
+**Automatic security updates** — Keep the server patched without thinking about it:
+
+```sh
+sudo apt install unattended-upgrades -y
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
+
+## Wrapping up
+
+What you have now:
+
+- A VPS with a locked-down user, key-only SSH, and CrowdSec watching for threats
+- A clean terminal with Starship and Catppuccin Mocha
+- opencode ready to run AI coding tasks with any LLM provider
+- SSH config on your Mac so connecting takes one command
+- Zed and VS Code wired up for full remote development
+- Termix for browser-based access when you're away from your machine
+
+The whole setup takes about 30 minutes. After that, your laptop stays cool, the AI agent keeps running whether you're connected or not, and you can pick up where you left off from any device.
