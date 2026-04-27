@@ -10,19 +10,10 @@ const validFallbacks = new Set<ClientRouterFallback>(["animate", "swap", "none"]
 export const viewTransitionsEnabled = viewTransitionsConfig.enabled;
 
 export function getClientRouterFallback(): ClientRouterFallback {
-  const fallback = viewTransitionsConfig.fallback?.toLowerCase() as ClientRouterFallback | "instant" | undefined;
-  if (!fallback) {
-    return "none";
+  const fallback = viewTransitionsConfig.fallback?.toLowerCase() as ClientRouterFallback | undefined;
+  if (fallback && validFallbacks.has(fallback)) {
+    return fallback;
   }
-
-  if (validFallbacks.has(fallback as ClientRouterFallback)) {
-    return fallback as ClientRouterFallback;
-  }
-
-  if (fallback === "instant") {
-    return "none";
-  }
-
   return "none";
 }
 
