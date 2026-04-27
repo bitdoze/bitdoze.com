@@ -13,7 +13,7 @@ export async function onRequest(context) {
   const url = new URL(request.url);
   const accept = request.headers.get("accept") || "";
 
-  // Markdown content negotiation: redirect Accept: text/markdown to pre-built .md files
+  // Markdown content negotiation: serve pre-built .md files for Accept: text/markdown
   if (
     accept.includes("text/markdown") &&
     !url.pathname.endsWith(".md") &&
@@ -21,8 +21,22 @@ export async function onRequest(context) {
     !url.pathname.startsWith("/.") &&
     !STATIC_EXTENSIONS.test(url.pathname)
   ) {
-    const mdPath = `/md${url.pathname.replace(/\/$/, "")}.md`;
-    return Response.redirect(new URL(mdPath, url.origin).toString(), 302);
+    const slug = url.pathname.replace(/\/$/, "") || "/index";
+    const mdUrl = new URL(`/md${slug}.md`, url.origin);
+    const mdResponse = await fetch(mdUrl.toString());
+    if (mdResponse.ok) {
+      const text = await mdResponse.text();
+      const tokenCount = Math.ceil(text.length / 4);
+      return new Response(text, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "x-markdown-tokens": String(tokenCount),
+          "Vary": "Accept",
+        },
+      });
+    }
+    // Fall through to normal HTML response if no .md file found
   }
 
   const response = await next();
