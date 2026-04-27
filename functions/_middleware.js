@@ -9,7 +9,7 @@ const STATIC_EXTENSIONS =
   /\.(xml|json|txt|ico|svg|jpg|jpeg|png|webp|gif|css|js|woff2?|ttf|eot|mp4|pdf)$/i;
 
 export async function onRequest(context) {
-  const { request, next } = context;
+  const { request, next, env } = context;
   const url = new URL(request.url);
   const accept = request.headers.get("accept") || "";
 
@@ -23,7 +23,9 @@ export async function onRequest(context) {
   ) {
     const slug = url.pathname.replace(/\/$/, "") || "/index";
     const mdUrl = new URL(`/md${slug}.md`, url.origin);
-    const mdResponse = await fetch(mdUrl.toString());
+    // Use ASSETS binding to fetch static files directly, bypassing middleware loop
+    const assetFetch = env?.ASSETS?.fetch ?? fetch;
+    const mdResponse = await assetFetch(new Request(mdUrl.toString()));
     if (mdResponse.ok) {
       const text = await mdResponse.text();
       const tokenCount = Math.ceil(text.length / 4);
