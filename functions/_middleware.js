@@ -23,20 +23,25 @@ export async function onRequest(context) {
   ) {
     const slug = url.pathname.replace(/\/$/, "") || "/index";
     const mdUrl = new URL(`/md${slug}.md`, url.origin);
-    // Use ASSETS binding to fetch static files directly, bypassing middleware loop
-    const assetFetch = env?.ASSETS?.fetch ?? fetch;
-    const mdResponse = await assetFetch(new Request(mdUrl.toString()));
-    if (mdResponse.ok) {
-      const text = await mdResponse.text();
-      const tokenCount = Math.ceil(text.length / 4);
-      return new Response(text, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/markdown; charset=utf-8",
-          "x-markdown-tokens": String(tokenCount),
-          "Vary": "Accept",
-        },
-      });
+    try {
+      // Use ASSETS binding to fetch static files directly, bypassing middleware loop
+      const mdResponse = env?.ASSETS
+        ? await env.ASSETS.fetch(new Request(mdUrl.toString()))
+        : await fetch(mdUrl.toString());
+      if (mdResponse.ok) {
+        const text = await mdResponse.text();
+        const tokenCount = Math.ceil(text.length / 4);
+        return new Response(text, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/markdown; charset=utf-8",
+            "x-markdown-tokens": String(tokenCount),
+            "Vary": "Accept",
+          },
+        });
+      }
+    } catch (_) {
+      // Fall through to normal HTML response on error
     }
     // Fall through to normal HTML response if no .md file found
   }
