@@ -21,7 +21,7 @@ export async function onRequest(context) {
     !url.pathname.startsWith("/.") &&
     !STATIC_EXTENSIONS.test(url.pathname)
   ) {
-    const slug = url.pathname.replace(/\/$/, "") || "/index";
+    const slug = url.pathname.replace(/\/$/, "") || "/home";
     const mdUrl = new URL(`/md${slug}.md`, url.origin);
     try {
       // Use ASSETS binding to fetch static files directly, bypassing middleware loop
