@@ -133,44 +133,44 @@ Analysis based on `www.bitdoze.com__content_decay2.csv`. 20 articles selected by
 - **Total clicks:** 1,350
 - **What to research:** LiteLLM latest version, new Docker setup, proxy changes, new model support, breaking config changes
 - **Why it decayed:** LiteLLM had major version bumps, old setup instructions likely broken
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 12. `/google-adk-openrouter-models`
 - **Status:** Critical | **Traffic (2M):** 14 | **YoY:** -89.3% | **Queries:** -6.2%
 - **Total clicks:** 851
 - **What to research:** Google ADK latest version, OpenRouter model changes, new ADK features, breaking API changes
 - **Why it decayed:** Google ADK had breaking changes, model names shifted
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 13. `/docker-containers-business`
 - **Status:** Critical | **Traffic (2M):** 12 | **YoY:** -90.2% | **Queries:** -37.5%
 - **Total clicks:** 823
 - **What to research:** New business-relevant containers 2026, updated versions of listed containers, new categories (AI tools, collaboration)
 - **Why it decayed:** Container versions outdated, new tools emerged
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 14. `/zerobyte-restic-gui`
 - **Status:** Warning | **Traffic (2M):** 11 | **YoY:** 0% | **Queries:** -38.5%
 - **Total clicks:** 27
 - **What to research:** ZeroByte/Restic GUI latest version, new features, alternatives
 - **Why it decayed:** Queries down, niche tool
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ## Tier 4 — Linux & Misc
 
@@ -179,66 +179,66 @@ Analysis based on `www.bitdoze.com__content_decay2.csv`. 20 articles selected by
 - **Total clicks:** 2,250
 - **What to research:** Docker 27+ cleanup commands, new `docker system prune` options, overlay2 changes
 - **Why it decayed:** Queries way UP (+46.7%) — topic is hot, article just lost ranking from age
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 16. `/sed-insert-append-text`
 - **Status:** Warning | **Traffic (2M):** 10 | **YoY:** -98.6% | **Queries:** +50%
 - **Total clicks:** 2,462
 - **What to research:** Any sed syntax updates, modern alternatives (sd, sad), new examples
 - **Why it decayed:** Queries UP (+50%) — evergreen topic, just needs freshness bump
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 17. `/sed-change-case`
 - **Status:** Warning | **Traffic (2M):** 7 | **YoY:** -95.5% | **Queries:** +25%
 - **Total clicks:** 541
 - **What to research:** sed case conversion patterns, modern alternatives, new use cases
 - **Why it decayed:** Queries UP — topic alive, article stale
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 18. `/nicegui-get-started`
 - **Status:** Critical | **Traffic (2M):** 6 | **YoY:** -94.1% | **Queries:** -46.2%
 - **Total clicks:** 544
 - **What to research:** NiceGUI 2.x latest features, new components, breaking changes from 1.x
 - **Why it decayed:** NiceGUI evolved significantly, old tutorial is outdated
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 19. `/build-astro-blog-free`
 - **Status:** Warning | **Traffic (2M):** 6 | **YoY:** -50% | **Queries:** -83.3%
 - **Total clicks:** 98
 - **What to research:** Astro 5.x changes, new free hosting options, updated deployment steps
 - **Why it decayed:** Astro has changed significantly, deployment options shifted
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ### 20. `/bun-update-packages`
 - **Status:** Warning | **Traffic (2M):** 5 | **YoY:** -85.7% | **Queries:** +16.3%
 - **Total clicks:** 164
 - **What to research:** Bun latest version, new package management features, lockfile changes
 - **Why it decayed:** Queries UP — Bun is growing, article just needs version updates
-- [ ] Research done
-- [ ] Article updated
-- [ ] Date changed to 2026-05-04
-- [ ] Humanized
-- [ ] Build verified
+- [x] Research done
+- [x] Article updated
+- [x] Date changed to 2026-05-04
+- [x] Humanized
+- [x] Build verified
 
 ---
 
