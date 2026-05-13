@@ -1,0 +1,437 @@
+---
+date: 2026-05-13T00:00:00Z
+title: "Autoaloja Tu Git y CI/CD con Forgejo y Woodpecker CI"
+description: "Configura una alternativa a GitHub autoalojada con Forgejo y CI/CD usando Woodpecker CI. Guia completa con Docker Compose en un VPS."
+image: "@assets/images/25/05/forgejo-woodpecker-cicd.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["self-hosted", "docker", "cicd"]
+---
+
+import Button from "@components/widgets/Button.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import { Picture } from "astro:assets";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+
+GitHub Actions esta bien hasta que ves la factura, te topas con los limites de tasa, o te das cuenta de que tu codigo se ejecuta en los servidores de otro. Si ya autoalojas tus aplicaciones en un VPS, alojar tu propio servidor Git y pipeline de CI/CD es el siguiente paso logico. Y es mas facil de lo que parece.
+
+Esta guia explica como configurar **Forgejo** (un forge Git autoalojado) con CI/CD mediante **Woodpecker CI**. Forgejo gestiona tus repositorios, issues y pull requests. Woodpecker ejecuta tus builds, tests y despliegues. Juntos reemplazan a GitHub y GitHub Actions.
+
+## Por que no quedarse en GitHub?
+
+Hay varias razones por las que la gente se muda:
+
+- **Control de costes**: El tier gratuito de GitHub Actions se agota rapido en repositorios privados. Los runners autoalojados ayudan, pero sigues en la infraestructura de GitHub.
+- **Propiedad de los datos**: Tu codigo, issues, pull requests y logs de CI viven en tu servidor. Sin sorpresas en los terminos de servicio.
+- **Desarrollo offline/local**: Un VPS en tu region sin depender de la disponibilidad de GitHub.
+- **Lock-in de GitHub Actions**: Cuantos mas workflows escribes, mas dificil es irse. Forgejo + Woodpecker mantiene la portabilidad.
+
+Dicho esto, mucha gente mantiene un espejo en GitHub para el lado social del codigo. Puedes tener las dos cosas.
+
+## Forgejo vs Gitea: cual es la diferencia?
+
+Forgejo se bifurco de Gitea en octubre de 2022 despues de que una empresa con fines de lucro se hiciera con el proyecto Gitea (dominios, marca, todo). La comunidad no fue consultada. Una carta abierta fue ignorada. Asi que hicieron un fork.
+
+Desde 2024, Forgejo es un hard fork -- los codigos base han divergido. Aqui van las diferencias:
+
+| | Forgejo | Gitea |
+|---|---|---|
+| **Gobierno** | Sin fines de lucro (Codeberg e.V.) | Empresa con fines de lucro |
+| **Licencia** | Exclusivamente Software Libre | Open Core (algunas features propietarias) |
+| **Desarrollado en** | El propio Forgejo | GitHub |
+| **CI/CD testeado con** | Forgejo Actions | GitHub Actions |
+| **Seguridad** | Aviso previo para todos los usuarios | Aviso previo solo para clientes de pago |
+| **Federacion** | Trabajando en soporte ActivityPub | Sin planes de federacion |
+| **Tests end-to-end** | Si | No (a mediados de 2025) |
+| **Migracion desde Gitea** | Soportada, mismo esquema de BD | N/A |
+
+Funcionalmente son muy similares. Mismo UI, mismo formato de config, mismo Docker setup. Si empiezas de cero, ve con Forgejo. Si ya estas en Gitea y funciona bien, la migracion no es urgente -- pero es un solo comando cuando estes listo.
+
+## Lo que necesitas
+
+- Un VPS con al menos 2 GB de RAM (4 GB recomendado si ejecutas CI/CD en la misma maquina). [Hetzner](https://go.bitdoze.com/hetzner) o [Hostinger](https://go.bitdoze.com/hostinger-vps) funcionan bien.
+- Docker y Docker Compose instalados
+- Un nombre de dominio (o subdominio) apuntando a tu VPS
+- Comodidad basica con la terminal
+
+<Notice type="info" title="Un solo VPS es suficiente">
+
+Todo en esta guia corre en un solo servidor. Forgejo, Woodpecker y el runner de CI pueden coexistir en un VPS de 4 GB sin problemas. Siempre puedes separarlos mas adelante.
+
+</Notice>
+
+## Paso 1: Instalar Forgejo
+
+Crea un directorio para Forgejo y prepara el Docker Compose:
+
+```sh
+mkdir -p /opt/forgejo && cd /opt/forgejo
+```
+
+### Docker Compose
+
+```yaml
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    container_name: forgejo
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__server__DOMAIN=git.tudominio.com
+      - FORGEJO__server__ROOT_URL=https://git.tudominio.com
+      - FORGEJO__server__SSH_DOMAIN=git.tudominio.com
+      - FORGEJO__server__SSH_PORT=2222
+      - FORGEJO__server__SSH_LISTEN_PORT=22
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__actions__ENABLED=true
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      - "2222:22"
+```
+
+Un par de cosas a tener en cuenta:
+
+- **SSH en puerto 2222**: El servidor SSH integrado de Forgejo usa el puerto 2222 para no entrar en conflicto con el SSH del sistema en el 22. Clonaras repos con `ssh://git@tudominio.com:2222/usuario/repo.git`.
+- **Registro deshabilitado**: No quieres que cualquiera cree cuentas en tu servidor Git. Crea las cuentas manualmente o habilita el registro brevemente.
+- **SQLite**: Sirve para equipos pequenos y uso personal. Si tienes 10+ usuarios, cambia a PostgreSQL.
+
+### Iniciar Forgejo
+
+```sh
+docker compose up -d
+```
+
+Visita `https://git.tudominio.com`, completa el asistente de configuracion inicial y crea tu cuenta de administrador.
+
+### Proxy inverso con Nginx
+
+Si ejecutas Nginx en el host (no en Docker), anade un bloque de servidor:
+
+```nginx
+server {
+    server_name git.tudominio.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    listen 443 ssl;
+    ssl_certificate /etc/letsencrypt/live/git.tudominio.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/git.tudominio.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+```
+
+Obten el certificado primero:
+
+```sh
+certbot --nginx -d git.tudominio.com
+```
+
+<Notice type="warning" title="Firewall">
+
+Asegurate de que los puertos 80, 443 y 2222 esten abiertos. Si usas UFW:
+
+```sh
+sudo ufw allow 'Nginx Full'
+sudo ufw allow 2222
+```
+
+</Notice>
+
+## Paso 2: Instalar Woodpecker CI
+
+Woodpecker es un servidor de CI/CD independiente que se conecta a Forgejo mediante OAuth. Es un fork comunitario de Drone CI, mantenido despues de que Drone cambiara su licencia. Cada paso del pipeline se ejecuta en su propio contenedor Docker, asi que tu entorno de build siempre esta limpio y reproducible.
+
+### Crear una aplicacion OAuth en Forgejo
+
+1. Ve a **Administracion del Sitio → Aplicaciones** (o a Configuracion de Usuario → Aplicaciones)
+2. Crea una nueva aplicacion OAuth2:
+   - **Nombre**: Woodpecker CI
+   - **URI de Redireccion**: `https://ci.tudominio.com/authorize`
+3. Guarda el **Client ID** y el **Client Secret**
+
+### Docker Compose para Woodpecker
+
+```sh
+mkdir -p /opt/woodpecker && cd /opt/woodpecker
+```
+
+
+
+```yaml
+services:
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v3
+    container_name: woodpecker-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - woodpecker_data:/var/lib/woodpecker
+    environment:
+      - WOODPECKER_OPEN=false
+      - WOODPECKER_HOST=https://ci.tudominio.com
+      - WOODPECKER_GITEA=true
+      - WOODPECKER_GITEA_URL=https://git.tudominio.com
+      - WOODPECKER_GITEA_CLIENT=TU_CLIENT_ID
+      - WOODPECKER_GITEA_SECRET=TU_CLIENT_SECRET
+      - WOODPECKER_AGENT_SECRET=TU_SECRETO_ALEATORIO
+      - WOODPECKER_DATABASE_DRIVER=sqlite3
+      - WOODPECKER_DATABASE_DATASOURCE=/var/lib/woodpecker/woodpecker.db
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    container_name: woodpecker-agent
+    restart: unless-stopped
+    depends_on:
+      - woodpecker-server
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WOODPECKER_SERVER=woodpecker-server:9000
+      - WOODPECKER_AGENT_SECRET=TU_SECRETO_ALEATORIO
+      - WOODPECKER_MAX_WORKFLOWS=2
+
+volumes:
+  woodpecker_data:
+```
+
+Genera el secreto del agente:
+
+```sh
+openssl rand -hex 32
+```
+
+Usa el mismo secreto para ambas entradas de `WOODPECKER_AGENT_SECRET`.
+
+<Notice type="warning" title="Acceso al socket de Docker">
+
+El agente monta `/var/run/docker.sock`, lo que le da acceso completo al demonio Docker del host. Para un VPS de un solo usuario esto esta bien. Para entornos compartidos, considera usar Podman sin root o Kaniko.
+
+</Notice>
+
+Inicialo:
+
+```sh
+docker compose up -d
+```
+
+Anade un proxy inverso de Nginx para `ci.tudominio.com` igual que con Forgejo (proxy al puerto 8000).
+
+### Tu primer pipeline de Woodpecker
+
+Crea `.woodpecker.yml` en la raiz de un repositorio en Forgejo:
+
+```yaml
+pipeline:
+  build:
+    image: node:20-alpine
+    commands:
+      - npm ci
+      - npm run build
+
+  test:
+    image: node:20-alpine
+    commands:
+      - npm test
+    depends_on:
+      - build
+
+  deploy:
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache openssh-client
+      - ssh -o StrictHostKeyChecking=no deploy@tuserver "cd /var/www/miapp && git pull && ./build.sh"
+    depends_on:
+      - test
+    when:
+      branch: main
+```
+
+Cada paso se ejecuta en su propio contenedor. El paso de `deploy` solo se ejecuta en la rama `main`.
+
+### Construir y subir imagenes Docker
+
+Woodpecker tiene un plugin de Docker integrado:
+
+```yaml
+pipeline:
+  build-image:
+    image: plugins/docker
+    settings:
+      repo: git.tudominio.com/tuusuario/miapp
+      registry: git.tudominio.com
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+    when:
+      branch: main
+```
+
+Anade los secretos mediante la UI o el CLI de Woodpecker:
+
+```sh
+woodpecker-cli secret add \
+  --repository tuusuario/miapp \
+  --name docker_username \
+  --value 'tuusuario'
+
+woodpecker-cli secret add \
+  --repository tuusuario/miapp \
+  --name docker_password \
+  --value 'tu_token'
+```
+
+---
+
+## Paso 3: Configurar despliegues automaticos
+
+Aqui va un patron del mundo real. Haces push al codigo, Woodpecker ejecuta los tests, y si pasan, la app se despliega en el mismo VPS.
+
+### El workflow de despliegue
+
+El enfoque mas simple: conectarte por SSH al servidor, hacer pull del ultimo codigo, reconstruir.
+
+<Notice type="info" title="Despliegues en el mismo servidor">
+
+Si Forgejo, CI y tu app corren en el mismo VPS, la conexion SSH es solo localhost. Parece redundante, pero mantiene tu workflow portable -- cambia el destino SSH a otro servidor y todo sigue funcionando.
+
+</Notice>
+
+### Con apps de Docker Compose
+
+Si tu app corre en Docker Compose, el script de despliegue se complica un poco:
+
+```sh
+#!/bin/bash
+cd /opt/miapp
+git pull --force origin main
+docker compose down
+docker compose up -d --build
+docker image prune -f
+```
+
+El flag `--build` reconstruye la imagen desde el Dockerfile. `docker image prune` limpia las imagenes viejas para que no se coman el espacio en disco.
+
+### Despliegues sin downtime
+
+Para despliegues sin tiempo de inactividad, tienes algunas opciones segun tu stack:
+
+- **Swap de upstream en Nginx**: Construye el nuevo contenedor en un puerto diferente, testalo, luego cambia el upstream de Nginx y recarga.
+- **Docker Compose con healthchecks**: Define un healthcheck en tu compose file. Docker no enviara trafico hasta que el nuevo contenedor este healthy.
+- **Usar Kamal**: Si quieres despliegues sin downtime sin escribir scripts, [Kamal](https://kamal-deploy.org/) maneja esto de entrada. Es del equipo de Basecamp/Rails pero funciona con cualquier app Docker.
+
+## Paso 4: Registro de contenedores (opcional)
+
+Forgejo tiene un registro de contenedores integrado. Hablitalo en `app.ini`:
+
+```ini
+[packages]
+ENABLED=true
+```
+
+Luego sube imagenes a `git.tudominio.com/tuusuario/miapp:tag` desde tu pipeline de CI. El plugin Docker de Woodpecker maneja esto sin problemas.
+
+Esto te ahorra ejecutar un registro Docker separado o pagar por Docker Hub.
+
+## Por que Woodpecker y no otra cosa?
+
+Forgejo en realidad tiene un sistema de CI integrado tambien (Forgejo Actions, compatible con la sintaxis de GitHub Actions). Entonces, por que molestarse en instalar Woodpecker por separado?
+
+Algunas razones:
+
+- **UI dedicada**: Woodpecker tiene su propia interfaz web para monitorear builds, ver logs y gestionar secretos. Es mas limpio que meter CI dentro de la UI de Forgejo.
+- **Matrix builds**: Ejecuta el mismo pipeline con multiples versiones de Node, Python o lo que sea. Woodpecker lo maneja de forma nativa.
+- **Limites de recursos por paso**: Caps de CPU y memoria por paso del pipeline para que un build no se coma los recursos del resto del servidor.
+- **Soporte multi-forge**: Si tambien tienes repos en GitHub o GitLab, Woodpecker puede conectarse a todos. No estas atado a un proveedor Git.
+- **Ecosistema de plugins**: El sistema de plugins de Woodpecker esta pensado para CI/CD. Builds de imagenes Docker, notificaciones a Slack, subida de artefactos a S3 -- todo de primera clase.
+
+Si vienes de GitHub y solo quieres copiar tus archivos de `.github/workflows` con cambios minimos, Forgejo Actions es el camino mas simple. Pero si estas configurando CI/CD desde cero y quieres algo robusto, Woodpecker es la mejor herramienta.
+
+## Copias de seguridad
+
+No te saltes esta parte. Tu servidor Git es la fuente de verdad de todos tus proyectos.
+
+```sh
+#!/bin/bash
+DATE=$(date +%Y-%m-%d)
+BACKUP_DIR="/home/backups/forgejo"
+
+# Detener Forgejo para una copia consistente
+cd /opt/forgejo && docker compose stop
+
+# Crear archivo comprimido
+tar -czf "$BACKUP_DIR/forgejo-$DATE.tar.gz" -C /opt/forgejo/data .
+
+# Reiniciar Forgejo
+docker compose up -d
+
+# Encriptar
+gpg --encrypt --armor -r tu@email.com \
+  -o "$BACKUP_DIR/forgejo-$DATE.tar.gz.gpg" \
+  "$BACKUP_DIR/forgejo-$DATE.tar.gz"
+
+# Eliminar copia sin encriptar
+rm "$BACKUP_DIR/forgejo-$DATE.tar.gz"
+```
+
+Ejecutalo cada noche con cron. Copia las copias encriptadas fuera del servidor (rsync a un NAS, rclone a S3, lo que te funcione).
+
+Para Woodpecker, haz copia del volumen `woodpecker_data` de la misma manera.
+
+## El panorama completo
+
+Asi se ve la configuracion completa en un solo VPS:
+
+```
+/opt/
+├── forgejo/
+│   ├── docker-compose.yml
+│   └── data/                  # Datos de Forgejo + SQLite DB
+├── woodpecker/
+│   ├── docker-compose.yml
+│   └── ...
+├── miapp/
+│   ├── docker-compose.yml
+│   └── ...
+└── otra-app/
+    └── docker-compose.yml
+```
+
+Push a Forgejo → CI ejecuta tests → despliega en el mismo servidor → Nginx lo sirve. Coste total: un VPS, unos 7-15 EUR/mes.
+
+Sin facturas de GitHub. Sin sorpresas de Vercel. Tu codigo, tu servidor, tus reglas.
+
+## Problemas comunes
+
+**Conflictos de puerto SSH**: El SSH de Forgejo corre en el puerto 2222 por defecto. Asegurate de que tu firewall lo permita y que las URLs de clonado incluyan el puerto.
+
+**El agente no recoge trabajos**: Revisa los logs del agente con `docker compose logs woodpecker-agent`. Asegurate de que `WOODPECKER_AGENT_SECRET` coincida entre servidor y agente.
+
+**Permisos del socket de Docker**: Si el runner de CI no puede acceder a Docker, verifica que el contenedor tenga `/var/run/docker.sock` montado y que el usuario tenga permisos de Docker.
+
+**Espacio en disco**: Los runners de CI generan muchas imagenes Docker con el tiempo. Anade un cron job para limpiar imagenes viejas:
+
+```sh
+0 3 * * * docker system prune -af --filter "until=72h"
+```
+
+Esto elimina imagenes sin usar de mas de 3 dias.
