@@ -1,0 +1,295 @@
+---
+date: 2026-05-15T00:00:00Z
+title: "Pangolin: Deploy a Self-Hosted Alternative to Cloudflare Tunnels"
+description: "Pangolin is an open-source tunneled reverse proxy built on WireGuard. Learn how to deploy it on a VPS as a self-hosted replacement for Cloudflare Tunnels."
+image: "../../assets/images/26/05/pangolin-cloudflare-alternative.svg"
+categories: ["vps"]
+authors: ["Dragos"]
+tags: ["self-hosted", "docker", "networking"]
+canonical: "https://www.bitdoze.com/pangolin-cloudflare-tunnels-alternative/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Cloudflare Tunnels made exposing local services to the internet easy. One command, no port forwarding, DDoS protection included. But after running it for a while, you hit the walls: a 100 MB upload limit per file, ToS restrictions on video streaming (Jellyfin users know the anxiety), and the fact that Cloudflare terminates your TLS and reads your traffic in plaintext on their network. If you're self-hosting to own your infrastructure, having a third party in the middle of every connection kind of defeats the purpose.
+
+Pangolin fixes that. It's an open-source, self-hosted reverse proxy with WireGuard-based tunneling, access control, and a dashboard that's actually usable. You run it on a VPS you control, and it gives you the same tunnel experience as Cloudflare without handing your traffic to anyone.
+
+I've been running Pangolin for a few months and it handles everything I used Cloudflare Tunnels for, plus a few things I couldn't do there. Here's how to set it up.
+
+## Why move away from Cloudflare Tunnels?
+
+A few things pushed me (and others) to look for alternatives:
+
+- **100 MB file limit**: Transfers through Cloudflare Tunnels cap at 100 MB per request. If you're running Immich, Nextcloud, or anything with large files, this breaks things silently.
+- **Video streaming ToS**: Cloudflare's terms prohibit using Tunnels for video content delivery. Jellyfin and Plex work, technically, but you're one ToS review away from losing access.
+- **TLS termination**: Cloudflare decrypts your traffic inside their network before optionally re-encrypting it to your origin. You're trusting their entire infrastructure with plaintext data.
+- **Account dependency**: Your tunnels, DNS, and access rules all live under one Cloudflare account. One ToS violation (real or perceived) and everything goes down.
+- **Limited protocol support**: Tunnels only handle HTTP/HTTPS. No TCP, no UDP, no SSH directly through the tunnel.
+
+Cloudflare is still a good option for many setups. But if you want to own your infrastructure end-to-end, you need something self-hosted.
+
+## What is Pangolin?
+
+Pangolin is an open-source remote access platform built on WireGuard. It combines a reverse proxy with VPN capabilities in a single stack. The project is maintained by [Fossorial](https://github.com/fosrl/pangolin) and has picked up traction in the self-hosting community.
+
+What it does:
+
+- Expose web applications through a browser. No client install needed for end users.
+- Traffic between your services and the Pangolin VPS is encrypted end-to-end using WireGuard. No plaintext in transit.
+- Built-in authentication with role-based access. You can also connect external identity providers like Authentik, Keycloak, or Google via OIDC.
+- Each service gets its own access rules. You decide exactly who can reach what.
+- The Newt client (Pangolin's equivalent of `cloudflared`) connects outbound to your VPS. No port forwarding needed.
+- Not just HTTP. You can tunnel SSH, databases, and other protocols.
+
+<Notice type="info" title="How it works">
+Pangolin runs on a VPS with a public IP. The Newt client runs on your home server or wherever your services live. Newt connects outbound to Pangolin over WireGuard, and Pangolin handles routing, SSL certificates, and access control. Your users hit the Pangolin VPS, not your home IP.
+</Notice>
+
+## Pangolin vs Cloudflare Tunnels
+
+| Feature | Pangolin | Cloudflare Tunnels |
+|---|---|---|
+| Self-hosted | Yes | No |
+| Open source | Yes (AGPL-3) | No |
+| TLS termination | On your VPS | On Cloudflare's network |
+| File size limit | VPS bandwidth only | 100 MB per request |
+| Video streaming | No restrictions | ToS restrictions |
+| Protocols | HTTP, HTTPS, TCP, UDP, SSH | HTTP/HTTPS only |
+| WireGuard encryption | End-to-end | Cloudflare in the middle |
+| Auth built-in | Yes + OIDC/SSO | Yes (via Cloudflare Access) |
+| DDoS protection | CrowdSec (optional) | Cloudflare's network |
+| Cost | VPS cost ($3-5/month) | Free tier available |
+| Setup complexity | Moderate | Easy |
+
+## What you need
+
+Before starting, make sure you have:
+
+<ListCheck>
+- A **VPS with a public IP** (Ubuntu 22.04+ or Debian 11+ recommended). [Hetzner](https://go.bitdoze.com/hetzner) or [Hostinger](https://go.bitdoze.com/hostinger-vps) work well.
+- A **domain name** with DNS pointing to your VPS IP
+- **Docker and Docker Compose** installed on the VPS
+- **Ports open** on the VPS firewall: 80 (TCP), 443 (TCP), 51820 (UDP), 21820 (UDP)
+- A machine running your self-hosted services (home server, another VPS, etc.)
+</ListCheck>
+
+<Notice type="warning" title="VPS bandwidth matters">
+Your VPS becomes the gateway for all traffic. A $3-5/month VPS from Hetzner gives you 1-2 TB of bandwidth, which is enough for most setups. If you're streaming video or transferring large files regularly, pick a plan with enough data transfer.
+</Notice>
+
+## Install Pangolin on your VPS
+
+The easiest way to install Pangolin is with their official installer script. It handles Docker containers, Traefik configuration, and SSL certificates for you.
+
+### Step 1: Download and run the installer
+
+SSH into your VPS and run:
+
+```bash
+curl -fsSL https://static.pangolin.net/get-installer.sh | bash
+```
+
+Move the installer to your desired directory first (it installs everything in the current directory):
+
+```bash
+mkdir -p /opt/pangolin && cd /opt/pangolin
+curl -fsSL https://static.pangolin.net/get-installer.sh | bash
+sudo ./installer
+```
+
+### Step 2: Configure the installer
+
+The installer asks you a few questions:
+
+1. **Edition**: Choose Community Edition (free, open source)
+2. **Base Domain**: Enter your root domain (e.g., `example.com`)
+3. **Dashboard Domain**: Defaults to `pangolin.example.com`, or enter a custom one
+4. **Let's Encrypt Email**: Your email for SSL certificate issuance
+5. **Tunneling**: Say yes to install Gerbil (the WireGuard tunnel component)
+6. **Email/SMTP**: Optional, skip for now
+
+### Step 3: Start the containers
+
+Confirm the installation and wait 2-3 minutes. The installer pulls three Docker images:
+
+- `pangolin` - the main application
+- `gerbil` - the WireGuard tunnel server
+- `traefik` - the reverse proxy
+
+When it finishes, you'll see:
+
+```
+Installation complete!
+To complete the initial setup, please visit:
+https://pangolin.example.com/auth/initial-setup
+```
+
+### Step 4: Complete the initial setup
+
+Open the dashboard URL in your browser. Enter the setup token shown in the installer output. Create your admin account with a strong password.
+
+Once logged in, create your first organization. This is the top-level container for your tunnels, users, and access rules. If you're the only user, one org is enough.
+
+### Step 5: Install Newt on your home server
+
+Newt is the client agent that runs where your services live. Install it on your home server, NAS, or wherever you have Docker containers running.
+
+**Using Docker:**
+
+```bash
+docker run -d \
+  --name newt \
+  --restart unless-stopped \
+  -e PANGOLIN_ENDPOINT=https://pangolin.example.com \
+  -e NEWT_TOKEN=your-token-from-dashboard \
+  fosrl/newt:latest
+```
+
+You generate the token from the Pangolin dashboard under Sites > Add Site.
+
+**Using Docker Compose:**
+
+```yml
+services:
+  newt:
+    image: fosrl/newt:latest
+    container_name: newt
+    restart: unless-stopped
+    environment:
+      - PANGOLIN_ENDPOINT=https://pangolin.example.com
+      - NEWT_TOKEN=your-token-from-dashboard
+```
+
+Once Newt connects, it shows as "Online" in the Pangolin dashboard under Sites.
+
+## Expose your first service
+
+With Newt running, you can now expose services through Pangolin.
+
+### Add a resource
+
+1. Go to **Resources** in the dashboard and click **Add Resource**
+2. Choose **Public** or **Protected** (protected requires login to access)
+3. Set the subdomain (e.g., `grafana` for `grafana.example.com`)
+4. Set the target to your service's local address (e.g., `localhost:3000`)
+5. Select the Newt site you created
+
+Pangolin automatically provisions an SSL certificate for the subdomain. Your service is now accessible at `https://grafana.example.com`.
+
+### Protect a resource with authentication
+
+For services you don't want publicly accessible:
+
+1. Edit the resource and set authentication to **Protected**
+2. Assign access to specific users or roles
+3. Users authenticate through Pangolin's built-in login page
+
+You can also connect an external identity provider like Authentik or Google for SSO.
+
+### Expose TCP/UDP services
+
+For SSH, databases, or other non-HTTP services:
+
+1. Create a resource with **TCP/UDP** type
+2. Set the target port and address
+3. Pangolin handles the tunnel routing
+
+This is useful for accessing a PostgreSQL database or SSH server on your home network without opening ports.
+
+## Optional: Add CrowdSec for DDoS protection
+
+Cloudflare's main advantage is DDoS protection. You can get some of that back with CrowdSec, which blocks malicious traffic based on community-shared threat intelligence.
+
+Install CrowdSec alongside Pangolin and configure it to work with Traefik. The Pangolin docs have a [CrowdSec guide](https://docs.pangolin.net/self-host/community-guides/crowdsec) with the full setup.
+
+It won't match Cloudflare's global network, but it catches most automated attacks and brute-force attempts.
+
+## Optional: Connect an external identity provider
+
+If you already run Authentik, Keycloak, or another OIDC provider, you can connect it to Pangolin for SSO:
+
+1. Go to **Identity Providers** in the dashboard
+2. Add a new OIDC provider with your client ID, secret, and discovery URL
+3. Map roles from your identity provider to Pangolin roles
+
+Users can then log in with their existing credentials instead of Pangolin-specific accounts.
+
+## How it performs in practice
+
+After a few months of running Pangolin, here's what I've found:
+
+The good stuff: web apps (Grafana, Uptime Kuma, Portainer) load fast with no noticeable latency. Jellyfin streaming works without worrying about ToS violations. Large file transfers in Immich and Nextcloud just work, no 100 MB limit. Adding new services takes under a minute once the tunnel is set up. SSL certificates renew without intervention.
+
+The tradeoffs: your VPS bandwidth is the bottleneck. A cheap VPS with 1 TB/month handles most home lab traffic, but heavy video streaming can eat through it. The VPS becomes a single point of failure -- if it goes down, all your tunnels go down, so pick a reliable provider. You're responsible for keeping Pangolin updated, though the Docker-based install makes that straightforward. There's no built-in CDN or caching, so if you need that, put a CDN in front of your Pangolin VPS.
+
+## Cost comparison
+
+| Setup | Monthly cost |
+|---|---|
+| Cloudflare Tunnels | Free (but Cloudflare owns your data) |
+| Pangolin on Hetzner CX22 | ~$5/month (2 TB bandwidth) |
+| Pangolin on Hostinger KVM1 | ~$6/month (1 TB bandwidth) |
+| Pangolin on Oracle Free Tier | $0 (limited resources, ARM only) |
+
+The Oracle Free Tier works if you want to try Pangolin without spending money. It handles a handful of tunnels, though the ARM architecture may have occasional compatibility quirks.
+
+## Should you switch?
+
+Pangolin isn't a drop-in replacement for every Cloudflare Tunnels use case. If you're deep in the Cloudflare ecosystem with DNS, CDN, and WAF all managed there, the migration effort probably isn't worth it just on principle.
+
+But if you're self-hosting to own your infrastructure, Cloudflare Tunnels is the one piece you don't actually own. Pangolin gives you the same tunnel experience, with end-to-end encryption, no file size limits, no ToS worries, and full control over your data.
+
+The setup takes about an hour the first time. After that, adding new tunnels is fast enough that it stops feeling like infrastructure work. Updates are painless since everything runs in Docker, and the community is active enough that issues get resolved quickly.
+
+If you want to try it, the [GitHub repo](https://github.com/fosrl/pangolin) has the full install script and the [docs](https://docs.pangolin.net) cover most edge cases.
+
+If you're looking for a mesh VPN rather than a tunnel proxy, check out [Headscale](/headscale-self-hosted-tailscale-setup/) (self-hosted Tailscale) or our [mesh VPN comparison guide](/netbird-vs-headscale-vs-tailscale/) covering NetBird, Headscale, and Tailscale. For deploying the services you're tunneling, [Coolify](/coolify-v5-self-hosted-paas-review/) makes self-hosted app deployment straightforward.
+
+## How to update Pangolin
+
+Since Pangolin runs in Docker, updating it is straightforward. SSH into your VPS and navigate to the install directory:
+
+```bash
+cd /opt/pangolin
+docker compose pull
+docker compose up -d
+```
+
+This pulls the latest images for all three containers (pangolin, gerbil, traefik) and restarts them. Your configuration and data persist across updates since they're stored in Docker volumes.
+
+Check the [Pangolin releases page](https://github.com/fosrl/pangolin/releases) before updating. Some releases include breaking changes that require manual config adjustments. The community Discord is a good place to check if anyone has run into issues with the latest version.
+
+<Notice type="info" title="Backup before updating">
+Before any major update, backup your Pangolin data directory. The SQLite database and config files are stored in the volumes defined in your `docker-compose.yml`. Copy them to a safe location before running `docker compose pull`.
+</Notice>
+
+## FAQ
+
+<Accordion label="Can I run Pangolin alongside Cloudflare Tunnels?" group="faq" expanded="true">
+Yes. You can use Cloudflare Tunnels for some services and Pangolin for others. For example, keep Cloudflare for services that benefit from their CDN and DDoS protection, and route Jellyfin or Nextcloud through Pangolin where the 100 MB limit and ToS are a problem. Just configure different subdomains for each tunnel.
+</Accordion>
+
+<Accordion label="What happens if my VPS goes down?" group="faq">
+All your tunnels go down with it. This is the main tradeoff compared to Cloudflare's globally distributed network. To mitigate this: pick a reliable VPS provider, set up monitoring with [Uptime Kuma](/deploy-uptime-kuma/) or [Beszel](/beszel-uptime-kuma/), and consider running a secondary VPS as a cold standby.
+</Accordion>
+
+<Accordion label="Can I use Pangolin without the Newt client?" group="faq">
+Yes. You can connect any WireGuard client directly to Pangolin's Gerbil server. This gives you VPN access to the network without using the Newt agent. Newt is only required if you want the reverse proxy tunneling experience where services are exposed through the browser without a VPN client.
+</Accordion>
+
+<Accordion label="Does Pangolin work behind CGNAT?" group="faq">
+Yes. Newt connects outbound to your VPS, so no inbound ports need to be open on your home network. This works the same way as Cloudflare Tunnels -- the connection initiates from inside your network.
+</Accordion>
+
+<Accordion label="How does Pangolin compare to Tailscale?" group="faq">
+Pangolin is a tunnel reverse proxy for exposing specific services. Tailscale is a full mesh VPN that connects all your devices. They solve different problems. If you want users to access services through a browser without installing anything, Pangolin is the right choice. If you want all your devices to see each other on a private network, go with Tailscale (or its self-hosted alternative [Headscale](/headscale-self-hosted-tailscale-setup/)).
+</Accordion>
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/CrM8uhD5BIs"
+  label="Pangolin: Free Open Source Alternative to Cloudflare Tunnels"
+/>
