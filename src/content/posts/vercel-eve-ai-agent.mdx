@@ -1,0 +1,496 @@
+---
+date: 2026-06-19T00:00:00Z
+title: "Build Your First Durable AI Agent with Vercel Eve (Beginner's Guide)"
+meta_title: "Vercel Eve Tutorial: Build a Slack & Discord AI Agent and Deploy It"
+description: "A beginner-friendly guide to Vercel Eve. Scaffold a durable AI agent as plain files, add a tool, connect it to Slack and Discord, swap in open source models, then deploy on Vercel or your own VPS with Dokploy."
+image: "../../assets/images/26/06/vercel-eve-ai-agent.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai", "vercel", "self-hosted"]
+canonical: "https://www.bitdoze.com/vercel-eve-ai-agent/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Vercel just dropped [Eve](https://github.com/vercel/eve), and the easiest way to describe it is "Next.js, but for agents." Instead of one giant config object you have to keep in your head, every part of your agent gets a file. Instructions live in one file. Tools live in a folder. Channels (Slack, Discord, a web UI) live in another. Eve reads that folder structure and turns it into a running agent that works locally, serves HTTP, and keeps a conversation alive across many turns.
+
+I've built agents with a few different frameworks, and the thing that won me over here is how little ceremony there is. You can read a whole Eve project by looking at the directory tree. That's it. No registry to keep in sync, no wiring file that drifts out of date.
+
+In this guide we'll scaffold an agent from scratch, give it a tool, connect it to both Slack and Discord, swap the default Claude model for an open source one, and then deploy it, either on Vercel or on your own VPS with Dokploy. By the end you'll have a working assistant your team can talk to.
+
+<Notice type="info" title="Eve is in beta">
+  Eve is currently in beta under the Vercel beta terms, so APIs and behavior can change before general availability. Pin a version in `package.json` if you're building something you care about, and re-check the [docs](https://eve.dev/docs/introduction) when you upgrade.
+</Notice>
+
+## What Eve actually is
+
+Eve is a framework for building durable agents as ordinary files in a TypeScript project. "Durable" is the word that matters. An Eve session isn't one request and one response. It can stream progress while it works, call tools and subagents, pause to ask a human for approval, resume after the answer arrives, and keep state across turns. Under the hood it leans on the open source [Workflow SDK](https://workflow-sdk.dev/) to make sessions resumable and crash-safe, so your code can focus on the work instead of the plumbing.
+
+Here's what a small project looks like:
+
+```text
+my-agent/
+├── package.json
+└── agent/
+    ├── agent.ts          # picks the model, runtime config
+    ├── instructions.md   # who the agent is, how it behaves
+    ├── tools/            # typed functions the model can call
+    │   └── get_weather.ts
+    ├── skills/           # longer procedures, loaded on demand
+    │   └── plan_a_trip.md
+    └── channels/         # Slack, Discord, web, etc.
+        └── slack.ts
+```
+
+A file's location says what it does, and its path usually gives it a name. Drop `agent/tools/get_weather.ts` in place and Eve discovers a tool called `get_weather`. Rename the file and the tool name moves with it. That's the whole mental model.
+
+<ListCheck>
+- **`instructions.md`** tells the agent who it is and how to behave (the always-on system prompt)
+- **`agent.ts`** chooses the model and sets runtime options
+- **`tools/`** holds typed functions the model can call
+- **`skills/`** holds longer procedures the model only loads when they're useful
+- **`channels/`** connect the agent to HTTP clients, Slack, Discord, and anywhere else people talk to it
+</ListCheck>
+
+Start with just `instructions.md` and `agent.ts`. Add the other folders when you actually need them.
+
+## Prerequisites
+
+Before you scaffold anything, make sure you have:
+
+<ListCheck>
+- **Node 24 or newer** (Eve pins a modern Node runtime)
+- **npm**, which ships with Node
+- **A model credential**: either a Vercel AI Gateway key (`AI_GATEWAY_API_KEY`), a linked Vercel project for OIDC, or a direct provider key like `ANTHROPIC_API_KEY`
+</ListCheck>
+
+The scaffold defaults to `anthropic/claude-sonnet-4.6` routed through the Vercel AI Gateway. If you skip the credential, the dev terminal flags it and walks you through pasting a key with its `/model` command, so you won't get stuck.
+
+## Step 1: Scaffold your first agent
+
+`npx` can run `eve init` without installing anything first:
+
+```bash
+npx eve@latest init my-agent
+```
+
+That command creates the project, installs dependencies, initializes Git, starts the dev server, and opens an interactive terminal UI. Type a message and you'll watch the model loop run in real time.
+
+A couple of things worth knowing:
+
+<ListCheck>
+- Pass `--channel-web-nextjs` if you want a Web Chat app generated alongside the agent
+- `eve init` holds the terminal, so hit `Ctrl+C` to get your shell back before you start editing files
+- To add Eve to a project you already have, run `eve init .` from a folder that has a `package.json` and no `agent/` files yet. It adds `eve`, `ai`, and `zod` without touching the rest
+</ListCheck>
+
+If you'd rather wire it in by hand, install the three dependencies and declare a Node 24 engine:
+
+```bash
+npm install eve@latest ai zod
+```
+
+```json
+{
+  "engines": {
+    "node": "24.x"
+  }
+}
+```
+
+Then write the two files Eve needs. `agent/instructions.md`:
+
+```md
+You are a concise assistant. Use tools when they are available.
+```
+
+And `agent/agent.ts`:
+
+```ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  model: "anthropic/claude-sonnet-4.6",
+});
+```
+
+Even at this size the agent can already do real work, because the default harness ships with file, shell, web, and delegation tools out of the box.
+
+<Notice type="info" title="Letting a coding agent do the setup">
+  If you're using Claude Code, Cursor, or a similar tool, hand it this prompt: "Set up an eve agent: read the eve docs (bundled at `node_modules/eve/docs` once eve is installed), scaffold with `npx eve@latest init <name>`, add a typed tool at `agent/tools/get_weather.ts`, run it with `npm run dev`, then create a session, stream it, and send a follow-up." Once `eve` is installed, the full docs live locally in `node_modules/eve/docs/`, so the model doesn't have to guess at an unfamiliar API.
+</Notice>
+
+## Step 2: Give the agent a tool
+
+A tool is a typed action the agent can call: hit an API, run a query, write a file. The filename becomes the tool name the model sees, and it has to be snake_case. Create `agent/tools/get_weather.ts`:
+
+```ts
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+// The model sees this tool as `get_weather`, from the filename.
+export default defineTool({
+  description: "Get the current weather for a city.",
+  inputSchema: z.object({ city: z.string().min(1) }),
+  async execute({ city }) {
+    return { city, condition: "Sunny", temperatureF: 72 };
+  },
+});
+```
+
+The pieces of a tool:
+
+<ListCheck>
+- A **filename slug** under `agent/tools/`, which is the model-facing name
+- A **`description`** written for the model, telling it what the tool does
+- An **`inputSchema`**, a Zod schema (pass `z.object({})` for no input)
+- An **`execute(input, ctx)`** function, sync or async, that does the work
+</ListCheck>
+
+Tools run in your app runtime with full access to `process.env`, not inside the sandbox, so they can import shared code from `lib/` and read your secrets directly. One thing to keep in mind: a step that gets interrupted mid-execution re-runs on resume, so make side effects like charges or emails idempotent, or gate them behind approval (more on that below).
+
+## Step 3: Run it and send a message
+
+A scaffolded app has a `dev` script:
+
+```bash
+npm run dev
+```
+
+If you wired Eve in by hand and have no `dev` script, run the binary through `npx eve dev` instead. Either way you land in the terminal UI. Type "What's the weather in Brooklyn?" and you'll see the calls happen in order: the `get_weather` call, then its result, then the reply.
+
+Every Eve app also exposes the same stable HTTP API. Start a durable session with `curl`:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session \
+  -H 'content-type: application/json' \
+  -d '{"message":"What is the weather in Brooklyn?"}'
+```
+
+The response hands you back two things you'll reuse: a `continuationToken` in the body to resume the conversation, and an `x-eve-session-id` header that identifies the run. Attach to the stream with the session id:
+
+```bash
+curl http://127.0.0.1:3000/eve/v1/session/<sessionId>/stream
+```
+
+The stream is NDJSON. For this run you'll see `session.started`, `actions.requested` (the tool call), `action.result`, `message.completed` (the reply), and `session.completed`. To continue the conversation, post a follow-up with the token:
+
+```bash
+curl -X POST http://127.0.0.1:3000/eve/v1/session/<sessionId> \
+  -H 'content-type: application/json' \
+  -d '{"continuationToken":"<token>","message":"Now do Queens."}'
+```
+
+That's the hello-world. A weather bot isn't useful to anyone, so let's make it reachable where people actually work.
+
+## Step 4: Connect the agent to Slack
+
+A channel is the adapter between a platform and your agent. It normalizes incoming messages, owns the resume token for that surface, and decides how replies get delivered. The Slack channel answers `@mentions` and DMs, replies in threads, shows typing indicators, and turns human-in-the-loop prompts into Slack buttons.
+
+The nice part: credentials run through [Vercel Connect](https://eve.dev/docs/guides/auth-and-route-protection), which handles both the outbound bot token and inbound webhook verification. There's no `SLACK_BOT_TOKEN` or `SLACK_SIGNING_SECRET` for you to babysit.
+
+First, set up a Connect client and point its trigger at Eve's Slack route:
+
+```bash
+npm install -g vercel@latest && export FF_CONNECT_ENABLED=1
+vercel connect create slack --triggers
+vercel connect detach <uid> --yes
+vercel connect attach <uid> --triggers --trigger-path /eve/v1/slack --yes
+```
+
+The `create` step provisions a destination at the default Connect path, then `detach`/`attach` re-points it at `/eve/v1/slack`, which is where Eve actually listens. The `--triggers` flag turns on Slack Event Subscriptions; without it, Slack never delivers `app_mention` or `message.im` events.
+
+Now add the channel. Either scaffold it with `eve channels add slack`, or write `agent/channels/slack.ts` by hand:
+
+```ts
+import { connectSlackCredentials } from "@vercel/connect/eve";
+import { slackChannel } from "eve/channels/slack";
+
+export default slackChannel({
+  credentials: connectSlackCredentials("slack/my-agent"),
+});
+```
+
+`connectSlackCredentials` returns the bot token and webhook verifier, keeping token rotation and request verification inside Connect instead of your code. Deploy once the trigger and channel file are ready:
+
+```bash
+VERCEL_USE_EXPERIMENTAL_FRAMEWORKS=1 vercel deploy --prod
+```
+
+That flag lets the Vercel CLI recognize Eve as a framework during the build.
+
+### Pulling in thread context
+
+By default the channel gives you the triggering mention, but not the earlier replies in the thread. If you want the agent to read what was said before it was called in, load the prior messages and return them as `context`:
+
+```ts
+import { defaultSlackAuth, loadThreadContextMessages, slackChannel } from "eve/channels/slack";
+import { connectSlackCredentials } from "@vercel/connect/eve";
+
+export default slackChannel({
+  credentials: connectSlackCredentials("slack/my-agent"),
+  async onAppMention(ctx, message) {
+    const auth = defaultSlackAuth(message, ctx);
+    const prior = await loadThreadContextMessages(ctx.thread, message, {
+      since: "last-agent-reply",
+    });
+    if (prior.length === 0) return { auth };
+    const transcript = prior
+      .map((m) => `${m.isMe ? "you" : (m.user ?? "user")}: ${m.markdown}`)
+      .join("\n");
+    return { auth, context: [`Recent thread messages since your last reply:\n\n${transcript}`] };
+  },
+});
+```
+
+Using `since: "last-agent-reply"` means repeated mentions in one thread only inject what's new, so you don't re-feed the whole history every turn.
+
+<Notice type="warning" title="Tell people they're talking to a bot">
+  Eve doesn't add an "I'm an AI" disclosure for you. Depending on where your users are, you may be legally required to disclose that they're talking to an automated system. Bake it into your `instructions.md` or your channel responses.
+</Notice>
+
+## Step 5: Connect the agent to Discord
+
+Discord works through HTTP Interactions: slash commands, message components, and modals. Discord enforces a three-second deadline to acknowledge a command, so the channel verifies the signature, acknowledges right away, and runs the actual work in the background. You don't have to think about any of that; it's handled.
+
+The minimal `agent/channels/discord.ts`:
+
+```ts
+import { discordChannel } from "eve/channels/discord";
+
+export default discordChannel();
+```
+
+Discord needs three environment variables:
+
+```bash
+DISCORD_PUBLIC_KEY=...      # verifies the signature headers
+DISCORD_APPLICATION_ID=...  # edits the deferred response, sends followups
+DISCORD_BOT_TOKEN=...       # proactive messages, fallback, typing indicators
+```
+
+The route is `POST /eve/v1/discord` by default. Paste that public URL into your Discord application's Interactions Endpoint URL field in the Developer Portal.
+
+Registering commands is on you, not the channel. A string option named `message` lines up with Eve's default prompt extraction:
+
+```bash
+curl -X PUT "https://discord.com/api/v10/applications/$DISCORD_APPLICATION_ID/commands" \
+  -H "Authorization: Bot $DISCORD_BOT_TOKEN" -H "Content-Type: application/json" \
+  -d '[{"name":"ask","description":"Ask the eve agent","type":1,
+    "options":[{"name":"message","description":"What should the agent do?","type":3,"required":true}]}]'
+```
+
+Use guild commands during development; they propagate much faster than global ones. Here's a slightly fuller channel that decides auth per command and posts the reply back:
+
+```ts
+import { discordChannel } from "eve/channels/discord";
+
+export default discordChannel({
+  onCommand: (ctx, interaction) => ({
+    auth: {
+      principalId: interaction.user.id,
+      principalType: "user",
+      authenticator: "discord",
+      attributes: { channel_id: interaction.channelId, guild_id: interaction.guildId ?? "" },
+    },
+  }),
+  events: {
+    "message.completed"(eventData, channel, ctx) {
+      if (eventData.finishReason === "tool-calls") return;
+      if (eventData.message) channel.discord.post(eventData.message);
+    },
+  },
+});
+```
+
+One limitation to note: inbound file attachments aren't supported on the Discord channel today, while Slack does stage them. If your agent needs to read uploaded files, plan around Slack or a web channel.
+
+The thing I appreciate is that the same agent logic serves both platforms. Your `get_weather` tool doesn't know or care whether the question came from Slack, Discord, the terminal, or a browser. Write the behavior once, expose it everywhere.
+
+## Step 6: Use open source models instead of Claude
+
+The default model is Claude Sonnet, but you're not married to it. We learned the hard way over the past couple of years that a model you depend on can be deprecated or pulled out from under you, so being able to switch matters. Eve makes the model a single line of config.
+
+You have two routing options.
+
+<Tabs>
+<Tab name="Gateway (string id)">
+
+A string model id routes through the Vercel AI Gateway. Swap the value and you're using a different model, no other changes:
+
+```ts
+import { defineAgent } from "eve";
+
+export default defineAgent({
+  // any model the gateway exposes
+  model: "moonshotai/kimi-k2.6",
+});
+```
+
+This works on Vercel with project OIDC, or anywhere else with `AI_GATEWAY_API_KEY` set. The Gateway is the lowest-setup path: one key, many models, easy to A/B between a fast cheap model and a stronger one.
+
+</Tab>
+<Tab name="Direct provider">
+
+To skip the Gateway entirely, install the AI SDK package for your provider, pass a model object, and set that provider's key. This works great with OpenAI-compatible endpoints that serve open source models:
+
+```bash
+npm install @ai-sdk/openai
+```
+
+```ts
+import { createOpenAI } from "@ai-sdk/openai";
+import { defineAgent } from "eve";
+
+const provider = createOpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
+
+export default defineAgent({
+  model: provider("z-ai/glm-5.1"),
+});
+```
+
+Point the `baseURL` at OpenRouter, Together, Groq, or your own self-hosted endpoint, and you're running an open model with the same agent code.
+
+</Tab>
+</Tabs>
+
+Which open model should you reach for? Models like GLM-5.1, Kimi K2.6, and Qwen 3.6 hold up well for agentic tool-calling work at a fraction of the cost of frontier models. I went deep on the trade-offs in my guide to the [best open source LLMs to replace Claude](/best-open-source-llms-claude-alternative/), so check that if you're picking one for a real workload. The short version: route cheap, fast models to simple turns and save the expensive ones for the hard problems. Eve lets you do exactly that, even per subagent.
+
+<Notice type="info" title="Per-task model routing">
+  Because the model is just config, you can run subagents on different models. A research subagent might use a cheap long-context model while the root agent stays on something stronger. You build the skill once and route it wherever makes sense.
+</Notice>
+
+## Step 7: Add tools from external services with connections
+
+Beyond the tools you write, Eve can pull in tools from external MCP servers and OpenAPI documents. These live in `agent/connections/`, and the model never sees the URL or credentials, it discovers the tools and calls them by name.
+
+A connection to Linear's MCP server looks like this:
+
+```ts
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  url: "https://mcp.linear.app/sse",
+  description: "Linear workspace: issues, projects, cycles, and comments.",
+  auth: {
+    getToken: async () => ({ token: process.env.LINEAR_API_TOKEN! }),
+  },
+});
+```
+
+For anything that touches money, deletes data, or sends messages, gate it behind approval. The helpers from `eve/tools/approval` give you `never()`, `once()` (ask the first time in a session), and `always()` (ask every time). The same pause-and-resume flow that powers human-in-the-loop tools handles it.
+
+## Step 8: Deploy it
+
+You've got a working agent. Now it needs to live somewhere. Eve runs the same way locally, on Vercel, and on a plain Node host, so going to production is mostly mechanical.
+
+### Option A: Deploy on Vercel
+
+`eve build` compiles the agent and writes the host output. On Vercel that's the Build Output bundle under `.vercel/output`, plus the compiled artifacts under `.eve/`. Then deploy with the CLI or by pushing to a Git-connected project:
+
+```bash
+vercel deploy
+```
+
+Before that first production request, work through the short checklist:
+
+<ListCheck>
+- Set a **model credential** and any **route-auth secrets** in the deployment environment, never in source
+- Replace the scaffolded `placeholderAuth()` with a real auth policy (Basic, JWT, OIDC, or a custom verifier); an unconfigured app fails closed and rejects browser traffic, which is the safe default
+- Confirm the **sandbox backend** matches the environment (`vercel()` on Vercel, `defaultBackend()` elsewhere)
+</ListCheck>
+
+Once deployed, the platform auto-detects Eve and surfaces an Agent Runs tab under your project's Observability view, where you can browse sessions and read each conversation's trace.
+
+### Option B: Self-host on your own VPS
+
+If you'd rather not be tied to Vercel's platform, Eve runs as a normal Node service behind your own process manager or reverse proxy:
+
+```bash
+eve build
+PORT=3000 eve start --host 0.0.0.0
+```
+
+Outside Vercel, Eve writes the standard Nitro output under `.output/`, the Workflow SDK uses its local world (storing state under `.workflow-data`), and `defaultBackend()` picks a local sandbox backend. A few things to make explicit when self-hosting:
+
+<ListCheck>
+- Put `.workflow-data` on **persistent storage** so session state survives restarts
+- Use a **direct provider model** with `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, or keep `AI_GATEWAY_API_KEY` if you still want Gateway routing
+- Replace `vercelOidc()` with auth your host can verify
+- If your agent uses schedules, make sure your host runs Nitro's scheduled tasks, or trigger the same work from your own cron
+</ListCheck>
+
+The cleanest way I've found to run a Node service like this on a VPS is [Dokploy](/dokploy-install/), an open source, self-hostable alternative to Vercel and Heroku. It gives you Git-based deploys, automatic HTTPS via Traefik, environment variable management, and logs, all from a dashboard you control. My [Dokploy install guide](/dokploy-install/) covers getting it running on a fresh server.
+
+The deploy flow for an Eve agent maps almost exactly onto a normal Node app, so if you've deployed anything with Dokploy before, this will feel familiar. My walkthrough on [deploying TanStack Start on a VPS with Dokploy](/tanstack-start-dokploy-deploy/) shows the full pattern (build command, start command, environment variables, domain), and the same steps apply here: set the build command to `eve build`, the start command to `eve start --host 0.0.0.0`, expose the port, and add your model and auth secrets in the environment panel.
+
+<Notice type="success" title="Why self-host the agent">
+  Running on your own VPS means your conversation data and credentials stay on infrastructure you control, costs are predictable, and you're not exposed to platform pricing changes. The trade-off is you handle backups, scaling, and the persistent `.workflow-data` storage yourself.
+</Notice>
+
+### Verify the deployment
+
+Whichever path you took, smoke-test the live routes. Health first, then a real turn:
+
+```bash
+curl https://<your-app>/eve/v1/health
+
+curl -X POST https://<your-app>/eve/v1/session \
+  -H 'content-type: application/json' \
+  -d '{"message":"Hello from production"}'
+```
+
+You can also drive the live deployment with the dev terminal, which is handy for a quick production check:
+
+```bash
+eve dev https://<your-app>
+```
+
+## What to build next
+
+The weather bot was just a way to see the loop run. The interesting part is what you put in `tools/` and `skills/`. A content-repurposing agent that drafts social posts and calls image generation tools. A lead-research agent that pulls from your CRM. A support triage bot living in your Slack. The scaffolding is the same every time, which is the whole point: you stop reinventing the harness and spend your time on the actual capability.
+
+<ListCheck>
+- Add a **skill** in `agent/skills/` for any multi-step procedure the model should load only when relevant
+- Spin up **subagents** for parallel or specialist work, each on its own model
+- Add **schedules** for recurring jobs like a daily digest
+- Put a **Next.js front end** in front of the agent with the `useEveAgent` hook
+</ListCheck>
+
+## FAQ
+
+<Accordion label="Is Vercel Eve free and open source?" group="faq" expanded="true">
+Yes, Eve is open source and lives on [GitHub](https://github.com/vercel/eve). You can run it entirely on your own infrastructure with your own model keys. The optional conveniences (AI Gateway, hosted Sandbox, Vercel Connect, the Agent Runs dashboard) are Vercel platform features you can opt into, not requirements. It's in beta, so expect some churn.
+</Accordion>
+
+<Accordion label="Do I need a Vercel account to use Eve?" group="faq">
+No. You need a model credential, which can be a direct provider key like `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. A Vercel account makes the AI Gateway, Slack credentials via Connect, and hosted sandboxes easier, but you can self-host the whole thing on a VPS with Dokploy and never link a Vercel project.
+</Accordion>
+
+<Accordion label="Can one agent serve Slack and Discord at the same time?" group="faq">
+Yes. Add both `agent/channels/slack.ts` and `agent/channels/discord.ts`. The agent's instructions, tools, and skills are shared; each channel just adapts the platform's input and output. Your tools don't need to know which surface a message came from.
+</Accordion>
+
+<Accordion label="Can I use open source models instead of Claude?" group="faq">
+Yes. Change the `model` value in `agent/agent.ts`. Use a gateway string id like `z-ai/glm-5.1`, or install an AI SDK provider and point its `baseURL` at OpenRouter, Together, Groq, or a self-hosted endpoint. See my [open source LLM comparison](/best-open-source-llms-claude-alternative/) for picking one.
+</Accordion>
+
+<Accordion label="What does 'durable' mean for an Eve session?" group="faq">
+A session can stream progress, call tools and subagents, pause for human approval, resume after the answer arrives, and keep state across many turns. It's built on the open source Workflow SDK, which makes runs resumable and crash-safe. A completed step never re-runs; an interrupted step does, so make side effects idempotent.
+</Accordion>
+
+## Wrapping up
+
+Eve takes the part of agent-building that's usually a tangle (channels, durable state, model routing, deploys) and turns it into a folder you can read top to bottom. You scaffold with one command, add a tool as a single file, point a channel at Slack or Discord, and pick whatever model fits the job and your budget. Deploy it on Vercel for the zero-config path, or self-host it on a VPS with Dokploy when you want to own the whole stack.
+
+If you're coming from another framework, the switch costs you almost nothing, since your tools and skills are plain TypeScript and Markdown you can carry elsewhere. Start with the weather hello-world, then replace it with something your team would actually use.
+
+<Button text="Read the Eve docs" link="https://eve.dev/docs/introduction" variant="solid" color="blue" size="md" icon="arrow-right" />
