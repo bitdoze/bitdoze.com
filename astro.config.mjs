@@ -41,6 +41,7 @@ export default defineConfig({
 
   // Configure image settings for external domains
   image: {
+    dangerouslyProcessSVG: true,
     remotePatterns: [
       {
         protocol: "https",
