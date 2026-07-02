@@ -18,7 +18,7 @@ export const siteConfig = {
   },
   
   // Default social image
-  defaultImage: "/images/default-og.svg",
+  defaultImage: "/og-default.png",
 };
 
 // View Transitions configuration

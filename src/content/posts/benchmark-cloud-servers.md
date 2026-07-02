@@ -9,7 +9,7 @@ tags: ["linux", "vps", "benchmarks"]
 canonical: https://www.bitdoze.com/benchmark-cloud-servers/
 ---
 
-import Button from "../../layouts/components/widgets/Button.astro";
+import Button from "../../components/widgets/Button.astro";
 
 Before picking a VPS provider, run a benchmark. Specs on a pricing page don't tell you much — shared vCPU contention, noisy neighbors, and disk throttling all affect real performance. A quick benchmark shows what you actually get.
 

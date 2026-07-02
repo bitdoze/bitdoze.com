@@ -1,4 +1,4 @@
-# Agents Guide for Smoothie Blender Guide
+# Agents Guide for bitdoze.com
 
 Date: 06 October 2025
 

@@ -10,6 +10,13 @@ import path from "path";
 export default defineConfig({
   // Set the site URL for production
   site: "https://www.bitdoze.com",
+  i18n: {
+    defaultLocale: "en",
+    locales: ["en", "es"],
+    routing: {
+      prefixDefaultLocale: false,
+    },
+  },
   redirects: {
     "/tools/": "https://bit-tools.com/tools",
     "/tools/thumbnail-ideas/":

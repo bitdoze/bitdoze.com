@@ -1,4 +1,5 @@
-import { defineCollection, z } from "astro:content";
+import { defineCollection } from "astro:content";
+import { z } from "astro/zod";
 import { glob } from "astro/loaders";
 
 // Post collection schema
@@ -13,6 +14,7 @@ const postsCollection = defineCollection({
       meta_title: z.string().optional(),
       description: z.string().optional(),
       date: z.date().optional(),
+      lastmod: z.date().optional(),
       image: image(),
       authors: z.array(z.string()).default(["admin"]),
       categories: z.array(z.string()).default(["others"]),

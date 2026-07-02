@@ -19,16 +19,26 @@ export async function GET(context: APIContext) {
     title: siteConfig.name,
     description: siteConfig.description,
     site: context.site || siteConfig.url,
-    items: sortedPosts.map((post) => ({
-      title: post.data.title,
-      pubDate: post.data.date,
-      description: post.data.description,
-      link: getEntryHref(post),
-      categories: post.data.categories || [],
-      // Optional custom data
-      customData: post.data.tags ? 
-        `<tags>${post.data.tags.join(',')}</tags>` : '',
-    })),
+    xmlns: {
+      content: 'http://purl.org/rss/1.0/modules/content/',
+    },
+    items: sortedPosts.map((post) => {
+      const categories = [
+        ...(post.data.categories || []),
+        ...(post.data.tags || []),
+      ];
+      const bodyHtml = (post.body || '').trim();
+      return {
+        title: post.data.title,
+        pubDate: post.data.date,
+        description: post.data.description,
+        link: getEntryHref(post),
+        categories,
+        customData: bodyHtml
+          ? `<content:encoded><![CDATA[${bodyHtml}]]></content:encoded>`
+          : '',
+      };
+    }),
     // Optional: customize the RSS output
     stylesheet: '/rss/styles.xsl',
   });

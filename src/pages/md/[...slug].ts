@@ -26,11 +26,13 @@ export const GET: APIRoute = async ({ props }) => {
 
   const markdown = `${frontmatter}\n\n${body || ""}`;
 
+  const tokenCount = Math.ceil(markdown.length / 4);
+
   return new Response(markdown, {
     status: 200,
     headers: {
       "Content-Type": "text/markdown",
-      "X-Markdown-Tokens": String(markdown.length),
+      "X-Markdown-Tokens": String(tokenCount),
     },
   });
 };
