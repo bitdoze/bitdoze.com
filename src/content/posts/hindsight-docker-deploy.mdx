@@ -1,0 +1,474 @@
+---
+date: 2026-07-03T00:00:00Z
+title: "Deploy Hindsight Agent Memory on Docker: Complete Setup Guide"
+description: "Step-by-step guide to deploying Hindsight, an open-source agent memory system, using Docker Compose with PostgreSQL and pgvector for production use."
+image: "../../assets/images/26/07/hindsight-docker-deploy.svg"
+categories: ["AI"]
+authors: ["Dragos"]
+tags: ["ai-agents", "docker", "self-hosted"]
+canonical: "https://www.bitdoze.com/hindsight-docker-deploy/"
+---
+
+import Button from "../../components/widgets/Button.astro";
+import YouTubeEmbed from "../../components/widgets/YouTubeEmbed.astro";
+import Tabs from "../../components/widgets/Tabs.astro";
+import Tab from "../../components/widgets/Tab.astro";
+import Notice from "../../components/widgets/Notice.astro";
+import Accordion from "../../components/widgets/Accordion.astro";
+import ListCheck from "../../components/widgets/ListCheck.astro";
+
+Most AI agents forget everything the moment a conversation ends. You tell them your preferences, correct their mistakes, feed them context, and the next session starts from scratch. Hindsight fixes that.
+
+[Hindsight](https://github.com/vectorize-io/hindsight) is an open-source agent memory system built by Vectorize.io. It doesn't just store conversation history like a glorified chat log. Instead, it extracts facts, builds mental models, and learns from interactions over time. On the LongMemEval benchmark (the standard test for agent memory), it outperforms every other solution currently available.
+
+The core idea: agents should get better the more you use them, the same way a human assistant learns your preferences over weeks and months.
+
+This guide walks through deploying Hindsight on Docker with a proper PostgreSQL backend, configuring it for production use, and interacting with it through the API and client libraries.
+
+## What Hindsight actually does
+
+Hindsight organizes memory into three categories:
+
+- **World facts** - Things that are true ("The project uses PostgreSQL 17")
+- **Experiences** - Things that happened ("Last deployment broke because of a migration issue")
+- **Mental models** - Patterns formed by reflecting on facts and experiences ("This user prefers detailed error messages over brief summaries")
+
+When you add new information through the `retain` operation, Hindsight runs it through an LLM to extract entities, relationships, and temporal data. It stores these as a combination of vector embeddings, keyword indexes, and graph structures.
+
+When you search with `recall`, it runs four retrieval strategies in parallel:
+
+1. Semantic search (vector similarity)
+2. Keyword matching (BM25)
+3. Graph traversal (entity and relationship links)
+4. Temporal filtering (time ranges)
+
+Results get merged with reciprocal rank fusion and reranked for relevance.
+
+The third operation, `reflect`, goes deeper. It pulls together related memories and generates new observations. Think of it as the agent thinking about what it knows, rather than just retrieving it.
+
+## Prerequisites
+
+You'll need:
+
+<ListCheck>
+- A VPS or home server running Linux. I recommend [Hetzner](https://go.bitdoze.com/hetzner) or [Hostinger](https://go.bitdoze.com/hostinger-vps) for VPS hosting
+- Docker and Docker Compose installed
+- An OpenAI API key (or another supported LLM provider)
+- At least 2 GB of RAM available (the slim image uses less, the full image needs more)
+</ListCheck>
+
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 Free" />
+<Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
+
+## Docker image variants
+
+Hindsight publishes two image variants:
+
+| Variant | Tag | Size (AMD64) | What it includes |
+|---------|-----|--------------|------------------|
+| Full | `latest` | ~9 GB | Local embedding model (BGE), local reranker (MiniLM), all dependencies |
+| Slim | `latest-slim` | ~500 MB | No local models, requires external embedding and reranker providers |
+
+The full image works out of the box but takes up significant disk and RAM. The slim image delegates embeddings and reranking to external services, which is what this guide uses since most people deploying on a VPS want to keep resource usage down.
+
+With the slim image, you need:
+- An embedding provider (OpenAI, Cohere, or a local TEI instance)
+- A reranker provider (RRF algorithmic reranker works fine and is free, or use an external service)
+
+## Deploy Hindsight with Docker Compose
+
+This setup uses two containers: PostgreSQL with pgvector for the database, and Hindsight itself. The pgvector extension enables the vector similarity search that powers semantic recall.
+
+### Create the project directory
+
+```bash
+mkdir -p ~/docker-apps/hindsight
+cd ~/docker-apps/hindsight
+```
+
+### Create the environment file
+
+```bash
+cat > .env << 'EOF'
+# Hindsight Deployment
+OPENAI_API_KEY=your-openai-api-key-here
+DB_PASSWORD=choose-a-strong-password
+HINDSIGHT_ACCESS_KEY=choose-an-access-key
+EOF
+```
+
+Replace the values:
+- `OPENAI_API_KEY` - Your OpenAI API key (starts with `sk-`)
+- `DB_PASSWORD` - A strong password for the PostgreSQL user
+- `HINDSIGHT_ACCESS_KEY` - A key you'll use to authenticate API calls and log into the web UI
+
+### Create the Docker Compose file
+
+```yaml
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: hindsight-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: hindsight
+    volumes:
+      - ./pgdata:/var/lib/postgresql/17/docker
+    networks:
+      - web
+
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:latest-slim
+    container_name: hindsight-app
+    restart: unless-stopped
+    ports:
+      - "18888:8888"
+      - "9999:9999"
+    environment:
+      # LLM
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_API_KEY=${OPENAI_API_KEY}
+      - HINDSIGHT_API_LLM_MODEL=gpt-4o-mini
+      # Embeddings
+      - HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
+      - HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Reranker (algorithmic, no cost)
+      - HINDSIGHT_API_RERANKER_PROVIDER=rrf
+      # Database
+      - HINDSIGHT_API_DATABASE_URL=postgresql://hindsight:${DB_PASSWORD}@db:5432/hindsight
+      - HINDSIGHT_API_WORKER_ID=hindsight-prod
+      # API Authentication (Bearer token required for all API calls)
+      - HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      - HINDSIGHT_API_TENANT_API_KEY=${HINDSIGHT_ACCESS_KEY}
+      # Control Plane auth (login required for Web UI)
+      - HINDSIGHT_CP_ACCESS_KEY=${HINDSIGHT_ACCESS_KEY}
+      # Control Plane -> API auth
+      - HINDSIGHT_CP_DATAPLANE_API_KEY=${HINDSIGHT_ACCESS_KEY}
+    depends_on:
+      - db
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+```
+
+### What each setting does
+
+**LLM configuration** - Hindsight needs an LLM for fact extraction, entity resolution, and generating responses. The `gpt-4o-mini` model works well and keeps costs low. You can swap this for `gpt-4o` if you need better extraction quality, or use a different provider entirely (Anthropic, Gemini, Groq, Ollama).
+
+**Embeddings** - These convert text into vector representations for semantic search. OpenAI's embedding model is the easiest option with the slim image.
+
+**Reranker** - The `rrf` (Reciprocal Rank Fusion) option uses an algorithmic approach that costs nothing. It merges results from the four retrieval strategies without needing a separate ML model. If you want better ranking accuracy, you can point this to an external cross-encoder service.
+
+**Worker ID** - Set this to a stable value. Without it, Docker assigns the container hostname as the worker ID, which changes on every restart. Any task being processed when the container goes down stays parked under the old ID with no way for the new container to pick it up.
+
+**Authentication** - Three related settings that all use the same access key:
+- `HINDSIGHT_API_TENANT_API_KEY` - Required as a Bearer token for all API calls
+- `HINDSIGHT_CP_ACCESS_KEY` - Login password for the web UI
+- `HINDSIGHT_CP_DATAPLANE_API_KEY` - How the web UI authenticates to the API
+
+<Notice type="info" title="Network setup">
+This compose file assumes you have an existing Docker network called `web`. Create it with `docker network create web` if you haven't already. If you're running this standalone without Traefik or other reverse proxies, you can remove the networks section and the `external: true` line.
+</Notice>
+
+### Start the services
+
+```bash
+docker compose up -d
+```
+
+Check that both containers are running:
+
+```bash
+docker compose ps
+```
+
+You should see `hindsight-db` and `hindsight-app` both in the running state.
+
+Check the logs if something isn't right:
+
+```bash
+docker compose logs hindsight
+```
+
+### Verify the deployment
+
+The API should be available at `http://your-server-ip:18888` and the web UI at `http://your-server-ip:9999`.
+
+Test the API with a quick health check:
+
+```bash
+curl http://localhost:18888/v1/health
+```
+
+Open the web UI in your browser and enter your access key when prompted. The Control Plane lets you manage memory banks, browse stored entities, and test queries without writing code.
+
+## Using the Hindsight API
+
+### Install the client
+
+<Tabs>
+  <Tab name="Python">
+    ```bash
+    pip install hindsight-client
+    ```
+  </Tab>
+  <Tab name="Node.js">
+    ```bash
+    npm install @vectorize-io/hindsight-client
+    ```
+  </Tab>
+  <Tab name="CLI">
+    ```bash
+    curl -fsSL https://hindsight.vectorize.io/get-cli | bash
+    ```
+  </Tab>
+</Tabs>
+
+### Basic operations
+
+All three operations work on memory banks. A bank is a namespace for a set of related memories. You might have one bank per user, per project, or per agent, depending on your use case.
+
+<Tabs>
+  <Tab name="Python">
+    ```python
+    from hindsight_client import Hindsight
+
+    client = Hindsight(
+        base_url="http://your-server:18888",
+        api_key="your-access-key"
+    )
+
+    # Store a memory
+    client.retain(
+        bank_id="my-project",
+        content="The production database runs PostgreSQL 17 with pgvector"
+    )
+
+    # Search for memories
+    results = client.recall(
+        bank_id="my-project",
+        query="What database does production use?"
+    )
+
+    # Deep analysis of existing memories
+    insights = client.reflect(
+        bank_id="my-project",
+        query="What do I know about the production infrastructure?"
+    )
+    ```
+  </Tab>
+  <Tab name="Node.js">
+    ```javascript
+    import { HindsightClient } from '@vectorize-io/hindsight-client';
+
+    const client = new HindsightClient({
+      baseUrl: 'http://your-server:18888',
+      apiKey: 'your-access-key'
+    });
+
+    // Store a memory
+    await client.retain('my-project',
+      'The production database runs PostgreSQL 17 with pgvector'
+    );
+
+    // Search for memories
+    const results = await client.recall('my-project',
+      'What database does production use?'
+    );
+
+    // Deep analysis
+    const insights = await client.reflect('my-project',
+      'What do I know about the production infrastructure?'
+    );
+    ```
+  </Tab>
+  <Tab name="CLI">
+    ```bash
+    # Store a memory
+    hindsight memory retain my-project \
+      "The production database runs PostgreSQL 17 with pgvector"
+
+    # Search for memories
+    hindsight memory recall my-project \
+      "What database does production use?"
+
+    # Deep analysis
+    hindsight memory reflect my-project \
+      "What do I know about the production infrastructure?"
+    ```
+  </Tab>
+</Tabs>
+
+### Adding context and timestamps
+
+You can enrich memories with metadata:
+
+```python
+client.retain(
+    bank_id="my-project",
+    content="Migrated from SQLite to PostgreSQL after hitting performance issues",
+    context="database migration",
+    timestamp="2026-06-15T10:00:00Z"
+)
+```
+
+This helps Hindsight organize memories temporally and understand the context in which information was recorded.
+
+### Using the LLM wrapper
+
+The fastest way to add memory to an existing agent is the LLM wrapper. It sits between your code and the LLM API, automatically storing and retrieving memories as you make calls:
+
+```python
+from hindsight import HindsightLLMWrapper
+from openai import OpenAI
+
+openai_client = OpenAI(api_key="your-openai-key")
+wrapped_client = HindsightLLMWrapper(
+    client=openai_client,
+    hindsight_url="http://your-server:18888",
+    hindsight_api_key="your-access-key",
+    bank_id="my-agent"
+)
+
+# Use it exactly like the OpenAI client
+# Memories are stored and retrieved automatically
+response = wrapped_client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What did we discuss yesterday?"}]
+)
+```
+
+## LLM provider options
+
+Hindsight supports several LLM providers. The choice affects both cost and quality:
+
+| Provider | Models | Notes |
+|----------|--------|-------|
+| OpenAI | gpt-4o-mini, gpt-4o | Good default choice. gpt-4o-mini is cheap and works well |
+| Anthropic | Claude models | Strong extraction quality |
+| Gemini | Gemini models | Google's offering |
+| Groq | Various | Fast inference, lower cost. Recommended by Hindsight for speed |
+| Ollama | Local models | Self-hosted, no API costs, needs more hardware |
+| LM Studio | Local models | Another local option |
+
+To switch providers, change `HINDSIGHT_API_LLM_PROVIDER` and the corresponding API key environment variable. For example, to use Groq:
+
+```yaml
+environment:
+  - HINDSIGHT_API_LLM_PROVIDER=groq
+  - HINDSIGHT_API_LLM_API_KEY=${GROQ_API_KEY}
+  - HINDSIGHT_API_LLM_MODEL=gpt-oss-20b
+```
+
+## Exposing Hindsight securely
+
+Running Hindsight on port 9999 is fine for local access. If you need to reach it from the internet, put it behind a reverse proxy.
+
+<Tabs>
+  <Tab name="Cloudflare Tunnel">
+    The easiest option if you already use Cloudflare. Add the tunnel container to your compose file and configure it to route traffic to the Hindsight services. No ports need to be exposed on the host.
+  </Tab>
+  <Tab name="Traefik">
+    Add labels to the hindsight service in your compose file for Traefik to pick up. You'll need separate routers for the API (port 8888) and the web UI (port 9999).
+  </Tab>
+  <Tab name="Nginx">
+    Set up a reverse proxy config that forwards requests to the Hindsight ports. Make sure to pass the Authorization header through for API calls.
+  </Tab>
+</Tabs>
+
+<Notice type="warning" title="Keep the access key">
+Always keep `HINDSIGHT_API_TENANT_API_KEY` set. Without it, anyone who can reach the API port can read and write memories. The access key protects both the API and the web UI.
+</Notice>
+
+## Backing up your data
+
+The PostgreSQL data lives in the `./pgdata` directory. Back it up regularly:
+
+```bash
+# Simple file backup
+tar -czf hindsight-backup-$(date +%Y%m%d).tar.gz pgdata/
+
+# Or use pg_dump for a proper database dump
+docker exec hindsight-db pg_dump -U hindsight hindsight > hindsight-$(date +%Y%m%d).sql
+```
+
+For automated backups, add a cron job that runs one of these commands nightly and copies the output to your backup storage.
+
+## Troubleshooting
+
+<Accordion label="Container won't start" group="troubleshooting">
+Check the logs with `docker compose logs hindsight`. Common issues:
+
+- **Database connection failed** - Make sure the db container is running and healthy. The hindsight container depends on it, but sometimes PostgreSQL takes a moment to initialize.
+- **Invalid API key** - Verify your OpenAI key is correct and has credits available.
+- **Port conflict** - Something else is using port 18888 or 9999. Change the host port in the compose file.
+</Accordion>
+
+<Accordion label="Memories aren't being recalled" group="troubleshooting">
+- Make sure you're using the same `bank_id` for retain and recall operations.
+- Check that the content you stored is relevant to your query. Hindsight uses semantic search, so exact keyword matches aren't required, but the meaning needs to align.
+- Try the `reflect` operation for more thorough analysis if `recall` returns thin results.
+</Accordion>
+
+<Accordion label="High memory usage" group="troubleshooting">
+The full image loads local embedding and reranker models that consume 1.5-2 GB of RAM. Switch to the slim image (which this guide uses) to drop to around 500 MB for the Hindsight process itself. PostgreSQL will use whatever you give it, but 512 MB is enough for most workloads.
+</Accordion>
+
+## Integrations with coding agents and AI tools
+
+Hindsight plugs into most of the popular coding agents and AI assistants through its MCP server, direct SDK integrations, and hooks. If you're already running one of these tools, adding persistent memory is usually a few lines of config.
+
+### Coding agents
+
+**Claude Code** - Hindsight has first-class support through [hooks](https://hindsight.vectorize.io/integrations). Every conversation gets captured automatically, and relevant context is recalled on each prompt. You can also connect it as an [MCP server](https://hindsight.vectorize.io/sdks/integrations/local-mcp) for more control over when memories are stored and retrieved.
+
+**[OpenCode](/opencode-setup-guide/)** - There's a [community plugin](https://hindsight.vectorize.io/integrations) that auto-retains conversations and recalls context on session start. It adds retain, recall, and reflect tools directly into OpenCode's tool palette.
+
+**[OpenClaw](/clawdbot-setup-guide/)** - Hindsight integrates with OpenClaw to add memory capabilities to Claude-based agent workflows. The production memory infrastructure includes server-side access control and a plugin with auto-managed embeddings.
+
+**Codex CLI** - Similar to the Claude Code integration, Hindsight hooks capture conversations and recall context automatically.
+
+**Zed** - The Zed editor's AI assistant gets long-term memory through Hindsight's MCP server. Add it as an HTTP transport entry in Zed's MCP configuration.
+
+**Cursor** - Connect Hindsight as an MCP server to give Cursor persistent memory across coding sessions.
+
+### AI assistants and frameworks
+
+**[Hermes Agent](/hermes-agent-setup-guide/)** - Hindsight serves as the memory backend for the Hermes multi-agent messaging framework. If you're running Hermes, this replaces the built-in MEMORY.md and session search with a more capable vector-based system.
+
+**[Agno](/agno-get-start/)** - There's a direct integration for Agno agents. Instead of SQLite-backed chat history, you get structured long-term memory with entity extraction and semantic search.
+
+**[Obsidian](https://obsidian.md)** - Through the MCP server, you can connect Obsidian's AI plugins to Hindsight for persistent memory across your notes and research workflows.
+
+**n8n** - A community node for n8n workflows adds retain, recall, and reflect operations. Drop it into any workflow alongside Slack, Sheets, OpenAI, and 400+ other integrations.
+
+### MCP server
+
+The most flexible option is the MCP server itself. It works with any MCP-compatible client:
+
+```bash
+# Connect Claude Code
+claude mcp add --transport http hindsight http://localhost:8888/mcp/
+
+# Or use single-bank mode for a specific memory bank
+claude mcp add --transport http hindsight http://localhost:8888/mcp/my-bank/
+```
+
+The MCP server exposes 29 tools including retain, recall, reflect, mental model management, directive creation, and memory browsing. See the [full integrations list](https://hindsight.vectorize.io/integrations) for all supported tools.
+
+## What's next
+
+Once Hindsight is running, here are some things to try:
+
+- **Wire it into an existing agent** using the LLM wrapper for automatic memory management
+- **Create separate memory banks** for different projects or users to keep memories organized
+- **Set up the [Hindsight MCP server](https://github.com/vectorize-io/hindsight)** to give coding agents like Claude or Cursor persistent memory across sessions
+- **Monitor memory growth** through the web UI's entity browser to understand what your agent is learning
+
+Hindsight is one of those tools that gets more valuable the longer you run it. The first few days of memories are useful. A few months in, the agent starts making connections you didn't explicitly tell it about. That's the mental models kicking in, and it's where the real value shows up.
