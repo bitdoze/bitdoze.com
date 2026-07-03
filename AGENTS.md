@@ -41,6 +41,24 @@ Date: 06 October 2025
 - **Image**: Create an svg image for the mdx article and store it in the assets/images. Make it simple and look nice without to much elements and a short text that is bigger and visible on any device with maximum 5 words. Use a nice background with a lighter colour that looks nice 16:9 format.
 - **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from amazon and the link should be with "https://amazon.com/dp/ASIN"
 
+## SVG Creation Guidelines
+
+To maintain a consistent, premium, and polished brand aesthetic across the site, all article SVG covers must follow these guidelines:
+
+- **Dimensions & Ratio**: Use exactly 16:9 aspect ratio, defined via `viewBox="0 0 1200 675"`.
+- **Background**:
+  - Use a soft, modern light gradient (e.g., `#F8FAFC` to `#E2E8F0`).
+  - Add 2-3 large, soft ambient glowing blobs using radial gradients (e.g., `#6366F1` indigo, `#06B6D4` cyan, `#EC4899` pink) with a low opacity (`0.12` to `0.18`) to simulate a modern glassmorphic/aurora glow.
+- **Grid Pattern**: Overlay a subtle background grid using a `<pattern>` of width/height `60` with a light stroke (`#CBD5E1`, `stroke-width="1"`, `opacity="0.25"`).
+- **Typography**:
+  - Keep the total word count on the image to **5 words or fewer**.
+  - Use modern, clean system fonts: `font-family="system-ui, -apple-system, sans-serif"`.
+  - Use a high-contrast dark color (`#0F172A`) for the main title, with key words highlighted using a colorful gradient fill (e.g., `#4F46E5` to `#06B6D4`).
+  - Add an uppercase category badge (e.g., "AI VOICE", "COMPARE", "AI CLONING") inside a rounded capsule above the main title.
+- **Central Icon/Graphic**:
+  - Include a simple, stylized vector icon at the center top (around `y = 180`).
+  - Align elements symmetrically. Use clean paths, rounded shapes, or themed soundwave pills to represent the article's topic.
+- **Decorative Elements**: Add a few tiny decorative circles/dots at low opacity (`0.12` to `0.2`) around the corners to fill empty spaces elegantly.
 
 ## Available Widgets (import from @components/widgets/)
 
