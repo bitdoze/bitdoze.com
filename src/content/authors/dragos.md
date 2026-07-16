@@ -1,11 +1,14 @@
 ---
 title: Dragos
 image: "/images/authors/dragos.webp"
-description: Dragos the author of the website
+description: Dragos is the author of Bitdoze — practical DevOps, programming, and self-hosting guides.
 social:
   facebook: https://www.facebook.com/dragos.balota
-  twitter: https://www.twitter.com/bitdoze
-  instagram: https://www.instagram.com/
+  twitter: https://twitter.com/bitdoze
+  github: https://github.com/bitdoze
+  linkedin: https://www.linkedin.com/in/dragosbalota
+  youtube: https://www.youtube.com/@webdoze
+  website: https://www.bitdoze.com
 ---
 
 Hey there! Allow me to introduce myself. My name is Dragos, and I'm a seasoned IT professional with over a decade of experience in the field. For the past four years, I have been deeply immersed in the fascinating world of DevOps, constantly honing my skills and staying up to date with the latest industry trends.

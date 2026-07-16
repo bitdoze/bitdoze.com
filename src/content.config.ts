@@ -12,13 +12,24 @@ const postsCollection = defineCollection({
     z.object({
       title: z.string(),
       meta_title: z.string().optional(),
-      description: z.string().optional(),
-      date: z.date().optional(),
+      description: z
+        .string()
+        .min(1, "Post description is required")
+        .transform((s) => s.trim()),
+      date: z.date(),
       lastmod: z.date().optional(),
       image: image(),
-      authors: z.array(z.string()).default(["admin"]),
-      categories: z.array(z.string()).default(["others"]),
-      tags: z.array(z.string()).default(["others"]),
+      imageAlt: z.string().optional(),
+      authors: z.array(z.string()).min(1).default(["admin"]),
+      categories: z.array(z.string()).min(1).default(["others"]),
+      // Cap at 3 tags per editorial guidelines; keep first three if more provided
+      tags: z
+        .array(z.string())
+        .default(["others"])
+        .transform((tags) => {
+          const cleaned = tags.map((t) => t.trim()).filter(Boolean);
+          return cleaned.slice(0, 3);
+        }),
       series: z.tuple([z.string(), z.string()]).optional(),
       locale: z.enum(["en", "es"]).optional(),
       translationKey: z.string().optional(),
@@ -43,6 +54,10 @@ const authorsCollection = defineCollection({
         facebook: z.string().optional(),
         twitter: z.string().optional(),
         instagram: z.string().optional(),
+        github: z.string().optional(),
+        linkedin: z.string().optional(),
+        youtube: z.string().optional(),
+        website: z.string().optional(),
       })
       .optional(),
     draft: z.boolean().optional(),
