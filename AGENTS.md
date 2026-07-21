@@ -38,7 +38,8 @@ Date: 06 October 2025
 - **Product reviews**: Include pros/cons, specifications, comparison tables
 - **Tags**: Don't use more then 3 tags per article.
 - **Widgets**: Include in article the widgets created under widget section, don't use to much to not make the article not readable.
-- **Image**: Create an svg image for the mdx article and store it in the assets/images. Make it simple and look nice without to much elements and a short text that is bigger and visible on any device with maximum 5 words. Use a nice background with a lighter colour that looks nice 16:9 format.
+- **Image**: Create an SVG cover image for the mdx article following the **SVG Creation Guidelines** below, then **convert it to WebP** (see the WebP conversion step at the end of that section) and reference the `.webp` file in the frontmatter `image:` field. Store it under `src/assets/images/`. Keep it simple and nice with a short, large text (max 5 words) readable on any device, on a light 16:9 background.
+  - After creating the `.svg`, run `node scripts/svg-to-webp.mjs` (or convert just that file) to render it to `.webp` via resvg + sharp, update the frontmatter to point at the `.webp`, and remove the source `.svg` once it is no longer referenced.
 - **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from amazon and the link should be with "https://amazon.com/dp/ASIN"
 
 ## SVG Creation Guidelines
@@ -59,6 +60,17 @@ To maintain a consistent, premium, and polished brand aesthetic across the site,
   - Include a simple, stylized vector icon at the center top (around `y = 180`).
   - Align elements symmetrically. Use clean paths, rounded shapes, or themed soundwave pills to represent the article's topic.
 - **Decorative Elements**: Add a few tiny decorative circles/dots at low opacity (`0.12` to `0.2`) around the corners to fill empty spaces elegantly.
+
+### WebP conversion (required after authoring the SVG)
+
+Article covers are served as **WebP**, not SVG. The SVG is an authoring format only. Once the `.svg` is created:
+
+1. Render it to WebP with the project converter: `node scripts/svg-to-webp.mjs` (batch — converts every frontmatter `image:` SVG, rewrites the frontmatter to `.webp`, and deletes SVGs no longer referenced).
+   - Convert a single file instead with `npx @resvg/resvg-js` + `sharp`, rendering at `fitTo width=1920`, system fonts loaded (`/usr/share/fonts`, `defaultFontFamily: DejaVu Sans`), then `sharp(...).webp({ quality: 85 }).toFile(out)`.
+2. Make sure the frontmatter `image:` points at the `.webp` (e.g. `image: "../../assets/images/26/07/my-cover.webp"`), not the `.svg`.
+3. Delete the source `.svg` unless it is also embedded inline in the article body (the batch script keeps such shared SVGs automatically).
+
+Text in the SVG must render correctly in the rasterized WebP — keep using `font-family="system-ui, -apple-system, sans-serif"` so the converter can fall back to an installed sans-serif (DejaVu/Noto).
 
 ## Available Widgets (import from @components/widgets/)
 
