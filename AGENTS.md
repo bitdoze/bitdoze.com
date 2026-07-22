@@ -2,6 +2,17 @@
 
 Date: 06 October 2025
 
+## Design Context
+
+Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web platform, audience, positioning, principles) and **DESIGN.md** (visual system: Terminal Blue palette, system-stack typography, lift-on-intent elevation, component specs). Quick summary:
+
+- **Register/platform:** brand (content publication) on web. Astro 7 SSG blog, EN + ES.
+- **Audience:** developers & DevOps engineers arriving from search, mid-task.
+- **Positioning:** "Guides that actually work" — tested, copy-paste-ready.
+- **Personality:** practical, direct, trustworthy; reference feel is DigitalOcean tutorials.
+- **Anti-references:** ad-cluttered tutorial farms, generic AI-blog aesthetic (purple gradients, glassmorphism, glow), corporate docs portals, Medium/Substack clones.
+- **Accessibility:** WCAG AA (4.5:1 body contrast both themes, focus states, reduced motion).
+
 ## Commands
 
 - **dev**: `bun run dev` - Start development server on localhost:4321
