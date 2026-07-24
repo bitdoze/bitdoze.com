@@ -34,11 +34,11 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 
 - **TypeScript**: Strict mode via astro/tsconfigs/strict
 - **Path aliases**: @components/_, @layouts/_, @config/_, @utils/_, @styles/_, @assets/_
-- **Content schema**: Zod validation in src/content/config.ts
+- **Content schema**: Zod validation in src/content.config.ts (enforces allowed categories + tag normalization)
 - **Naming**: kebab-case for files, camelCase for variables, PascalCase for components
 - **Imports**: Use path aliases, group by external/internal
 - **Types**: Define schema with Zod for content collections
-- **Frontmatter**: Required title, optional meta_title, description, image, authors[], categories[], tags[]
+- **Frontmatter**: Required title, optional meta_title, description, image, authors[], **exactly one** `categories` value from the allowed list, 1–3 `tags`
 
 ## Content Guidelines for Bitdoze Articles
 
@@ -47,11 +47,51 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 - **SEO**: Include relevant keywords naturally in titles and content
 - **Helpful tone**: Write as an expert guide helping readers make informed decisions
 - **Product reviews**: Include pros/cons, specifications, comparison tables
-- **Tags**: Don't use more then 3 tags per article.
+- **Categories / Tags**: Follow **Categories & Tags Taxonomy** below (schema will reject invalid categories).
 - **Widgets**: Include in article the widgets created under widget section, don't use to much to not make the article not readable.
 - **Image**: Create an SVG cover image for the mdx article following the **SVG Creation Guidelines** below, then **convert it to WebP** (see the WebP conversion step at the end of that section) and reference the `.webp` file in the frontmatter `image:` field. Store it under `src/assets/images/`. Keep it simple and nice with a short, large text (max 5 words) readable on any device, on a light 16:9 background.
   - After creating the `.svg`, run `node scripts/svg-to-webp.mjs` (or convert just that file) to render it to `.webp` via resvg + sharp, update the frontmatter to point at the `.webp`, and remove the source `.svg` once it is no longer referenced.
 - **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from amazon and the link should be with "https://amazon.com/dp/ASIN"
+
+## Categories & Tags Taxonomy
+
+Posts use a fixed taxonomy enforced in `src/content.config.ts`. Do not invent new categories. Prefer topic intent over deploy surface (e.g. n8n install → `self-hosting`, fish shell → `linux`, Hetzner review → `hosting`, Astro i18n → `web-development`).
+
+### Categories (exactly one per post)
+
+| Category | Use for |
+|---|---|
+| `ai` | Agents, LLMs, MCP, coding assistants, voice AI |
+| `self-hosting` | Docker apps, panels (Dokploy/Coolify), Traefik, monitoring, home lab |
+| `linux` | CLI, shell (fish/zsh), SSH, sysadmin |
+| `web-development` | Astro, Carrd, FastHTML, frameworks, static sites |
+| `wordpress` | WordPress + WooCommerce |
+| `hosting` | VPS providers, CDN, CloudPanel hosting |
+| `tools` | Mac/productivity apps, screenshots, SEO utilities, package managers |
+| `gadgets` | Hardware reviews (monitors, docks, audio) |
+
+Example: `categories: ["self-hosting"]`
+
+Retired labels (do not use): `vps`, `cms`, `AI` (use `ai`), `Gadgets`, `dev-tools`, `tips`, `node`, `python`, `astro`, `woocommerce`, `security`, `cloudflare`, `blog`, `Personal`. Archives for several of these redirect in `astro.config.mjs`.
+
+### Tags (1–3 per post)
+
+- Lowercase kebab-case only (e.g. `fish-shell`, `openclaw`, `dokploy`).
+- Prefer specific tech/product names over category echoes.
+- Do not repeat the post’s category as a tag when a better specific tag exists.
+- Avoid vague tags: `tutorials`, `tips`, `reviews`, `coding`, `development`, `comparison`, `free-tools`, `developer-tools`.
+- Schema normalizes casing/kebab and keeps at most 3 tags.
+
+Example: `tags: ["docker", "dokploy", "self-hosted"]`
+
+### Bulk rewrite helper
+
+If taxonomy drifts again, dry-run then apply with:
+
+```bash
+node scripts/restructure-taxonomy.mjs --dry-run
+node scripts/restructure-taxonomy.mjs
+```
 
 ## SVG Creation Guidelines
 

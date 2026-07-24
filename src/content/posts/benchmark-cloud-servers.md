@@ -3,7 +3,7 @@ date: 2026-06-25T00:00:00Z
 title: "How to Benchmark Cloud Servers (VPS)"
 description: "Run disk, network, and CPU benchmarks on your VPS using YABS and other tools. Compare providers before you commit."
 image: "../../assets/images/benchmark_vps.jpeg"
-categories: ["vps"]
+categories: ["hosting"]
 authors: ["Dragos"]
 tags: ["linux", "vps", "benchmarks"]
 canonical: https://www.bitdoze.com/benchmark-cloud-servers/

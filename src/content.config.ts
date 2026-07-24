@@ -21,14 +21,35 @@ const postsCollection = defineCollection({
       image: image(),
       imageAlt: z.string().optional(),
       authors: z.array(z.string()).min(1).default(["admin"]),
-      categories: z.array(z.string()).min(1).default(["others"]),
-      // Cap at 3 tags per editorial guidelines; keep first three if more provided
+      categories: z
+        .array(
+          z.enum([
+            "ai",
+            "self-hosting",
+            "linux",
+            "web-development",
+            "wordpress",
+            "hosting",
+            "tools",
+            "gadgets",
+          ]),
+        )
+        .length(1),
+      // Cap at 3 tags; normalize to lowercase kebab-case
       tags: z
         .array(z.string())
         .default(["others"])
         .transform((tags) => {
-          const cleaned = tags.map((t) => t.trim()).filter(Boolean);
-          return cleaned.slice(0, 3);
+          const cleaned = tags
+            .map((t) =>
+              t
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, ""),
+            )
+            .filter(Boolean);
+          return [...new Set(cleaned)].slice(0, 3);
         }),
       series: z.tuple([z.string(), z.string()]).optional(),
       locale: z.enum(["en", "es"]).optional(),
