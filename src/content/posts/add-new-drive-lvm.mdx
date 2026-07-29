@@ -1,55 +1,131 @@
 ---
-date: 2024-03-21T00:00:00Z
-title: "How To Install A New Drive to Ubuntu LVM and Mount It"
-description: "Learn how to install a new drive on Ubuntu using LVM (Logical Volume Manager) and mount it for persistent use. "
+date: 2026-07-28T00:00:00Z
+title: "Add a New Drive to Ubuntu LVM and Mount It Permanently"
+meta_title: "Add a New Drive to Ubuntu LVM & Mount It (Step-by-Step)"
+description: "Add a new drive to Ubuntu LVM: pvcreate, vgcreate, lvcreate, ext4 format, and persistent mount with fstab nofail. Step-by-step guide for Ubuntu 24.04."
 image: "../../assets/images/24/03/add-new-drive-lvm.jpeg"
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["linux", "ubuntu", "lvm", "storage", "server"]
 canonical: "https://www.bitdoze.com/add-new-drive-lvm/"
 ---
 
-This article will guide you through the process of installing a new drive to your Ubuntu system using Logical Volume Manager (LVM) and mounting it for persistent use. LVM is a flexible and powerful tool for managing disk storage, allowing you to easily resize and manage logical volumes.
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
 
-## Step 1: Check the Drives
+Adding a new drive to Ubuntu LVM is the most flexible way to expand server storage without downtime. LVM (Logical Volume Manager) sits between your physical disks and the filesystem, letting you stripe across multiple drives, resize volumes live, and add more storage later with a handful of commands. This guide walks through the full workflow, from detecting the disk to a persistent, boot-safe mount, on Ubuntu 24.04 LTS.
 
-To begin, let's check the available drives on your system using the `lshw` command:
+The core sequence is: **pvcreate → vgcreate → lvcreate → mkfs → mount → fstab**. If you follow this order and verify each step, you'll have a working, persistent data volume in under 10 minutes.
+
+## Prerequisites
+
+Before you start, make sure the following are in place:
+
+<ListCheck>
+<ul>
+<li>Root or sudo access on an Ubuntu system (22.04+ or 24.04 LTS recommended)</li>
+<li>A new disk physically attached and detected by the kernel</li>
+<li>LVM2 tools installed</li>
+<li>Any existing data on the target disk backed up. pvcreate is destructive</li>
+</ul>
+</ListCheck>
+
+### Install LVM2 on Ubuntu
+
+LVM2 is pre-installed on Ubuntu Server, but minimal or cloud images may not include it:
 
 ```sh
-sudo lshw -C disk
+sudo apt update && sudo apt install lvm2
+```
+
+Verify it's installed:
+
+```sh
+lvm version
+```
+
+You should see `LVM version: 2.03.16` (or later). If you're managing a fleet of servers, tools like a [self-hosted server panel](/best-self-hosted-panels/) can help you track what's installed where.
+
+### Confirm the new disk is detected
+
+Use `lsblk` to see all block devices:
+
+```sh
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL
+```
+
+Example output with a new 4TB drive:
+
+```sh
+NAME                      SIZE TYPE MOUNTPOINT MODEL
+sda                       3.6T disk            Samsung SSD 870
+sdb                       476G disk            RS512GSSD310
+├─sdb1                    1.1G part /boot/efi
+├─sdb2                      2G part /boot
+└─sdb3                  473.9G part
+  └─ubuntu--vg-ubuntu--lv 466G lvm  /
+```
+
+If the disk doesn't show up, check `dmesg | tail -20` for detection messages. On hot-added disks (common on cloud servers), you may need to rescan the SCSI bus:
+
+```sh
+echo "- - -" | sudo tee /sys/class/scsi_host/host0/scan
+```
+
+Repeat for `host1`, `host2`, etc. until the disk appears.
+
+<Notice type="warning" title="pvcreate is destructive">
+Running `pvcreate` on a disk will erase its partition table and all data. If there's anything on the disk you care about, [back up your disk with dd](/linux-dd-command-guide/) before proceeding. Double-check the device name. Running pvcreate on `/dev/sdb` (your OS disk) instead of `/dev/sda` will destroy your system.
+</Notice>
+
+If you're building a [home server with multiple drives](/best-mini-pc-home-server/) or need a VPS with expandable block storage, <a href="https://go.bitdoze.com/hetzner" target="_blank" rel="noopener noreferrer">Hetzner Cloud Volumes</a> support online resizing, a natural fit for LVM. You can also [benchmark your cloud server's disk performance](/benchmark-cloud-servers/) after setup to confirm you're getting the throughput you expect.
+
+## Step 1: Identify the new drive with lsblk
+
+Replace the older `lshw -C disk` approach with `lsblk`. It's installed everywhere, shows the block device tree, and is easier to read:
+
+```sh
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL
 ```
 
 Output:
 
 ```sh
-  *-disk:0
-      description: ATA Disk
-      product: Samsung SSD 870
-      physical id: 0
-      bus info: scsi@0:0.0.0
-      logical name: /dev/sda
-      version: 3B6Q
-      serial: S758NS0W807436T
-      size: 3726GiB (4TB)
-      configuration: ansiversion=5 logicalsectorsize=512 sectorsize=512
- *-disk:1
-      description: ATA Disk
-      product: RS512GSSD310
-      physical id: 1
-      bus info: scsi@1:0.0.0
-      logical name: /dev/sdb
-      version: 2A0
-      serial: EB091502A000561
-      size: 476GiB (512GB)
-      capabilities: gpt-1.00 partitioned partitioned:gpt
-      configuration: ansiversion=5 guid=0c679d6a-d4b6-40a1-962c-75145d093352 logicalsectorsize=512 sectorsize=512
+NAME                      SIZE TYPE MOUNTPOINT MODEL              SERIAL
+sda                       3.6T disk            Samsung SSD 870    S758NS0W807436T
+sdb                       476G disk            RS512GSSD310       EB091502A000561
+├─sdb1                    1.1G part /boot/efi
+├─sdb2                      2G part /boot
+└─sdb3                  473.9G part
+  └─ubuntu--vg-ubuntu--lv 466G lvm  /
 ```
 
-This command displays detailed information about the disks connected to your system. In this example, we have two disks: `/dev/sda` (4TB) and `/dev/sdb` (512GB).
+Here `/dev/sda` (3.6T Samsung SSD) is the new data drive, and `/dev/sdb` is the OS disk. The new drive has no partitions and isn't mounted, exactly what you want to see before creating a physical volume.
 
-## Step 2: Display Physical Volumes (PV)
+For detailed hardware info, `sudo lshw -C disk` still works, but `lsblk` gives you everything you need for LVM operations.
 
-To display the existing physical volumes (PV) on your system, use the `pvs` command:
+### Use stable device paths in VPS environments
+
+<Notice type="info" title="VPS device name instability">
+On cloud/VPS servers (Hetzner Volumes, DigitalOcean block storage), `/dev/sdX` names can shift between reboots. Before running `pvcreate`, check the stable identifier:
+</Notice>
+
+```sh
+ls -la /dev/disk/by-id/
+```
+
+This shows persistent paths like `scsi-0HC_Volume_12345` that won't change. You can use these paths directly with `pvcreate`:
+
+```sh
+sudo pvcreate /dev/disk/by-id/scsi-0HC_Volume_12345
+```
+
+Once the PV is created, LVM resolves the disk through its own metadata, so this matters most for the initial `pvcreate` command, not for day-to-day operations.
+
+## Step 2: Check existing physical volumes with pvs
+
+Run `pvs` to see what LVM already knows about:
 
 ```sh
 sudo pvs
@@ -58,15 +134,21 @@ sudo pvs
 Output:
 
 ```sh
- PV         VG        Fmt  Attr PSize    PFree
- /dev/sdb3  ubuntu-vg lvm2 a--  <473.89g    0
+  PV         VG        Fmt  Attr PSize    PFree
+  /dev/sdb3  ubuntu-vg lvm2 a--  <473.89g    0
 ```
 
-This output shows that there is currently one physical volume (`/dev/sdb3`) associated with the volume group `ubuntu-vg`.
+This shows one physical volume (`/dev/sdb3`) in volume group `ubuntu-vg`, which is the OS disk. The new drive `/dev/sda` isn't listed yet. That's expected.
 
-## Step 3: Create Physical Volumes (PV) on New Disk
+Column meanings:
+- **PV**: physical volume device path
+- **VG**: volume group it belongs to
+- **PSize**: total size
+- **PFree**: free space available for new logical volumes
 
-To create a new physical volume on the new disk (`/dev/sda`), use the `pvcreate` command:
+## Step 3: Create a physical volume with pvcreate
+
+Create a physical volume on the new disk:
 
 ```sh
 sudo pvcreate /dev/sda
@@ -75,28 +157,38 @@ sudo pvcreate /dev/sda
 Output:
 
 ```sh
-Physical volume "/dev/sda" successfully created.
+  Physical volume "/dev/sda" successfully created.
 ```
 
-Verify the creation of the new physical volume using `lvmdiskscan`:
+Verify the new PV is registered:
 
 ```sh
-sudo lvmdiskscan -l
+sudo pvs
 ```
 
 Output:
 
 ```sh
- WARNING: only considering LVM devices
- /dev/sda   [      <3.64 TiB] LVM physical volume
- /dev/sdb3  [    <473.89 GiB] LVM physical volume
- 1 LVM physical volume whole disk
- 1 LVM physical volume
+  PV         VG        Fmt  Attr PSize    PFree
+  /dev/sda             lvm2 ---    <3.64t   <3.64t
+  /dev/sdb3  ubuntu-vg lvm2 a--  <473.89g        0
 ```
 
-## Step 4: Create a Volume Group (VG)
+`/dev/sda` now appears as an LVM physical volume with ~3.64 TB free. For a more detailed view:
 
-Create a new volume group named `mediavg` using the new physical volume `/dev/sda`:
+```sh
+sudo pvdisplay /dev/sda
+```
+
+<Notice type="warning" title="Double-check the device name">
+Running `pvcreate` on your OS disk will destroy it. Always verify with `lsblk` first. If the disk has leftover partition signatures, `pvcreate` may refuse. See the troubleshooting section below for the `wipefs` fix.
+</Notice>
+
+If there's any data on this disk you need, [back it up with dd](/linux-dd-command-guide/) before this step. Once `pvcreate` runs, the old partition table is gone.
+
+## Step 4: Create a volume group with vgcreate
+
+Create a volume group named `mediavg` using the new physical volume:
 
 ```sh
 sudo vgcreate mediavg /dev/sda
@@ -105,12 +197,14 @@ sudo vgcreate mediavg /dev/sda
 Output:
 
 ```sh
-volume group "mediavg" successfully created
+  Volume group "mediavg" successfully created
 ```
 
-## Step 5: Create a Logical Volume (LV)
+Use descriptive names for volume groups. `mediavg` tells you what it's for, unlike `vg0` which tells you nothing. You can add more physical volumes to this group later with `vgextend`.
 
-Create a new logical volume named `medialv` within the `mediavg` volume group, using all available space:
+## Step 5: Create a logical volume with lvcreate
+
+Create a logical volume that uses all available space in the volume group:
 
 ```sh
 sudo lvcreate -l +100%FREE -n medialv mediavg
@@ -119,28 +213,41 @@ sudo lvcreate -l +100%FREE -n medialv mediavg
 Output:
 
 ```sh
-Logical volume "medialv" created.
+  Logical volume "medialv" created.
 ```
 
-## Step 6: Create a Filesystem
+Flag breakdown:
+- **`-l +100%FREE`**: allocate all free space in the VG to this LV
+- **`-n medialv`**: name the logical volume
 
-Create an ext4 filesystem on the new logical volume:
+If you want multiple volumes (e.g., separate LVs for media and backups), use specific sizes instead:
 
 ```sh
-sudo mkfs.ext4 /dev/mediavg/medialv
+sudo lvcreate -L 2T -n medialv mediavg
+sudo lvcreate -L 1.6T -n backuplv mediavg
+```
+
+For this guide, we'll use one LV with all the space.
+
+## Step 6: Create an ext4 filesystem (with reserved block tuning)
+
+Format the logical volume with ext4:
+
+```sh
+sudo mkfs.ext4 -m 0 /dev/mediavg/medialv
 ```
 
 Output:
 
 ```sh
-mke2fs 1.46.5 (30-Dec-2021)
+mke2fs 1.47.0 (5-Feb-2023)
 Discarding device blocks: done
 Creating filesystem with 976753664 4k blocks and 244195328 inodes
 Filesystem UUID: 2d665675-4b2e-4a1f-9af6-4652e387d76e
 Superblock backups stored on blocks:
-	32768, 98304, 163840, 229376, 294912, 819200, 884736, 1605632, 2654208,
-	4096000, 7962624, 11239424, 20480000, 23887872, 71663616, 78675968,
-	102400000, 214990848, 512000000, 550731776, 644972544
+        32768, 98304, 163840, 229376, 294912, 819200, 884736, 1605632,
+        2654208, 4096000, 7962624, 11239424, 20480000, 23887872, 71663616,
+        78675968, 102400000, 214990848, 512000000, 550731776, 644972544
 
 Allocating group tables: done
 Writing inode tables: done
@@ -148,40 +255,43 @@ Creating journal (262144 blocks): done
 Writing superblocks and filesystem accounting information: done
 ```
 
-## Step 7: Mount the Filesystem
+<Notice type="info" title="Why -m 0 matters">
+By default, ext4 reserves 5% of the filesystem for the root user. On a 4TB data drive, that's roughly 200 GB wasted on space you'll never use. The `-m 0` flag sets reserved blocks to 0%, which is safe for pure data drives (media, backups, archives). If the drive will see heavy file creation and deletion, keep 1% with `-m 1` to avoid fragmentation when the drive is nearly full. You can adjust this after formatting with `sudo tune2fs -m 0 /dev/mediavg/medialv`.
+</Notice>
 
-Create a mount point directory and mount the new filesystem:
+## Step 7: Mount the new filesystem
+
+Create a mount point and mount the volume:
 
 ```sh
 sudo mkdir -p /media/storage
 sudo mount /dev/mediavg/medialv /media/storage
 ```
 
-Verify the mount using the `df` command:
+Verify the mount:
 
 ```sh
-df -h
+df -h /media/storage
 ```
 
 Output:
 
 ```sh
-Filesystem                         Size  Used Avail Use% Mounted on
-tmpfs                              1.6G  2.4M  1.6G   1% /run
-/dev/mapper/ubuntu--vg-ubuntu--lv  466G   23G  424G   6% /
-tmpfs                              7.8G     0  7.8G   0% /dev/shm
-tmpfs                              5.0M     0  5.0M   0% /run/lock
-/dev/sdb2                          2.0G  252M  1.6G  14% /boot
-/dev/sdb1                          1.1G  6.1M  1.1G   1% /boot/efi
-tmpfs                              1.6G  4.0K  1.6G   1% /run/user/1000
-/dev/mapper/mediavg-medialv        3.6T   28K  3.4T   1% /media/storage
+Filesystem                   Size  Used Avail Use% Mounted on
+/dev/mapper/mediavg-medialv  3.6T   28K  3.4T   1% /media/storage
 ```
 
-## Step 8: Make the Mount Persistent
+The path `/dev/mapper/mediavg-medialv` is the device-mapper path that LVM creates. You can use either this or `/dev/mediavg/medialv`. They point to the same device.
 
-To ensure the filesystem is mounted automatically on system boot, add an entry to the `/etc/fstab` file.
+For a tree view of all filesystems and their UUIDs:
 
-Obtain the UUID of the new filesystem using `blkid`:
+```sh
+lsblk -f
+```
+
+## Step 8: Make the mount persistent with fstab (using nofail)
+
+Get the UUID of the new filesystem:
 
 ```sh
 sudo blkid /dev/mediavg/medialv
@@ -193,42 +303,242 @@ Output:
 /dev/mediavg/medialv: UUID="2d665675-4b2e-4a1f-9af6-4652e387d76e" BLOCK_SIZE="4096" TYPE="ext4"
 ```
 
-Edit `/etc/fstab` and add a line like the following, replacing `UUID` with the actual UUID:
+Add an entry to `/etc/fstab`:
 
-```sh
-UUID=2d665675-4b2e-4a1f-9af6-4652e387d76e /media/storage ext4 defaults 0 2
+```
+UUID=2d665675-4b2e-4a1f-9af6-4652e387d76e /media/storage ext4 defaults,nofail 0 2
 ```
 
-## Step 9: Reboot and Verify
+<Notice type="error" title="Always use nofail for non-root drives">
+Without `nofail`, if the drive fails, is removed, or LVM can't activate the logical volume at boot, your system will drop to emergency mode and refuse to boot. This is the most common footgun with fstab on data drives. The `nofail` option tells systemd to continue booting even if this mount fails. For drives that are slow to appear (external USB, some cloud volumes), also add `x-systemd.device-timeout=10s` to avoid a long hang.
+</Notice>
 
-Reboot the server to ensure the new filesystem is mounted automatically:
+You can use either the UUID or the `/dev/mapper` path in fstab. Both are persistent under LVM:
 
-```sh
-sudo reboot
+```
+/dev/mapper/mediavg-medialv /media/storage ext4 defaults,nofail 0 2
 ```
 
-After the reboot, check the mounted filesystems using `df`:
+The mapper path is more human-readable, but UUID is the safer default if you ever move the disk between systems. If you hit a [kernel panic from a bad fstab entry](/fix-kernel-panic-unable-mount-root-fs/), boot to recovery mode and fix the line.
+
+## Step 9 — Verify fstab before reboot with mount -a
+
+<Notice type="warning" title="Never skip this step on a remote server">
+A typo in fstab can prevent your system from booting. On a remote VPS with no console access, that means reinstalling the OS. Always test with `mount -a` before rebooting.
+</Notice>
 
 ```sh
-df -h
+sudo mount -a
+```
+
+If this returns silently (no output), the fstab entry is valid. If you get an error, fix the entry before rebooting.
+
+Confirm the mount is working:
+
+```sh
+df -h /media/storage
 ```
 
 Output:
 
 ```sh
-Filesystem                         Size  Used Avail Use% Mounted on
-tmpfs                              1.6G  2.4M  1.6G   1% /run
-/dev/mapper/ubuntu--vg-ubuntu--lv  466G   23G  424G   6% /
-tmpfs                              7.8G     0  7.8G   0% /dev/shm
-tmpfs                              5.0M     0  5.0M   0% /run/lock
-/dev/sdb2                          2.0G  252M  1.6G  14% /boot
-/dev/sdb1                          1.1G  6.1M  1.1G   1% /boot/efi
-/dev/mapper/mediavg-medialv        3.6T   28K  3.4T   1% /media/storage
-tmpfs                              1.6G  4.0K  1.6G   1% /run/user/1000
+Filesystem                   Size  Used Avail Use% Mounted on
+/dev/mapper/mediavg-medialv  3.6T   28K  3.4T   1% /media/storage
 ```
 
-The output should show that `/dev/mapper/mediavg-medialv` is mounted on `/media/storage`.
+If `mount -a` produced no errors and `df` shows the filesystem, you're safe to reboot.
+
+## Step 10 — Reboot and final verify
+
+```sh
+sudo reboot
+```
+
+After the system comes back up, verify the mount survived the reboot:
+
+```sh
+df -h /media/storage
+```
+
+Output:
+
+```sh
+Filesystem                   Size  Used Avail Use% Mounted on
+/dev/mapper/mediavg-medialv  3.6T   28K  3.4T   1% /media/storage
+```
+
+Check the full block device tree:
+
+```sh
+lsblk -f
+```
+
+You should see `mediavg-medialv` mounted on `/media/storage` with the ext4 filesystem and UUID displayed.
+
+If the mount didn't survive, check the troubleshooting section below — most likely the VG wasn't activated or there's a typo in fstab.
+
+## Whole-disk vs partition — which approach?
+
+This guide creates a physical volume directly on the raw disk (`/dev/sda`) without a partition table. This works fine and has advantages. Here's the trade-off:
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Whole-disk PV** | Simpler; `pvresize` works live if the block device grows; no partition table to manage | Other tools/OSes may show the disk as "empty" and offer to format it |
+| **Single-partition PV** | `fdisk -l` clearly shows the disk is in use (type `8e` or GPT LVM flag) | Resizing requires partition manipulation, often a reboot or `partprobe` |
+
+<Accordion label="Do I need a partition table for LVM?" group="faq">
+**Short answer: no.** LVM doesn't require a partition table. Using the whole disk as a PV is the simpler approach and works well in practice.
+
+**When to use a partition anyway:**
+- If you share this server with other admins, a partition prevents someone from accidentally thinking the disk is unused and reformatting it
+- If you plan to boot from the disk (rare for a data drive), you need a partition table
+- Some monitoring tools report unpartitioned disks as "unused" — a partition with the LVM flag makes the intent clear
+
+**For solo operators and VPS volumes:** whole-disk PV is fine. It's especially good for Hetzner-style volumes that can be resized online, since `pvresize` on a whole disk is simpler than deleting and recreating a partition.
+
+If you decide to use a partition, create a single Linux LVM partition (type `8e` in MBR, or `LVM` in GPT) that spans the entire disk, then run `pvcreate` on the partition (`/dev/sda1`) instead of the raw disk.
+</Accordion>
+
+## How to extend your LVM storage later
+
+One of LVM's biggest selling points is easy, live resizing. When you need more space, add another disk and extend the volume group — no downtime, no unmount:
+
+```sh
+# 1. Create a PV on the new disk
+sudo pvcreate /dev/sdc
+
+# 2. Add it to the existing volume group
+sudo vgextend mediavg /dev/sdc
+
+# 3. Extend the logical volume to use all free space
+sudo lvextend -l +100%FREE /dev/mediavg/medialv
+
+# 4. Grow the filesystem to fill the new space (works online, no unmount)
+sudo resize2fs /dev/mediavg/medialv
+```
+
+Verify:
+
+```sh
+df -h /media/storage
+```
+
+<Notice type="success" title="Zero downtime storage expansion">
+LVM lets you add storage to a live system with no unmount, no reboot, and no service interruption. `resize2fs` grows the ext4 filesystem while it's mounted and serving data. That's the whole point of LVM.
+</Notice>
+
+Once you have extra storage, you can [share your new storage over the network with NFS](/setup-nfs-linux/) or [set up a Samba share for Windows access](/setup-samba-linux/). If you're running containers that need lots of disk space, check out these [Docker containers for a home server](/docker-containers-home-server/). You can also [reclaim disk space from Docker overlay2](/clean-docker-overlay2-dir/) if `/var/lib/docker` is eating your root volume.
+
+Shrinking a logical volume is also possible but requires unmounting the filesystem and running `fsck` first — see the LVM documentation for the `lvreduce` workflow. I'd recommend expanding rather than shrinking whenever possible.
+
+## Troubleshooting common LVM issues
+
+### pvcreate fails: "Can't open /dev/sda exclusively"
+
+The disk has an existing partition table, filesystem signature, or is mounted. Fix:
+
+```sh
+# Remove all signatures from the disk
+sudo wipefs -a /dev/sda
+
+# Or zero the first few MB for a clean slate
+sudo dd if=/dev/zero of=/dev/sda bs=1M count=10
+
+# Then retry
+sudo pvcreate /dev/sda
+```
+
+### mount fails: "unknown filesystem type 'LVM2_member'"
+
+You're trying to mount the physical volume (the raw disk) instead of the logical volume. Use the LV path, not the disk path:
+
+```sh
+# Wrong:
+sudo mount /dev/sda /media/storage
+
+# Right:
+sudo mount /dev/mediavg/medialv /media/storage
+```
+
+### LV not active after reboot
+
+The volume group may not have been activated. Check and fix:
+
+```sh
+# Check VG status
+sudo vgdisplay mediavg
+
+# Activate the VG
+sudo vgchange -ay mediavg
+
+# Then mount
+sudo mount /dev/mediavg/medialv /media/storage
+```
+
+### df shows old size after lvextend
+
+You extended the logical volume but forgot to grow the filesystem:
+
+```sh
+sudo resize2fs /dev/mapper/mediavg-medialv
+```
+
+This works online (no unmount needed) for ext4.
+
+### Boot hangs after fstab edit
+
+<Accordion label="Boot hangs after fstab edit" group="troubleshooting">
+If the system hangs at boot after editing fstab, the entry is wrong or the `nofail` option is missing.
+
+**Recovery steps:**
+
+1. Boot into recovery mode (hold Shift during boot on BIOS systems, or select recovery in GRUB)
+2. Select "root — Drop to root shell prompt"
+3. Remount the root filesystem as read-write:
+   ```sh
+   mount -o remount,rw /
+   ```
+4. Edit fstab:
+   ```sh
+   nano /etc/fstab
+   ```
+5. Either fix the entry or comment it out with `#` to boot normally
+6. Reboot:
+   ```sh
+   reboot
+   ```
+
+If you're on a remote VPS with no console access, most providers offer a rescue mode or VNC console. Use that to fix fstab remotely. See [fix kernel panic from a bad fstab entry](/fix-kernel-panic-unable-mount-root-fs/) for more recovery options.
+</Accordion>
+
+### Disk not detected after hot-add
+
+The kernel didn't rescan the SCSI bus. Force a rescan:
+
+```sh
+# Repeat for each host adapter until the disk appears
+echo "- - -" | sudo tee /sys/class/scsi_host/host0/scan
+echo "- - -" | sudo tee /sys/class/scsi_host/host1/scan
+echo "- - -" | sudo tee /sys/class/scsi_host/host2/scan
+```
+
+Check with `lsblk` after each scan.
 
 ## Conclusion
 
-Congratulations! You have successfully installed a new drive to your Ubuntu system using LVM, created a logical volume, formatted it with the ext4 filesystem, and mounted it persistently. You can now use the `/media/storage` directory to store your data on the new drive.
+You've added a new drive to Ubuntu LVM and mounted it permanently. The sequence is always the same:
+
+1. **Identify** the disk with `lsblk`
+2. **Create** a physical volume with `pvcreate`
+3. **Create** a volume group with `vgcreate`
+4. **Create** a logical volume with `lvcreate`
+5. **Format** with `mkfs.ext4 -m 0`
+6. **Mount** and verify
+7. **Add to fstab** with `defaults,nofail`
+8. **Test** with `mount -a` before rebooting
+
+The two safety lessons worth remembering: always add `nofail` to fstab for non-root drives, and always test with `mount -a` before rebooting a remote server.
+
+From here, you can expand the volume group with `vgextend` when you need more space, [share the storage over NFS](/setup-nfs-linux/), [set up Samba for Windows clients](/setup-samba-linux/), or [mount cloud object storage as a filesystem](/s3-bucket-filesystem-vps/) for offsite backups.
+
+Need a VPS with expandable block storage? <a href="https://go.bitdoze.com/hetzner" target="_blank" rel="noopener noreferrer">Hetzner Cloud Volumes</a> expand online with no downtime and work well with LVM.
