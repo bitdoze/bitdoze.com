@@ -1,0 +1,669 @@
+---
+date: 2026-07-29T00:00:00Z
+title: "Add Voice Cloning TTS to Mastra with Fish Audio"
+meta_title: "Fish Audio + Mastra: Voice Cloning TTS for AI Agents (2026)"
+description: "Wire Fish Audio S2.1 Pro into Mastra: clone your voice, build a fish_tts tool, add emotion tags, and give agents real narration for video and content workflows."
+image: "../../assets/images/26/07/mastra-fish-audio-tts.webp"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["mastra", "fish-audio", "tts"]
+canonical: "https://www.bitdoze.com/mastra-fish-audio-tts/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+I already have a [Mastra assistant](/build-ai-agent-mastra/) that searches the web, reads files, runs shell commands, and remembers context. I also added an [image agent with Kie.ai](/mastra-image-agent-kie-ai/) for covers and thumbnails.
+
+What was still missing for video was **voice**. Stock TTS sounds like every other AI demo. I wanted narration in **my** voice — cloned once, reused forever — with emotion control so technical explainers do not sound flat.
+
+So I wired [Fish Audio](https://go.bitdoze.com/fish-audio) into Mastra as one tool: `fish_tts`. The agent writes the script (with `[emotion]` tags), calls the tool, and gets a `.wav` on disk. That file drops straight into HyperFrames for YouTube and Shorts.
+
+This guide covers the full path: clone a voice, build the tool, register it on an agent, and use emotion tags for delivery. Same pattern works in the [mastra-assistant](https://github.com/bitdoze/mastra-assistant) repo or any existing Mastra app.
+
+If you have not used Fish Audio yet, start with the [Fish Audio review](/fish-audio-review/) or the [2-minute clone walkthrough](/fish-audio-clone-voice/). Comparing vendors? See [Fish Audio vs ElevenLabs](/fish-audio-vs-elevenlabs/) and [Fish Audio vs MiniMax](/fish-audio-vs-minimax/).
+
+<Button text="Try Fish Audio Free" link="https://go.bitdoze.com/fish-audio" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Build a Mastra Agent First" link="/build-ai-agent-mastra/" variant="outline" color="purple" size="md" icon="arrow-right" />
+
+<Notice type="info" title="Affiliate disclosure">
+Some links to Fish Audio in this article are affiliate links (`go.bitdoze.com/fish-audio`). I use the product for voiceover in my own Mastra video pipeline. Pricing and free-tier limits change; always verify on the official site and [docs.fish.audio](https://docs.fish.audio/).
+</Notice>
+
+## Why Fish Audio for agent TTS
+
+Most TTS APIs give you stock voices. Fine for prototypes. Bad when the product is *your* channel and viewers expect *your* voice.
+
+| Feature | What you get |
+| --- | --- |
+| Voice cloning | ~15 seconds of sample audio → a reusable voice model ID |
+| S2.1 Pro quality | Production TTS with natural prosody |
+| Emotion control | `[happy]`, `[excited]`, `[calm]`, free-form cues like `[warm and friendly]` |
+| Simple HTTP API | `POST https://api.fish.audio/v1/tts` → raw audio bytes (no long poll job) |
+| Formats | `wav`, `mp3`, `opus` — `wav` works cleanly with video pipelines |
+| Dev model | `s2.1-pro-free` — same quality as paid S2.1 Pro for development (fair-use; check current terms) |
+| Languages | 80+ with automatic language detection |
+
+Why this beats local Kokoro / OpenAI TTS / ElevenLabs for my agent setup:
+
+- **Clone once, reuse forever** — `reference_id` points at your voice model
+- **Sync response** — no create-task / poll loop like many image APIs
+- **Emotion in the text** — the agent writes tags in the script; no separate style field to forget
+- **One clear tool** — inputs are obvious, output is a binary file on disk
+
+I use it as the **only** TTS path for the video-creator agent. Skills that default to HeyGen, ElevenLabs, or Kokoro get overridden: always `fish_tts`.
+
+## What you will build
+
+<ListCheck>
+<ul>
+<li>A Fish Audio account with an API key and a cloned voice model ID</li>
+<li>A Mastra tool <code>fish_tts</code> that posts text and writes audio to the workspace</li>
+<li>An agent (or video phase) that generates narration with emotion tags</li>
+<li>Optional: the same tool in a multi-phase video pipeline</li>
+</ul>
+</ListCheck>
+
+The tool can:
+
+- Generate speech from text using your cloned voice
+- Apply speed, volume, temperature, and latency settings
+- Embed emotion / pause markers (`[confident]`, `[break]`, …)
+- Save `wav` / `mp3` / `opus` under a path the agent chooses
+- Return success, path, and bytes written (or a clear error)
+
+## Prerequisites
+
+- A working Mastra project (see [Build Your Own AI Agent with Mastra](/build-ai-agent-mastra/))
+- Node.js 22+ or **Bun** (this repo defaults to Bun)
+- An LLM API key for the agent brain (OpenRouter, OpenCode Go, etc.)
+- A [Fish Audio](https://go.bitdoze.com/fish-audio) account
+
+Optional: HyperFrames (or any video stack) if you want full voiceover → transcript → caption pipelines. TTS works without video — you only need a place to save the file.
+
+## Architecture
+
+```
+User (Studio chat / workflow)
+    │
+    ▼
+agent  (LLM + instructions)
+    │
+    └─ fish_tts  ──► POST api.fish.audio/v1/tts
+                          │
+                          ▼
+                     workspace/.../narration.wav
+                          │
+                          ▼ (optional)
+                     hyperframes transcribe → transcript.json
+                     composition <audio class="clip">
+```
+
+The LLM never holds the API key. It only chooses tools. Auth, path safety, and binary download stay in TypeScript where you can test them.
+
+## Step 1: Create an API key and clone your voice
+
+1. Sign up at [Fish Audio](https://go.bitdoze.com/fish-audio)
+2. Create an API key in the dashboard
+3. Clone a voice: upload ~15 seconds of clean speech (one speaker, little noise)
+4. Copy the resulting **voice model ID** — this is `reference_id` in the API
+
+Need screenshots and recording tips? Follow [Clone your voice with Fish Audio in 2 minutes](/fish-audio-clone-voice/).
+
+Add to `.env`:
+
+```bash
+FISH_API_KEY=your-fish-audio-key
+FISH_VOICE_ID=your-cloned-voice-model-id
+```
+
+Never put the key in frontend code or commit it to git.
+
+### Voice cloning tips
+
+- Use a quiet room and natural pacing
+- Prefer a continuous monologue over short clips stitched together
+- Match the language you will narrate most often
+- Re-clone if the source was compressed or noisy — bad clone means bad every generation
+
+<Button text="Clone Your Voice Free" link="https://go.bitdoze.com/fish-audio" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Step 2: Fish Audio client basics
+
+Fish Audio TTS is a single POST. Success returns **raw audio bytes**, not JSON.
+
+### Auth and endpoint
+
+```
+POST https://api.fish.audio/v1/tts
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+model: s2.1-pro-free   # or s2.1-pro | s2-pro | s1
+```
+
+### Request body (fields we use)
+
+```json
+{
+  "text": "[confident] Docker makes deployment simple. [break] [excited] This tool makes it even easier.",
+  "reference_id": "YOUR_VOICE_MODEL_ID",
+  "format": "wav",
+  "prosody": {
+    "speed": 1.0,
+    "volume": 0,
+    "normalize_loudness": true
+  },
+  "temperature": 0.7,
+  "top_p": 0.7,
+  "chunk_length": 300,
+  "normalize": true,
+  "latency": "normal",
+  "max_new_tokens": 1024,
+  "repetition_penalty": 1.2,
+  "condition_on_previous_chunks": true
+}
+```
+
+| Field | Role |
+| --- | --- |
+| `text` | Script + `[emotion]` markers (S2 / S2.1). Max ~10k chars in our tool. |
+| `reference_id` | Cloned voice model ID |
+| `format` | `wav` \| `mp3` \| `opus` |
+| `prosody.speed` | 0.5–2.0 (1.0 = natural for explainers) |
+| `prosody.volume` | dB offset (−20…20) |
+| `temperature` | Higher = more expressive variation |
+| `latency` | `normal` (quality) \| `balanced` \| `low` |
+
+On success: write `Buffer.from(await res.arrayBuffer())` to disk. On error: parse JSON `message` when present.
+
+### Models
+
+| Model id | Notes |
+| --- | --- |
+| `s2.1-pro-free` | Same quality as S2.1 Pro for dev / fair use — good default while exploring |
+| `s2.1-pro` | Production S2.1 Pro with SLA |
+| `s2-pro` | Previous S2 generation; still uses `[bracket]` emotions |
+| `s1` | Legacy; emotions use `(parentheses)` not brackets |
+
+Emotion docs: [docs.fish.audio — Emotion Control](https://docs.fish.audio/developer-guide/core-features/emotions).
+
+## Step 3: Mastra `fish_tts` tool
+
+Create `src/mastra/tools/fish-audio-tts.ts`. Tools are `createTool` + Zod. The `description` field is the model-facing API docs — write it carefully so the agent embeds emotion tags correctly.
+
+```typescript
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+import { resolve, isAbsolute, dirname } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+
+const FISH_API_BASE = "https://api.fish.audio";
+const DEFAULT_VOICE_ID = process.env.FISH_VOICE_ID ?? "";
+const DEFAULT_MODEL = "s2.1-pro-free";
+// Resolve relative output paths against your workspace root.
+const WORKSPACE_PATH = process.env.WORKSPACE_PATH ?? `${process.cwd()}/workspace`;
+
+function getApiKey(): string {
+  const apiKey = process.env.FISH_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "FISH_API_KEY is not set. Add it to .env to enable Fish Audio TTS.",
+    );
+  }
+  return apiKey;
+}
+
+export function createFishTts(basePath: string = WORKSPACE_PATH) {
+  return createTool({
+    id: "fish_tts",
+    description: `Generate narration audio from text using Fish Audio S2.1 Pro TTS with a cloned voice.
+
+EMOTION CONTROL (S2.1 Pro): Add emotion/style cues in [square brackets] directly in the text. Examples:
+  [happy] What a great tool!
+  [excited] And the best part? It's free!
+  [calm] Let me walk you through the setup.
+  [confident] This is the best option on the market.
+  [curious] But what about performance?
+  [sarcastic] Oh sure, because THAT always works.
+  [whispering] Here's a secret most people miss.
+  [laughing] Ha ha, yeah, I tried that too.
+  [sighing] Another config file... sigh.
+
+Combine emotions: [sad][whispering] for a quiet sad tone, [excited][laughing] for joyful energy.
+Use [break] for a short pause, [long-break] for a longer pause.
+Place emotion cues at the START of the sentence they should affect.
+Natural language descriptions also work: [warm and friendly], [slightly annoyed], [very energetic].
+
+For technical narration, [confident] or [calm] works best as the base tone. Use [excited] sparingly for highlights. Avoid [happy] for informational content — it sounds salesy.`,
+    inputSchema: z.object({
+      text: z
+        .string()
+        .max(10000)
+        .describe(
+          "Narration text. Supports [emotion] tags like [happy], [excited], [calm], [whispering], [break]. Place cues at sentence starts.",
+        ),
+      outputPath: z
+        .string()
+        .describe(
+          "Path to save the audio. Relative paths resolve against the workspace. Extension must match format (.wav, .mp3, .opus).",
+        ),
+      speed: z
+        .number()
+        .min(0.5)
+        .max(2)
+        .optional()
+        .describe("Speech speed. 1.0 = normal. Default 1.0."),
+      volume: z
+        .number()
+        .min(-20)
+        .max(20)
+        .optional()
+        .describe("Volume in dB. 0 = no change. Default 0."),
+      voiceId: z
+        .string()
+        .optional()
+        .describe("Fish Audio voice model ID. Defaults to FISH_VOICE_ID."),
+      model: z
+        .enum(["s2.1-pro-free", "s2.1-pro", "s2-pro", "s1"])
+        .optional()
+        .describe(
+          "TTS model. Default s2.1-pro-free. Use s2.1-pro for production SLA.",
+        ),
+      format: z
+        .enum(["wav", "mp3", "opus"])
+        .optional()
+        .describe("Output format. Default wav (good for video pipelines)."),
+      temperature: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Expressiveness. Higher = more varied. Default 0.7."),
+      latency: z
+        .enum(["normal", "balanced", "low"])
+        .optional()
+        .describe("normal = best quality (default). low = fastest."),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      path: z.string().optional(),
+      bytesWritten: z.number().optional(),
+      format: z.string().optional(),
+      error: z.string().optional(),
+    }),
+    execute: async (input) => {
+      const apiKey = getApiKey();
+      const format = input.format ?? "wav";
+      const model = input.model ?? DEFAULT_MODEL;
+      const voiceId = input.voiceId ?? DEFAULT_VOICE_ID;
+      const speed = input.speed ?? 1.0;
+      const volume = input.volume ?? 0;
+      const temperature = input.temperature ?? 0.7;
+      const latency = input.latency ?? "normal";
+
+      if (!voiceId) {
+        return {
+          success: false,
+          error:
+            "No voice ID. Set FISH_VOICE_ID or pass voiceId. Clone a voice at Fish Audio first.",
+        };
+      }
+
+      const absPath = isAbsolute(input.outputPath)
+        ? input.outputPath
+        : resolve(basePath, input.outputPath);
+
+      try {
+        mkdirSync(dirname(absPath), { recursive: true });
+      } catch {
+        // Directory may already exist
+      }
+
+      const body = {
+        text: input.text,
+        reference_id: voiceId,
+        format,
+        prosody: {
+          speed,
+          volume,
+          normalize_loudness: true,
+        },
+        temperature,
+        top_p: 0.7,
+        chunk_length: 300,
+        normalize: true,
+        latency,
+        max_new_tokens: 1024,
+        repetition_penalty: 1.2,
+        condition_on_previous_chunks: true,
+      };
+
+      try {
+        const res = await fetch(`${FISH_API_BASE}/v1/tts`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            model,
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          let errMsg = `Fish Audio TTS failed (HTTP ${res.status})`;
+          try {
+            const errData = await res.json();
+            errMsg = errData?.message || errMsg;
+          } catch {
+            // not JSON
+          }
+          return { success: false, error: errMsg };
+        }
+
+        const audioBuffer = Buffer.from(await res.arrayBuffer());
+        if (audioBuffer.length === 0) {
+          return {
+            success: false,
+            error: "Fish Audio TTS returned empty audio data.",
+          };
+        }
+
+        writeFileSync(absPath, audioBuffer);
+
+        return {
+          success: true,
+          path: absPath,
+          bytesWritten: audioBuffer.length,
+          format,
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: `Fish Audio TTS failed: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`,
+        };
+      }
+    },
+  });
+}
+
+// Default instance against workspace root
+export const fishTts = createFishTts();
+```
+
+### Factory with a custom base path
+
+Video projects often live under a dedicated directory (for example `workspace/hyperframes/`). Use the factory so relative paths resolve correctly:
+
+```typescript
+import { createFishTts } from "../tools/fish-audio-tts";
+
+// Paths like "my-video/assets/narration.wav" land under hyperframes/
+const fishTts = createFishTts("/absolute/path/to/workspace/hyperframes");
+```
+
+That is how the video-creator agent is wired: one tool instance scoped to the HyperFrames workspace, not the whole monorepo.
+
+## Step 4: Define a voice-aware agent
+
+You can attach `fish_tts` to any agent. Minimal example — a focused voice agent for testing:
+
+```typescript
+import { Agent } from "@mastra/core/agent";
+import { fishTts } from "../tools/fish-audio-tts";
+
+const AGENT_MODEL =
+  process.env.AGENT_MODEL ?? "google/gemini-2.5-flash";
+
+export const voiceAgent = new Agent({
+  id: "voice-agent",
+  name: "Voice Agent",
+  instructions: () => {
+    const iso = new Date().toISOString().split("T")[0];
+    return `TODAY IS ${iso}.
+
+You generate voiceover with the fish_tts tool using the user's cloned voice.
+
+## Rules
+- Always use fish_tts for audio. Never invent a local file path without calling the tool.
+- Write narration WITH [emotion] tags. Base technical tone: [confident] or [calm].
+- Highlights: [excited]. Problems: [frustrated]. Pauses: [break] or [long-break].
+- Place emotion tags at the START of the sentence they affect. One primary emotion per sentence.
+- Default speed 1.0. Default format wav.
+- After success, report the local path and bytes written.
+- If FISH_API_KEY or FISH_VOICE_ID is missing, say so clearly.`;
+  },
+  model: AGENT_MODEL,
+  tools: {
+    fishTts,
+  },
+  defaultOptions: { maxSteps: 10 },
+});
+```
+
+### Video agent instructions (the real use case)
+
+In a full video pipeline, voiceover is one step among research → design → script → TTS → build → render. The important instruction pattern:
+
+```text
+4b. VOICEOVER — Generate narration BEFORE building so the timeline can be sized to it.
+- Finalize the narration script from research.
+- Call fish_tts with text + output path like <project>/assets/narration.wav
+- Keep speed at 1.0
+- Embed emotion tags in the script, e.g.:
+  "[confident] Docker makes deployment simple. [break] [excited] But this new tool? It makes Docker look complicated."
+- After TTS: transcribe for word-level timestamps (e.g. hyperframes transcribe)
+- Drop audio into the composition as <audio class="clip">
+```
+
+And force a single TTS provider so the model does not wander:
+
+```text
+TTS: Always use fish_tts (cloned user voice).
+Do NOT use Kokoro, hyperframes tts, HeyGen, or ElevenLabs for narration.
+```
+
+### Register the agent
+
+In `src/mastra/index.ts`:
+
+```typescript
+import { Mastra } from "@mastra/core/mastra";
+import { assistant } from "./agents/assistant";
+import { voiceAgent } from "./agents/voice-agent";
+// or: import { videoCreator } from "./agents/video-creator";
+
+export const mastra = new Mastra({
+  agents: {
+    assistant,
+    voiceAgent,
+    // videoCreator,
+  },
+  // storage, logger, server — same as your existing app
+});
+```
+
+If you use domain flags (lighter deploys), gate video/voice behind env:
+
+```typescript
+// ENABLE_VIDEO=false to skip
+if (process.env.ENABLE_VIDEO !== "false") {
+  agents.videoCreator = videoCreator;
+}
+```
+
+## Step 5: Run and try it
+
+```bash
+# .env must include:
+# FISH_API_KEY=...
+# FISH_VOICE_ID=...
+# OPENROUTER_API_KEY=...   (or your LLM provider)
+# AGENT_MODEL=google/gemini-2.5-flash
+
+bun run dev
+# or: npm run dev
+```
+
+Open Studio at `http://localhost:4111`, select **Voice Agent** (or **Video Creator**), and try:
+
+```text
+Generate a 20-second voiceover for a blog intro about Mastra + Fish Audio.
+Save as voice/demo-narration.wav.
+Use [confident] for the base tone and [excited] once when mentioning voice cloning.
+```
+
+What you should see in traces:
+
+1. The agent drafts a short script with emotion tags
+2. `fish_tts` with `text`, `outputPath`, `speed: 1.0`
+3. Success with a local path and `bytesWritten`
+4. File on disk under your workspace
+
+### Sample narration with emotions
+
+```text
+[confident] If you already have a Mastra agent for research and coding, voice is the next unlock.
+[break]
+[calm] Clone your voice on Fish Audio in about fifteen seconds, then expose a single fish_tts tool.
+[excited] From there, every video can sound like you — without sitting in front of a mic again.
+```
+
+### After TTS (video pipeline)
+
+For HyperFrames-style caption timing:
+
+```bash
+npx hyperframes transcribe assets/narration.wav -d .
+# → transcript.json with word-level timestamps
+```
+
+Use those timestamps for scene cuts and word-synced captions. Do not invent timings.
+
+## Emotion cheat sheet (S2 / S2.1)
+
+Square brackets. Place at the **start** of the sentence. Free-form descriptions work (`[warm and friendly]`).
+
+| Use case | Tags |
+| --- | --- |
+| Technical base tone | `[confident]`, `[calm]` |
+| Feature highlight | `[excited]` |
+| Surprise / reveal | `[surprised]` |
+| Pain point | `[frustrated]` |
+| Aside / humor | `[sarcastic]`, `[laughing]` |
+| Build-up | `[curious]` |
+| Quiet tip | `[whispering]` |
+| Pause | `[break]`, `[long-break]` |
+| Combined | `[excited][laughing] We won!` |
+
+<Tabs>
+  <Tab name="Do">
+    <ul>
+      <li>One primary emotion per sentence</li>
+      <li>Match emotion to content (excited for wins, calm for setup steps)</li>
+      <li>Add a little "Ha ha" text after <code>[laughing]</code> when you want audible laughter</li>
+      <li>Prefer <code>[confident]</code> over <code>[happy]</code> for tutorials (happy reads salesy)</li>
+    </ul>
+  </Tab>
+  <Tab name="Don't">
+    <ul>
+      <li>Do not spam a tag every three words</li>
+      <li>Do not mix conflicting emotions in one breath</li>
+      <li>Do not use S1 <code>(parentheses)</code> with S2 models (and vice versa)</li>
+    </ul>
+  </Tab>
+</Tabs>
+
+Full list: [Fish Audio emotion guide](https://docs.fish.audio/developer-guide/core-features/emotions).
+
+## Where this fits with image + research agents
+
+Same Mastra app, specialized tools:
+
+| Agent | Job | Backend |
+| --- | --- | --- |
+| Assistant | Research, files, shell | TinyFish, workspace |
+| Image agent | Covers / thumbnails | [Kie.ai](/mastra-image-agent-kie-ai/) |
+| Video / voice | Narration + compositions | **Fish Audio** + HyperFrames |
+
+Pattern that works:
+
+1. Research topic (assistant tools)
+2. Generate cover (image agent)
+3. Script + `fish_tts` + render (video agent / pipeline)
+
+Keep tools thin and auth server-side. The LLM picks tools; TypeScript owns HTTP and files.
+
+### Multi-phase video pipeline
+
+If a single agent hits context limits, split phases (research → assets → design → script → **voiceover** → build → validate → render). Only the voiceover phase needs `fish_tts`. Later phases read `assets/narration.wav` and `transcript.json` from disk — no need to regenerate audio unless the script changes.
+
+## Production tips
+
+1. **Clone quality is everything.** Garbage sample → garbage every video. Re-record if it sounds off.
+2. **Default speed 1.0.** Agents love to crank speed; for explainers, natural pace keeps people listening.
+3. **Write emotion tags into the script.** Do not generate dry text then hope the model adds tags later.
+4. **Persist files in your workspace.** The tool already writes to disk — treat that path as source of truth for the next pipeline step.
+5. **One voice ID per brand.** Store `FISH_VOICE_ID` in env; allow `voiceId` override only when you truly multi-voice.
+6. **Pick the right model string.** Dev: `s2.1-pro-free`. Production SLA: `s2.1-pro`. Check [models overview](https://docs.fish.audio/developer-guide/models-pricing/models-overview) for current free-tier policy.
+7. **Keep secrets server-side.** `FISH_API_KEY` only in `.env` / host secrets.
+8. **Cap text length.** Long scripts: split into sections, generate multiple files, concat with ffmpeg if needed.
+9. **Separate agent from coding assistant.** Voice + video burns steps. A dedicated agent keeps the research assistant focused.
+
+## Troubleshooting
+
+<Accordion label="401 / auth errors" group="faq" expanded="true">
+Missing or wrong <code>Authorization: Bearer ...</code>. Confirm <code>FISH_API_KEY</code> is loaded by the process (Bun loads <code>.env</code> automatically; Node may need extra config).
+</Accordion>
+
+<Accordion label="Empty audio / zero bytes" group="faq">
+Rare empty body — treat as failure and retry. Check the Fish dashboard / status if it keeps happening.
+</Accordion>
+
+<Accordion label="Wrong voice / generic voice" group="faq">
+<code>reference_id</code> wrong or empty. Confirm <code>FISH_VOICE_ID</code> matches the clone in the Fish dashboard. Pass <code>voiceId</code> explicitly once to verify.
+</Accordion>
+
+<Accordion label="Emotions ignored" group="faq">
+Using S1 syntax <code>(happy)</code> with S2.1 models — switch to <code>[happy]</code>. Tags placed mid-sentence far from the words they should color — move to sentence start. Over-tagging — simplify to one cue per sentence.
+</Accordion>
+
+<Accordion label="Unnatural delivery" group="faq">
+Lower <code>temperature</code> toward 0.5 for consistency, or raise slightly for variety. Keep <code>speed</code> at 1.0. Space emotional changes.
+</Accordion>
+
+<Accordion label="Path not found / wrong directory" group="faq">
+Relative paths resolve against the tool's <code>basePath</code>. Video agents should use <code>createFishTts(HYPERFRAMES_PATH)</code> so <code>project/assets/narration.wav</code> lands next to the composition.
+</Accordion>
+
+<Accordion label="HTTP 429 / rate limits" group="faq">
+Back off and retry. Batch voiceovers with a short delay in workflows.
+</Accordion>
+
+<Accordion label="Agent uses Kokoro / another TTS" group="faq">
+Instructions not strong enough. Explicitly ban alternate TTS tools and list <code>fish_tts</code> as the only allowed voiceover path.
+</Accordion>
+
+## Related Fish Audio and Mastra guides
+
+- [Fish Audio review 2026](/fish-audio-review/) — pricing, free API, what is good and what is not
+- [Clone your voice with Fish Audio](/fish-audio-clone-voice/) — 2-minute walkthrough with screenshots
+- [Fish Audio vs ElevenLabs](/fish-audio-vs-elevenlabs/) — side-by-side quality, cloning, and yearly cost
+- [Fish Audio vs MiniMax](/fish-audio-vs-minimax/) — English vs Chinese quality, pricing, free API
+- [Build a Mastra agent](/build-ai-agent-mastra/) — files, web, browser, memory
+- [Mastra image agent with Kie.ai](/mastra-image-agent-kie-ai/) — covers and thumbnails
+- [Mastra vs Eve](/mastra-vs-eve-typescript-ai-agents/) — framework choice for TypeScript agents
+
+Once voice works, the same pattern extends to full autonomous video: research → storyboard → `fish_tts` → HTML composition → render. I keep that as a dedicated video agent (or multi-phase workflow) so step budgets and instructions stay clean.
+
+<Button text="Get started with Fish Audio" link="https://go.bitdoze.com/fish-audio" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Mastra Assistant Guide" link="/build-ai-agent-mastra/" variant="outline" color="purple" size="md" icon="arrow-right" />
+
+<Notice type="success" title="Next step">
+Add <code>FISH_API_KEY</code> and <code>FISH_VOICE_ID</code>, register the tool on an agent, open Studio, and generate a short <code>narration.wav</code> into the workspace. If something fails, check the tool error string first — most issues are a missing key, empty voice ID, or S1 vs S2 emotion syntax.
+</Notice>
