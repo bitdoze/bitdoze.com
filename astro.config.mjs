@@ -15,6 +15,8 @@ EventEmitter.defaultMaxListeners = 50;
 export default defineConfig({
   // Set the site URL for production
   site: "https://www.bitdoze.com",
+  // Match generated paths (dist/.../index.html) and avoid /foo vs /foo/ redirect collisions.
+  trailingSlash: "always",
   i18n: {
     defaultLocale: "en",
     locales: ["en", "es"],
@@ -22,6 +24,8 @@ export default defineConfig({
       prefixDefaultLocale: false,
     },
   },
+  // Only trailing-slash keys here. Defining both "/path" and "/path/" collides in Astro 7
+  // and becomes a hard error later. Non-slash legacy URLs are covered in public/_redirects.
   redirects: {
     "/tools/": "https://bit-tools.com/tools",
     "/tools/thumbnail-ideas/":
@@ -32,54 +36,30 @@ export default defineConfig({
       "https://bit-tools.com/tools/youtube-script-generator",
 
     // Retired category archives → new taxonomy
-    "/categories/cms": "/categories/web-development/",
     "/categories/cms/": "/categories/web-development/",
-    "/categories/vps": "/categories/self-hosting/",
     "/categories/vps/": "/categories/self-hosting/",
-    "/categories/dev-tools": "/categories/tools/",
     "/categories/dev-tools/": "/categories/tools/",
-    "/categories/tips": "/categories/tools/",
     "/categories/tips/": "/categories/tools/",
-    "/categories/node": "/categories/tools/",
     "/categories/node/": "/categories/tools/",
-    "/categories/python": "/categories/web-development/",
     "/categories/python/": "/categories/web-development/",
-    "/categories/astro": "/categories/web-development/",
     "/categories/astro/": "/categories/web-development/",
-    "/categories/woocommerce": "/categories/wordpress/",
     "/categories/woocommerce/": "/categories/wordpress/",
-    "/categories/security": "/categories/tools/",
     "/categories/security/": "/categories/tools/",
-    "/categories/cloudflare": "/categories/tools/",
     "/categories/cloudflare/": "/categories/tools/",
-    "/categories/blog": "/categories/web-development/",
     "/categories/blog/": "/categories/web-development/",
-    "/categories/personal": "/categories/web-development/",
     "/categories/personal/": "/categories/web-development/",
 
-    "/es/categories/cms": "/es/categories/web-development/",
     "/es/categories/cms/": "/es/categories/web-development/",
-    "/es/categories/vps": "/es/categories/self-hosting/",
     "/es/categories/vps/": "/es/categories/self-hosting/",
-    "/es/categories/dev-tools": "/es/categories/tools/",
     "/es/categories/dev-tools/": "/es/categories/tools/",
-    "/es/categories/tips": "/es/categories/tools/",
     "/es/categories/tips/": "/es/categories/tools/",
-    "/es/categories/node": "/es/categories/tools/",
     "/es/categories/node/": "/es/categories/tools/",
-    "/es/categories/python": "/es/categories/web-development/",
     "/es/categories/python/": "/es/categories/web-development/",
-    "/es/categories/astro": "/es/categories/web-development/",
     "/es/categories/astro/": "/es/categories/web-development/",
-    "/es/categories/woocommerce": "/es/categories/wordpress/",
     "/es/categories/woocommerce/": "/es/categories/wordpress/",
-    "/es/categories/security": "/es/categories/tools/",
     "/es/categories/security/": "/es/categories/tools/",
-    "/es/categories/cloudflare": "/es/categories/tools/",
     "/es/categories/cloudflare/": "/es/categories/tools/",
-    "/es/categories/blog": "/es/categories/web-development/",
     "/es/categories/blog/": "/es/categories/web-development/",
-    "/es/categories/personal": "/es/categories/web-development/",
     "/es/categories/personal/": "/es/categories/web-development/",
   },
   // Base path (set to '/' for most sites)
