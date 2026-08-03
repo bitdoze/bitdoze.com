@@ -1,0 +1,440 @@
+---
+date: 2026-08-03T00:00:00Z
+title: "Kie.ai Video Generation Guide: Veo 3.1, Kling 3.0 & Seedance API"
+meta_title: "Kie.ai Video Generation: Models, Pricing & API Examples"
+description: "Generate AI videos with Kie.ai: Veo 3.1, Kling 3.0, Seedance 2.0, Wan and more behind one API. Async tasks, webhooks, image-to-video, per-second pricing, and a working download script."
+image: "../../assets/images/26/08/kie-ai-video-generation.webp"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["kie-ai", "video-generation", "ai-tools"]
+canonical: "https://www.bitdoze.com/kie-ai-video-generation/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Images are the easy part of AI media. Video is where it gets annoying: Veo needs a Google key, Kling wants its own account, Seedance has its own quota, and every one of them generates asynchronously — you create a task, wait minutes, grab a URL that expires, and hope the whole pipeline did not break in between.
+
+[Kie.ai](https://go.bitdoze.com/kie-ai) solves the integration side: one API key, one credit wallet, and 30+ text-to-video models behind the same `createTask` flow — Veo 3.1, Kling 3.0, Seedance 2.0, Wan, Hailuo, Grok Imagine, PixVerse V6 and more. I already use Kie as the generation backend for blog covers and YouTube thumbnails ([Add an AI Image Agent to Mastra with Kie.ai](/mastra-image-agent-kie-ai/)). This guide covers the video side: which models exist, what they cost per second, how the async jobs work, and a copy-paste script that generates a video and downloads it to disk.
+
+<Button text="Try Kie.ai (Get API Key)" link="https://go.bitdoze.com/kie-ai" variant="solid" color="green" size="md" icon="arrow-right" />
+<Button text="Kie.ai Review 2026" link="/kie-ai-review/" variant="outline" color="purple" size="md" icon="arrow-right" />
+
+<Notice type="info" title="What this guide covers">
+<ListCheck>
+<ul>
+<li>Which video models Kie.ai exposes and what each is best at</li>
+<li>Verified pricing examples (per video and per second)</li>
+<li>The async flow: create task → poll or webhook → download</li>
+<li>The Veo 3.1 dedicated endpoint vs the Market `createTask` API</li>
+<li>Image-to-video with uploaded reference images</li>
+<li>A working Node script that generates and downloads an MP4</li>
+<li>Cost control and when to skip Kie for video</li>
+</ul>
+</ListCheck>
+</Notice>
+
+<Notice type="warning" title="Affiliate disclosure">
+Some Kie.ai links in this article are affiliate links (`https://go.bitdoze.com/kie-ai`). I use the product for media generation in my own stack. Model availability, ids, and prices change fast — always verify against the [Kie pricing page](https://kie.ai/pricing) and [docs](https://docs.kie.ai/) before you build on a specific number.
+</Notice>
+
+## Why use Kie.ai for video
+
+The pitch is the same as for images: one integration surface instead of one SDK per provider. Video makes it hurt more, because every provider has a different payload, different polling story, and different billing unit (per video, per second, per resolution tier).
+
+What the Market looks like right now (checked August 2026, verify live):
+
+| Model | Provider | What it is good at | Example price on Kie |
+|---|---|---|---|
+| Veo 3.1 Quality / Fast / Lite | Google | Cinematic 1080p, native audio, native 9:16 | Quality 1080p ~$1.28/video |
+| Veo 3 Fast | Google | Cheap quick clips with audio | ~$0.30–$0.40 per 8s |
+| Veo 3 Quality | Google | Premium cinematic output | ~$2.00 per 8s |
+| Kling 3.0 (std / pro / 4K) | Kuaishou | Multi-shot storytelling, 3–15s, element refs | $0.07/s (std, no audio) |
+| Kling 3.0 Turbo | Kuaishou | Faster, cheaper Kling 3.0 | Market price |
+| Kling 2.6 | Kuaishou | Native audio + speech | $0.28 per 5s HD |
+| Seedance 2.0 | ByteDance | Fast realistic generation (~5 min/job) | ~$0.057/s |
+| Seedance 2.0 Mini | ByteDance | Budget batch generation | Market price |
+| Wan 2.6 / 2.7 | Alibaba | Multi-shot 1080p, T2V/I2V/R2V | Market price |
+| Hailuo 2.3 | MiniMax | Expressive characters, complex motion | $0.15 per 6s |
+| MiniMax H3 (Hailuo-03) | MiniMax | 2K video, native stereo sound | Market price |
+| Grok Imagine | xAI | Realistic motion + native audio | $0.10 per 6s |
+| PixVerse V6, HappyHorse, Gemini Omni, Sora2, Runway Aleph | various | Newer / niche workflows | Market price |
+
+Platform rules that matter for video budgets:
+
+- **1 credit = $0.005**. A video task typically costs **100–500 credits** (docs range), which is why a single clip runs from cents to a couple of dollars.
+- **Failed tasks are not charged** (platform claim) — friendly when you batch-generate and retry.
+- **Credits never expire**; new accounts get free trial credits plus a Playground to test prompts before writing code.
+- Video URLs are **temporary** — you must download results yourself.
+
+I still keep the [full pricing and competitor comparison in the Kie.ai Review](/kie-ai-review/). This guide assumes you already decided Kie is worth a try and want the video workflow.
+
+## How Kie video generation works
+
+All Market video models share one async pattern:
+
+```text
+1. POST https://api.kie.ai/api/v1/jobs/createTask
+   Authorization: Bearer YOUR_API_KEY
+   body: { model, input, callBackUrl? }
+
+2. 200 + taskId   → task accepted, NOT finished
+
+3a. Poll GET /api/v1/jobs/recordInfo?taskId=...
+    until state = success | fail
+    (states: waiting | queuing | generating | success | fail)
+ OR
+3b. Wait for your callBackUrl webhook
+
+4. Parse resultUrls from resultJson
+5. Download the MP4 yourself — URLs expire fast
+```
+
+Two practical facts I hit constantly:
+
+- **Result URLs age out quickly.** The docs' best practice says to download immediately because generated content URLs typically expire after ~24 hours. Your account keeps task logs (~2 months) and media (~14 days), but treat the URL as short-lived and pull the file into your own storage the moment the task succeeds.
+- **Rate limits are real.** About 20 new requests per 10 seconds by default; rejected creates do not queue, so back off on HTTP 429.
+
+## Text-to-video: Kling 3.0 via the Market API
+
+Here is a verified `createTask` example using the Kling 3.0 model id (`kling-3.0/video`), straight from [docs.kie.ai](https://docs.kie.ai/market/kling/kling-3-0):
+
+```bash
+curl -X POST https://api.kie.ai/api/v1/jobs/createTask \
+  -H "Authorization: Bearer $KIE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kling-3.0/video",
+    "input": {
+      "prompt": "A red fox trots through a snowy pine forest at dawn, low tracking camera, soft volumetric light, cinematic",
+      "duration": "5",
+      "aspect_ratio": "16:9",
+      "mode": "std",
+      "sound": true,
+      "multi_shots": false
+    }
+  }'
+```
+
+Response — a task id, not a video:
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "taskId": "task_kling-3.0_1765187774173"
+  }
+}
+```
+
+Poll until it finishes:
+
+```bash
+curl "https://api.kie.ai/api/v1/jobs/recordInfo?taskId=task_kling-3.0_1765187774173" \
+  -H "Authorization: Bearer $KIE_API_KEY"
+```
+
+On success you get `state: "success"` and the download URL inside `resultJson`:
+
+```json
+{
+  "code": 505,
+  "msg": "success",
+  "data": {
+    "taskId": "task_kling-3.0_1765187774173",
+    "model": "kling-3.0/video",
+    "state": "success",
+    "resultJson": "{\"resultUrls\":[\"https://example.com/generated-video.mp4\"]}",
+    "progress": 100,
+    "creditsConsumed": 35
+  }
+}
+```
+
+Download it:
+
+```bash
+curl -L -o fox.mp4 "https://example.com/generated-video.mp4"
+```
+
+Kling 3.0 specific knobs worth knowing:
+
+- `mode`: `std`, `pro`, or `4K`. Resolutions map from `aspect_ratio` (16:9 → 1280x720 in std, etc.). 4K costs more and takes longer.
+- `multi_shots: true` switches to a `multi_prompt` array, each shot with its own prompt and duration (1–12s, max 500 chars per shot, total up to 15s).
+- `sound: true` generates native audio (dialogue, effects) — roughly doubles the price per second.
+- First/last frame images via `image_urls`; when you provide images, `aspect_ratio` becomes optional (auto-adapts).
+
+## Veo 3.1: the dedicated endpoint
+
+Veo 3.1 is not a Market `createTask` model — Kie gives it its own endpoint with extra reliability tooling at roughly 25% of Google's direct pricing:
+
+```bash
+curl -X POST https://api.kie.ai/api/v1/veo/generate \
+  -H "Authorization: Bearer $KIE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Aerial drone shot over a misty mountain lake at sunrise, cinematic 1080p",
+    "model": "veo3_fast",
+    "aspect_ratio": "9:16",
+    "generationType": "TEXT_2_VIDEO",
+    "callBackUrl": "https://your-app.example/kie/callback"
+  }'
+```
+
+Details from the [Veo 3.1 docs](https://docs.kie.ai/veo3-api/generate-veo-3-video):
+
+- Models: **Veo 3.1 Quality** (flagship), **Veo 3.1 Fast** (cost-efficient), **Veo 3.1 Lite** (highest volume). Example id in the docs: `veo3_fast`.
+- Generation modes: `TEXT_2_VIDEO`, `FIRST_AND_LAST_FRAMES_2_VIDEO` (transition between two images), `REFERENCE_2_VIDEO` (material-based, Fast/Lite only).
+- Native **9:16 and 16:9** at **1080p or 4K**. 4K goes through a separate endpoint and costs ~2x a Fast video.
+- All videos ship with a background audio track by default.
+- Optional `watermark` and `enableTranslation` fields.
+
+The response also returns a `taskId` (e.g. `veo_task_abcdef123456`); poll the same `recordInfo` endpoint or use the callback to learn when it is done.
+
+## Image-to-video with references
+
+Most video models accept a starting image, and Kling 3.0 also supports start + end frames. First upload your local image to Kie's file host, then reference the returned URL in the task.
+
+Upload (base64 pattern I use in the [Mastra image agent](/mastra-image-agent-kie-ai/)):
+
+```bash
+curl -X POST https://kieai.redpandaai.co/api/file-base64-upload \
+  -H "Authorization: Bearer $KIE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base64Data": "data:image/png;base64,iVBORw0KGgo...",
+    "uploadPath": "images",
+    "fileName": "fox.png"
+  }'
+```
+
+The response contains `downloadUrl` / `fileUrl` — use it as `image_urls[0]` in a Kling task:
+
+```json
+{
+  "model": "kling-3.0/video",
+  "input": {
+    "prompt": "The fox from the image turns its head and starts running through the snow",
+    "image_urls": ["https://kieai.redpandaai.co/.../fox.png"],
+    "duration": "5",
+    "sound": true,
+    "multi_shots": false
+  }
+}
+```
+
+For Veo 3.1, the same upload URL goes into `imageUrls` with `generationType: "REFERENCE_2_VIDEO"` (or `FIRST_AND_LAST_FRAMES_2_VIDEO` with two images). Uploaded files are temporary on Kie's host — pass them into a task right away.
+
+## Webhooks instead of polling
+
+Long video jobs are exactly where you want `callBackUrl`. Add it to any task and Kie notifies your endpoint when the task finishes, so nothing sits in a busy-wait loop. The exact payload keys vary by model — treat the callback as a trigger and always fetch `recordInfo` afterward for the canonical state and `resultUrls`.
+
+Minimal receiver in Node:
+
+```js
+import { createServer } from "node:http";
+
+createServer(async (req, res) => {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  const payload = JSON.parse(body || "{}");
+  console.log("Kie callback:", payload);
+  // Then: fetch recordInfo?taskId=... to get resultUrls and download.
+  res.writeHead(200);
+  res.end("ok");
+}).listen(8080, () => console.log("webhook on :8080"));
+```
+
+## One script that generates and downloads
+
+Here is a dependency-free script (Node 22+ or Bun) that creates a Market video task, polls with backoff, and saves the MP4 into `./videos/`:
+
+```js
+#!/usr/bin/env node
+// generate-video.mjs — Kie.ai text-to-video (Market API) + download
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const KIE_API = "https://api.kie.ai";
+const KEY = process.env.KIE_API_KEY;
+if (!KEY) {
+  console.error("Set KIE_API_KEY first (from https://kie.ai/api-key)");
+  process.exit(1);
+}
+
+async function createTask(model, input, callBackUrl) {
+  const res = await fetch(`${KIE_API}/api/v1/jobs/createTask`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model, input, callBackUrl }),
+  });
+  const json = await res.json();
+  if (json?.code !== 200) {
+    throw new Error(json?.msg || `createTask failed (HTTP ${res.status})`);
+  }
+  return json.data.taskId;
+}
+
+async function waitForVideo(taskId, { timeoutMs = 15 * 60 * 1000, intervalMs = 5000 } = {}) {
+  const start = Date.now();
+  let delay = intervalMs;
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(
+      `${KIE_API}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+      { headers: { Authorization: `Bearer ${KEY}` } },
+    );
+    const json = await res.json();
+    const data = json?.data;
+    if (!data) throw new Error(json?.msg || "No task data");
+    if (data.state === "success") {
+      const parsed = JSON.parse(data.resultJson || "{}");
+      const urls = parsed.resultUrls ?? [];
+      if (!urls.length) throw new Error("Task succeeded but no resultUrls");
+      return { urls, credits: data.creditsConsumed };
+    }
+    if (data.state === "fail") {
+      throw new Error(data.failMsg || "Task failed");
+    }
+    console.log(`  ${data.state} (progress ${data.progress ?? "?"}%)...`);
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 1.25, 15000);
+  }
+  throw new Error(`Timed out waiting for ${taskId}`);
+}
+
+async function main() {
+  const model = process.env.KIE_MODEL || "kling-3.0/video";
+  const prompt = process.argv[2] || "A red fox trots through a snowy pine forest at dawn, cinematic";
+  const outDir = join(process.cwd(), "videos");
+  mkdirSync(outDir, { recursive: true });
+
+  console.log(`Creating video task (${model})...`);
+  const taskId = await createTask(
+    model,
+    { prompt, duration: "5", aspect_ratio: "16:9", mode: "std", sound: true, multi_shots: false },
+    process.env.KIE_CALLBACK_URL,
+  );
+  console.log(`taskId: ${taskId}`);
+
+  const { urls, credits } = await waitForVideo(taskId);
+  const safeName = taskId.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const outPath = join(outDir, `${safeName}.mp4`);
+
+  console.log(`Downloading ${urls[0]}`);
+  const res = await fetch(urls[0]);
+  if (!res.ok) throw new Error(`Download failed HTTP ${res.status}`);
+  writeFileSync(outPath, Buffer.from(await res.arrayBuffer()));
+
+  console.log(`Saved ${outPath} (${credits ?? "?"} credits consumed)`);
+}
+
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});
+```
+
+Run it:
+
+```bash
+export KIE_API_KEY=your-key
+node generate-video.mjs "A slow pan over a neon city street at night, rain reflections, 9:16"
+# KIE_MODEL=kling-3.0/video KIE_CALLBACK_URL=https://your-app.example/kie node generate-video.mjs "..."
+```
+
+The script handles the three things that bite most people: task creation, polling with exponential backoff, and saving the file before the URL expires. If you prefer a typed version, the [Mastra image agent article](/mastra-image-agent-kie-ai/) shows the same pattern as TypeScript tools (`createTask` → `pollTaskUntilDone` → `downloadToGenerated`).
+
+## Which model should you pick
+
+| Goal | Pick |
+|---|---|
+| YouTube Shorts / TikTok 9:16 with audio | Veo 3.1 Fast (native 9:16) or Kling 3.0 std 9:16 |
+| Cinematic product/brand clip | Veo 3.1 Quality or Kling 3.0 pro |
+| Budget batch generation | Seedance 2.0 Mini, Grok Imagine, Veo 3 Fast |
+| Multi-shot story (3+ shots, one video) | Kling 3.0 with `multi_shots: true` |
+| Start image → motion (I2V) | Kling 3.0 `image_urls`, Veo `REFERENCE_2_VIDEO` |
+| Character/element consistency | Kling 3.0 `kling_elements` + `@element_name` in prompt |
+
+Prompt structure matters more than the model: subject, action, scene, camera movement, lighting, and ratio. Test in the free Playground before spending credits in a loop.
+
+## Cost control
+
+Model the budget per clip before you automate:
+
+| Job | Rough cost |
+|---|---|
+| Veo 3 Fast, 8s with audio | ~$0.30–$0.40 |
+| Veo 3 Quality, 8s | ~$2.00 |
+| Veo 3.1 Quality, 1080p | ~$1.28 |
+| Kling 3.0 std, 5s, no audio | ~$0.35 |
+| Kling 3.0 pro, 5s, with audio | ~$0.68 |
+| Seedance 2.0 | ~$0.057/s |
+| Grok Imagine, 6s | ~$0.10 |
+| Hailuo 2.3, 6s | ~$0.15 |
+
+Check [kie.ai/pricing](https://kie.ai/pricing) for live numbers. My rules: test prompts in the Playground, set a credit budget in the wallet, download immediately, and watch [task logs](https://kie.ai/logs) for `creditsConsumed` after the first few runs. At $0.10–$0.40 per Short, a batch of 10 is still less than one coffee — but a 15s 4K job with audio can cross a couple of dollars, so don't loop blindly.
+
+## Video agent in Mastra
+
+The image agent pattern transfers directly: an LLM picks a model, calls a `generate_kie_video` tool that wraps `createTask` + poll + download, a `get_kie_video_task` tool for status, and `get_kie_credits` before batch runs. That is how I plan to wire video into the [Mastra assistant](/build-ai-agent-mastra/) for @webdoze clips — same tools, different input schema per model.
+
+## Pros and cons
+
+### Pros
+
+- One key and one wallet for 30+ video models; switch models without new SDKs
+- Aggressive pricing vs fal.ai / Replicate on Veo (up to ~60–70% listed)
+- Failed tasks not charged (platform claim) — safe for retry loops
+- Credits never expire; free trial credits + Playground
+- Consistent async shape across Market models; `callBackUrl` webhooks supported
+- Media retention and logs give you a paper trail
+
+### Cons
+
+- Result URLs expire fast (~24h per docs) — your pipeline must download immediately
+- Jobs take minutes; not a synchronous API
+- Model ids and input fields differ per model — read each model's docs
+- Middleman risk: upstream provider outages hit you too
+- Rate limits (~20 new requests/10s) bite bulk automation without backoff
+- Per-second pricing adds up fast on long clips; 4K and audio multiply cost
+
+## FAQ
+
+<Accordion label="Is there a free trial for video generation?" group="faq" expanded="true">
+New Kie accounts get trial credits, and the Playground lets you test video prompts before writing code. Video jobs consume more credits than images (docs: typically 100–500 credits per generation), so the trial covers a handful of clips — enough to compare models.
+</Accordion>
+
+<Accordion label="Which model should I use for 9:16 Shorts?" group="faq">
+Veo 3.1 is the cleanest choice because 9:16 is a native output ratio (Fast for volume, Quality for polish). Kling 3.0 also supports 9:16 in std/pro modes if you want multi-shot storytelling or element references.
+</Accordion>
+
+<Accordion label="Veo 3.1 vs Kling 3.0 — which is cheaper?" group="faq">
+On Kie's listed prices, Veo 3.1 Quality 1080p is around $1.28 per video, while Kling 3.0 std runs $0.07/s without audio ($0.35 for 5s) and pro runs $0.09/s. For an 8s 1080p clip Kling std is cheaper; for cinematic quality with audio, compare Veo 3.1 Quality vs Kling pro on the live pricing page — the answer changes with duration and resolution.
+</Accordion>
+
+<Accordion label="Can I generate a video from my own image?" group="faq">
+Yes. Upload the image to Kie's file host (base64 upload → `fileUrl`), then pass it as `image_urls[0]` for Kling (start frame, or start + end frames) or `imageUrls` with `generationType: "REFERENCE_2_VIDEO"` for Veo 3.1.
+</Accordion>
+
+<Accordion label="How long do generated video URLs stay valid?" group="faq">
+Short. The docs recommend downloading immediately because generated content URLs typically expire after ~24 hours. Task logs stick around ~2 months and media ~14 days in your account, but your pipeline should pull the file to your own storage on success.
+</Accordion>
+
+<Accordion label="Do failed video tasks cost credits?" group="faq">
+The platform states failed tasks are not charged. My advice: still verify `creditsConsumed` in the task record after the first failures, and check the fail reason in `failMsg` / the logs page before retrying the same prompt.
+</Accordion>
+
+## Bottom line
+
+Kie.ai makes video generation practical for automation: one API for Veo 3.1, Kling 3.0, Seedance 2.0, Wan and the rest, async jobs with webhooks, and prices that undercut the official endpoints. The trade-offs are the ones you can code around — expiring URLs, minutes-long jobs, and per-model input differences.
+
+Start with the free credits, generate one clip in the Playground, then run the script above to make sure your download step works before you build the pipeline.
+
+<Button text="Get a Kie.ai API Key" link="https://go.bitdoze.com/kie-ai" variant="solid" color="green" size="md" icon="arrow-right" />
+<Button text="Kie.ai Image Agent Guide" link="/mastra-image-agent-kie-ai/" variant="outline" color="purple" size="md" icon="arrow-right" />
