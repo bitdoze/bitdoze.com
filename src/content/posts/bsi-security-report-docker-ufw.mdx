@@ -1,0 +1,244 @@
+---
+date: 2026-08-05T00:00:00Z
+title: "BSI Security Report from Hetzner: How I Secured My Docker Server"
+meta_title: "BSI Security Report from Hetzner: Docker + ufw Fix"
+description: "Hetzner forwarded me a BSI security report for an exposed server. How I audited open Docker ports, enabled ufw without breaking my reverse proxy, and hardened SSH."
+image: "../../assets/images/26/08/bsi-security-report-docker-ufw.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["ufw", "docker", "hetzner"]
+canonical: "https://www.bitdoze.com/bsi-security-report-docker-ufw/"
+---
+
+import Notice from "../../components/widgets/Notice.astro";
+import ListCheck from "../../components/widgets/ListCheck.astro";
+import Accordion from "../../components/widgets/Accordion.astro";
+
+A few days ago I got an email from [Hetzner](https://www.hetzner.com/) that started like this:
+
+> We have received a notification from the German Federal Office for Information Security (BSI) for (the IP address of) a server you have with us.
+
+No, I hadn't been hacked. No, BSI wasn't accusing me of anything. This is routine: BSI runs security scanners across the German IP space, finds open ports and exposed services, and notifies the hosting provider. The provider forwards the report to the customer. The email even says you don't need to respond, and that the issue is "usually fairly easy to secure."
+
+There was one catch: the original report (with the exact port and CVE) was an attachment I had to dig out of the email chain. I didn't want to wait for it, so I audited the server myself. It took about 20 minutes, and it turned out the BSI scanner had picked a good target: the box was wide open.
+
+Here's the full story: how I audited the server, the ufw rule set that fixed it, the gotcha that briefly broke my reverse proxy (and the single rule that fixed that), and the defense-in-depth steps I took after. If you run a VPS with Docker, run this audit today.
+
+## What a BSI report is (and what it isn't)
+
+The [BSI](https://www.bsi.bund.de/) is the German Federal Office for Information Security. Its computer emergency response team, CERT-Bund, scans German IP ranges for known vulnerabilities and exposed services: open databases, unauthenticated admin panels, outdated software with public CVEs. When they find something on an IP owned by a German provider, they send a report and the provider forwards it to you.
+
+The important facts:
+
+- It is not an accusation, a threat, or a takedown notice. No abuse was involved.
+- You don't need to reply to BSI or your provider.
+- The report names the exact service, port, and/or CVE. Fix that and you're done.
+- The same scan runs against every German IP. The finding means someone out there verified your exposure was reachable.
+
+My report boiled down to one theme: **services listening on `0.0.0.0` with no firewall at all**.
+
+## Step 1: Audit what's actually listening
+
+Three commands give you 95% of the picture.
+
+**1. Listening ports and their processes:**
+
+```bash
+sudo ss -tulpn
+```
+
+**2. Docker containers and their published ports:**
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Image}}'
+```
+
+**3. Firewall status:**
+
+```bash
+sudo ufw status verbose
+```
+
+Here's what the first two revealed on my server:
+
+| Port | Service | Risk |
+|---|---|---|
+| 5432 | PostgreSQL (pgvector container) | 🔴 Exposed database |
+| 5532 | PostgreSQL (second instance) | 🔴 Exposed database |
+| 8055 | Directus CMS | 🔴 Exposed admin panel |
+| 9999, 18888 | Hindsight app | 🔴 Exposed app |
+| 6806 | Siyuan notes | 🔴 Exposed app |
+| 3552 | Arcane | 🟡 Exposed app |
+| 22 | SSH | 🟡 Root login + password auth |
+| 80, 443 | Caddy reverse proxy | 🟢 Intended |
+
+And the third command said `Status: inactive`. Nothing was filtering anything. Every published Docker port was reachable from the internet, and SSH was accepting root logins with passwords.
+
+How does this happen? It's the classic Docker pattern: you publish a port during setup so you can reach the service, then you put a reverse proxy (Caddy, Traefik, nginx) in front of it, and you never remove the `ports:` block. The proxy works, the app works, and nobody notices the raw ports are still bound to `0.0.0.0` — directly reachable from the internet, bypassing your proxy, its rate limiting, and any auth you added there.
+
+BSI notices. So does every botnet scanner that crawls German IP space. Within minutes of the firewall going up, I watched probes for exactly the flagged port get dropped.
+
+## Step 2: Enable the firewall
+
+The fastest fix, and the one that closed every port at once, is ufw. This is the complete rule set that works for a Docker server with a public reverse proxy:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
+sudo ufw allow from 172.16.0.0/12 comment 'Docker bridge networks -> host services'
+sudo ufw allow in on tailscale0   # only if you use Tailscale
+sudo ufw --force enable
+```
+
+Rule by rule:
+
+- `default deny incoming` — drop every new inbound connection that isn't explicitly allowed. Established connections stay alive, so your current SSH session survives the enable.
+- `22/tcp` — SSH. If you only ever SSH over Tailscale, skip this rule and let the `tailscale0` rule cover it.
+- `80/tcp` and `443/tcp` — your reverse proxy. This is the only door public traffic should use.
+- `from 172.16.0.0/12` — **do not skip this one**; it's the rule that keeps your Docker reverse proxy working. Explained in Step 3.
+- `in on tailscale0` — if you use Tailscale, the mesh can reach everything (including admin ports) without opening them to the internet.
+- `--force` — skip the "this may disrupt existing ssh connections" prompt.
+
+Then verify:
+
+```bash
+sudo ufw status verbose
+```
+
+You want to see `Default: deny (incoming), allow (outgoing), deny (routed)` and your allow list below it.
+
+<Notice type="info" title="The routed policy is your friend">
+Recent ufw versions add a third default policy: `deny (routed)`. It applies to traffic forwarded through the host — which is exactly how Docker published ports work. So once ufw is active, published ports like `5432` are dropped from the internet even though they're still in your compose files. If you're on an older ufw and Docker ports still slip through, the fix is the `DOCKER-USER` iptables chain, covered in [how to fix Docker bypassing the firewall](/docker-bypasses-firewall/).
+</Notice>
+
+## Step 3: The gotcha — ufw killed my reverse proxy
+
+Here's the part that will save you a panic attack.
+
+My setup: an AI agent app running on the host on port 4111, with a Caddy container reverse-proxying a subdomain to it via `host.docker.internal:4111`. Standard pattern: the proxy lives in Docker, the backend lives on the host, and `host.docker.internal` (with `host-gateway` in `extra_hosts`) maps to the host's bridge gateway IP.
+
+After `ufw enable`, the subdomain came back with **502 Bad Gateway**. The Caddy container couldn't reach the host anymore. My first thought was that I'd misconfigured the firewall. I hadn't.
+
+The reason: `default deny incoming` does not only block the internet-facing interface. It drops **any new inbound connection to a host port, from any interface — including your Docker bridges**. The Caddy container connecting from `172.20.0.6` to the host gateway `172.17.0.1:4111` is "incoming" traffic as far as the host is concerned. Denied. Result: Caddy gets a refused connection and returns 502.
+
+The fix is the `172.16.0.0/12` rule from Step 2:
+
+```bash
+sudo ufw allow from 172.16.0.0/12 comment 'Docker bridge networks -> host services'
+```
+
+Docker creates its bridge networks in `172.17.0.0/16` (`docker0`), `172.18.x`, `172.19.x`, `172.20.x`, and so on. `172.16.0.0/12` covers all of them. This only lets *your own containers* reach host ports — the internet can't spoof a source address on your private bridges, so nothing is reopened to the outside.
+
+Add the rule, re-check `ufw status verbose`, and your proxy is back. In my case the site returned 200 immediately after.
+
+## Step 4: Verify — and watch the bots hit the wall
+
+Three checks.
+
+**1. Your public site still works** (run from the server itself so it goes out the public interface):
+
+```bash
+curl -sk -o /dev/null -w 'HTTP %{http_code}\n' https://your-domain.com
+```
+
+Expect `200`.
+
+**2. The firewall state:**
+
+```bash
+sudo ufw status verbose
+```
+
+**3. The satisfying part — the blocked probes:**
+
+```bash
+sudo journalctl -k --no-pager | grep 'UFW BLOCK' | tail -10
+```
+
+Within minutes of enabling ufw, the same kind of scanners that got me reported hit the wall:
+
+```
+kernel: [UFW BLOCK] IN=eth0 ... SRC=186.236.254.56 ... DPT=5432 SYN
+kernel: [UFW BLOCK] IN=eth0 ... SRC=178.128.214.243 ... DPT=23 SYN
+kernel: [UFW BLOCK] IN=eth0 ... SRC=91.230.168.148 ... DPT=50050 SYN
+```
+
+Port 5432 — exactly what the BSI report flagged — plus Telnet (23) and random ports. All dropped. That's the whole point: the exposure that got me reported is now invisible from the internet.
+
+## Step 5: Defense in depth (do this too)
+
+The firewall closes the doors, but it's one `sudo ufw disable` away from opening them again. Make the exposure structural:
+
+**1. Unpublish ports in your compose files.** If only other containers need to reach a service, delete the `ports:` block entirely — containers talk over the Docker bridge using the service name. If you need host-local access (say, a local `psql`), bind to loopback instead of `0.0.0.0`:
+
+```yaml
+ports:
+  - "127.0.0.1:5432:5432"
+```
+
+**2. Harden SSH.** My server had `PermitRootLogin yes` and password authentication enabled. Since you have keys (confirm with `ls ~/.ssh/id_ed25519.pub`), add a drop-in config:
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/99-hardening.conf <<'EOF'
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+EOF
+```
+
+Test before restarting, and keep a second SSH session open:
+
+```bash
+sudo sshd -t && sudo systemctl restart ssh
+```
+
+A full walkthrough of key-based auth, fail2ban, and the rest is in the [SSH server hardening guide](/secure-ssh-server-linux/).
+
+**3. Put auth on anything that doesn't have it.** Admin panels and dev tools without their own login should sit behind basic auth at the proxy — same idea as [Traefik basic authentication](/traefik-basic-authentication/).
+
+**4. Add a behavior layer.** A firewall is static; tools like [CrowdSec](/crowdsec-secure-server/) watch logs and block offending IPs dynamically. Worth having on top.
+
+## Checklist
+
+Here's the exact sequence I'd run on a fresh, previously-exposed server:
+
+<ListCheck>
+<ul>
+<li>Audit with <code>sudo ss -tulpn</code>, <code>docker ps</code>, and <code>sudo ufw status verbose</code></li>
+<li>Write down which ports are supposed to be public (usually only 80 and 443)</li>
+<li>Add the ufw rules from Step 2 <strong>before</strong> enabling — including the <code>172.16.0.0/12</code> Docker bridge rule</li>
+<li>Enable with <code>sudo ufw --force enable</code></li>
+<li>Verify your site returns 200 and check <code>journalctl -k | grep 'UFW BLOCK'</code></li>
+<li>Remove or loopback-bind published ports in every compose file</li>
+<li>Harden SSH (drop-in config, <code>sudo sshd -t</code>, restart, keep a second session)</li>
+<li>Re-check from an external network that only 22, 80, 443 respond</li>
+</ul>
+</ListCheck>
+
+## FAQ
+
+<Accordion label="Do I have to reply to BSI or my hosting provider?" group="faq" expanded="false">
+No. The notification is informational. Hetzner's forwarding email says so explicitly: "You do not need to send us, or the BSI, a response." If you want to confirm the exact finding, look for the ticket number (`CB-Report#...`) in the original report and use it if you ever contact [certbund@bsi.bund.de](mailto:certbund@bsi.bund.de). Do not reply to the sender address of the report email — it's unmonitored.
+</Accordion>
+
+<Accordion label="Does ufw actually block Docker published ports?" group="faq" expanded="false">
+On modern versions, yes. ufw's `deny (routed)` default policy applies to forwarded traffic, which is how Docker published ports reach containers, so they get dropped from the internet. On older ufw versions Docker's own iptables rules were evaluated before the firewall and could bypass it entirely — the `DOCKER-USER` chain fix is documented in [how to fix Docker bypassing the firewall](/docker-bypasses-firewall/). Either way, the belt-and-suspenders approach is to unpublish the ports in compose.
+</Accordion>
+
+<Accordion label="Why did my reverse proxy return 502 after enabling ufw?" group="faq" expanded="false">
+Because `default deny incoming` also blocks container-to-host traffic over the Docker bridge. If your proxy container reaches a host service via `host.docker.internal:PORT`, the connection lands on the host's INPUT chain as incoming traffic and gets dropped. Allow the Docker bridge range with `sudo ufw allow from 172.16.0.0/12` and the proxy connects again.
+</Accordion>
+
+<Accordion label="Should I still fix the ports if the firewall blocks them?" group="faq" expanded="false">
+Yes. The firewall is one command away from being disabled (accidentally or during troubleshooting), and then every published port is public again. Removing or loopback-binding `ports:` in compose makes the exposure structural instead of incidental. It also removes the attack surface from the container's perspective — fewer reachable sockets, fewer CVEs that matter.
+</Accordion>
+
+## The takeaway
+
+The BSI notification wasn't a threat — it was a free vulnerability scan, courtesy of the German government. The exposed services were my own doing: published Docker ports left behind after setup, no host firewall, and weak SSH defaults. Twenty minutes of auditing plus one firewall rule set closed all of it, and the one real surprise (the Docker bridge vs. ufw gotcha) is now a one-line rule in my standard server setup.
+
+If you're self-hosting on a VPS, spend those 20 minutes today. The scanners certainly will.
