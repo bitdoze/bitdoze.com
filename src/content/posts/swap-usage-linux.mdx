@@ -1,292 +1,524 @@
 ---
-date: 2024-10-24T00:00:00Z
-title: "How to Identify Which Processes Are Using Swap Space in Linux"
-description: "Learn how to see which process is using the swap on a linux system like Ubuntu or RedHat"
+date: 2026-08-07T00:00:00Z
+title: "How to Identify Processes Using Swap Space in Linux"
+meta_title: "Identify Processes Using Swap in Linux (Complete Guide)"
+description: "Find which processes use swap space in Linux with smem, /proc/VmSwap, and shell scripts. Covers swappiness tuning, swap troubleshooting, and container swap tracking."
 image: "../../assets/images/24/10/swap-usage-linux.jpeg"
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["linux", "swap", "memory-management", "system-administration"]
 canonical: "https://www.bitdoze.com/swap-usage-linux/"
 ---
 
-Understanding and monitoring swap space usage in Linux is crucial for system administrators and power users. Swap space serves as an extension of physical RAM, providing additional memory when the system runs out of physical memory. However, excessive swap usage can severely impact system performance, making it essential to identify and manage processes that heavily utilize swap space.
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
 
-In this comprehensive guide, we'll explore how to effectively monitor swap usage and identify problematic processes using both built-in tools and a custom script. This knowledge is crucial for [maintaining optimal system performance and troubleshooting Linux systems](https://www.bitdoze.com/linux-commands/).
+When a Linux server starts swapping, performance tanks. The problem: standard tools like `docker stats` and even `top` don't always show you the real swap picture. You need to know which processes are actually consuming swap space so you can fix the root cause, not just throw RAM at it.
 
-## Understanding Linux Swap Space
+This guide covers three reliable approaches: `smem` (the tool I reach for first), reading `/proc` directly (no dependencies needed), and `vmstat` for detecting active swap thrashing. You'll also get practical coverage of swappiness tuning, container swap tracking with cgroups v2, and modern compressed swap with zswap/zram. All of it applies to any Linux distro: Ubuntu, Debian, RHEL, Fedora, and the rest.
 
-Swap space serves as an extension of physical RAM, crucial for system stability and performance. When physical memory becomes scarce, the Linux kernel moves less frequently accessed memory pages to swap space, preventing system crashes due to memory exhaustion.
+If you need a broader refresher on Linux administration, start with these [essential Linux commands](https://www.bitdoze.com/linux-commands/).
 
-### Types of Swap Space
+## Quick diagnostic: 30-second swap health check
 
-1. **Swap Partition**
-   - Dedicated partition on storage device
-   - Fixed size, better performance
-   - Requires partition management
+Before diving into per-process details, run these three commands to gauge whether you even have a problem.
 
-2. **Swap File**
-   - Regular file in filesystem
-   - Flexible size, easily adjustable
-   - Slightly lower performance
+<Notice type="info" title="Run these first">
+If swap is under 20% and vmstat shows si/so near zero, you're fine. The rest of this guide is optional reading.
+</Notice>
 
-### Recommended Swap Sizes
-
-| System RAM | Recommended Swap Size | Use Case |
-|------------|---------------------|-----------|
-| 2GB or less | 2x RAM | Desktop/Small Server |
-| 2GB to 8GB | Equal to RAM | General Server |
-| 8GB to 64GB | 0.5x RAM | High-Memory Server |
-| 64GB+ | Minimum 4GB | Large Production Server |
-
-[Proper system resource management](https://www.bitdoze.com/monitor-cpu-usage-and-send-email-alerts-in-linux/) is crucial for maintaining optimal performance, particularly when dealing with swap space.
-
-
-## Methods to Check Swap Usage
-
-### Basic Commands
-
-Before diving into process-specific swap usage, let's look at system-wide swap information using basic commands:
+<ListCheck>
+<ul>
+<li><code>free -h</code>: Shows total/used/available swap at a glance</li>
+<li><code>smem -s swap -r -k | head</code>: Top swap-consuming processes (install smem first if needed)</li>
+<li><code>vmstat 1 5</code>: Shows if swap is actively being read/written (si/so columns)</li>
+</ul>
+</ListCheck>
 
 ```bash
-# Check overall memory and swap usage
+# 1. System-wide memory overview
 free -h
 
-# Output
+# 2. Top 10 swap consumers
+smem -s swap -r -k | head -10
 
-root@cloud:~# free -h
-               total        used        free      shared  buff/cache   available
-Mem:           7.6Gi       1.8Gi       679Mi        35Mi       5.5Gi       5.8Gi
-Swap:          8.0Gi       294Mi       7.7Gi
-
-
-# View swap statistics
-swapon --show
-
-# Output
-root@cloud:~# swapon --show
-NAME      TYPE SIZE   USED PRIO
-/swapfile file   8G 294.3M   -2
-
-# Monitor real-time system statistics
-top
+# 3. Is swap actively being used? (5 samples, 1s interval)
+vmstat 1 5
 ```
 
-### Using the /proc Filesystem
+**What "healthy" looks like:**
+- `free -h`: Swap used under 20% of total, "available" column still has headroom
+- `smem`: Most processes show 0 kB swap, top consumer under 50 MB
+- `vmstat`: `si` and `so` columns at 0 or near-zero
 
-The `/proc` filesystem provides detailed information about running processes and system resources. You can manually check swap usage for a specific process using:
+**What "concerning" looks like:**
+- `free -h`: Swap used climbing past 50%, "available" under 1 GB
+- `vmstat`: `si`/`so` consistently in the hundreds of KB/s, the system is actively thrashing
+
+For more on [monitoring system resources on Linux](https://www.bitdoze.com/monitor-cpu-usage-and-send-email-alerts-in-linux/), including alerting when swap usage spikes.
+
+## Understanding Linux swap space
+
+Swap space acts as overflow for physical RAM. When the kernel runs low on memory, it moves less-frequently-used pages to swap, a partition or file on disk. This prevents the OOM killer from firing immediately, but at a cost: disk I/O is orders of magnitude slower than RAM.
+
+Without any swap, hitting the memory ceiling means the OOM killer starts terminating processes. With swap, the system degrades gradually instead of crashing, but excessive swapping ("thrashing") can make the system feel frozen.
+
+### Swap partition vs swap file
+
+| | Swap Partition | Swap File |
+|---|---|---|
+| Setup | Dedicated partition on disk | Regular file in a filesystem |
+| Performance | Slightly better on spinning disks (avoids filesystem overhead) | On SSDs, the difference is negligible |
+| Flexibility | Fixed size, requires repartitioning to resize | Easy to create, resize, or remove |
+| Caveats | N/A | btrfs has restrictions on swap files (must be on a non-compressed, non-COW subvolume) |
+
+On a typical VPS or home server with SSDs, swap files are the pragmatic default. No partitioning needed, and you can [set up shared storage on Linux](https://www.bitdoze.com/setup-nfs-linux/) alongside swap without worrying about partition layout.
+
+### How much swap should you allocate?
+
+| System RAM | Recommended Swap | Notes |
+|---|---|---|
+| 2 GB or less | 2x RAM | Desktops, small VPS |
+| 2-8 GB | Equal to RAM | General-purpose servers |
+| 8-64 GB | 0.5x RAM | High-memory servers |
+| 64 GB+ | Minimum 4 GB | Large production servers |
+
+These are rough guidelines. Modern RHEL documentation says swap sizing depends on workload and whether you use hibernation, not just RAM size.
+
+<Notice type="info" title="VPS swap defaults">
+Most cloud providers ship VPS instances with zero swap. For a server running Docker containers or databases, a 1-2 GB swap file is a cheap safety net. If you're [setting up a home server](https://www.bitdoze.com/best-mini-pc-home-server/), the same logic applies. A small swap file prevents OOM kills during memory spikes.
+</Notice>
+
+## Check per-process swap usage with smem
+
+`smem` is the best tool for this job. It reads swap data from `/proc` but gives you sorting, filtering, per-user views, and human-readable output. It's packaged in every major distro.
+
+### Installing smem
+
+<Tabs>
+<Tab name="Debian / Ubuntu">
+```bash
+sudo apt install smem
+```
+</Tab>
+<Tab name="RHEL / Fedora">
+```bash
+sudo dnf install smem
+```
+</Tab>
+</Tabs>
+
+Verify the installation:
 
 ```bash
-grep VmSwap /proc/<PID>/status
+smem --version
+```
 
-# Output
-root@cloud:~# grep VmSwap /proc/1438/status
+**Failure mode:** If you get "command not found" after installing, your distro may not package it. Fallback: `pip install smem` (requires Python 3).
+
+### Top swap-consuming processes
+
+```bash
+smem -s swap -r -k
+```
+
+Flags: `-s swap` sort by swap column, `-r` reverse (descending), `-k` show units in KB/MB/GB.
+
+Sample output:
+
+```
+  PID User     Command                         Swap      USS      PSS      RSS
+ 1315 root     /usr/bin/python litellm         60.1M    89.2M    91.4M    98.1M
+1746  root     /usr/bin/python gunicorn       109.4M   112.3M   114.8M   120.2M
+1588  root     node next-server (v14)          41.5M    52.1M    54.3M    60.8M
+ 780  root     /usr/bin/containerd             3.3M     18.7M    19.2M    25.4M
+ 875  root     /usr/bin/dockerd                6.4M     42.1M    43.8M    52.3M
+```
+
+The **Swap** column is what matters here. USS (Unique Set Size) and PSS (Proportional Set Size) show physical memory usage, useful context but separate from swap.
+
+### Filtering by process name
+
+```bash
+# Only postgres processes
+smem -P postgres -s swap -r
+
+# Per-user view (useful for multi-tenant servers)
+smem -u -s swap -r
+
+# Show percentages instead of absolute values
+smem -s swap -r -p | head -20
+```
+
+These are practical for Docker/Dokploy hosts where you want to quickly check if a specific database or application is the swap hog.
+
+## Using /proc to find swap usage by process
+
+When you can't install `smem` (minimal containers, restricted environments), the `/proc` filesystem has everything you need. This is what `smem` reads under the hood.
+
+### Reading VmSwap from /proc/PID/status
+
+The kernel tracks per-process swap in `/proc/<PID>/status` as the `VmSwap` field:
+
+```bash
+# Check swap for a specific PID
+grep VmSwap /proc/1438/status
+```
+
+```
 VmSwap:      512 kB
 ```
 
-**For all processes**
-```sh
-for i in /proc/[0-9]*; do
-  awk '/VmSwap|Name|Pid/{printf $2 " " $3}END{ print ""}' $i/status 2>/dev/null
+One-liner to list all processes with non-zero swap:
+
+```bash
+for f in /proc/[0-9]*/status; do
+    awk '/^Name:/{n=$2} /^Pid:/{p=$2} /^VmSwap:/{if($2>0) print p, $2, n}' "$f" 2>/dev/null
+done | sort -k2 -nr | head -20 | column -t
+```
+
+**Failure mode:** "No such file or directory" errors are normal. A process can exit between the moment you start iterating and the moment you read its `/proc` entry. Ignore them.
+
+### The smaps_rollup method (kernel 4.14+)
+
+For an efficient aggregate of all memory mappings, `smaps_rollup` is faster than reading the full `smaps` file (which can be thousands of lines per process):
+
+```bash
+# All processes with non-zero swap, sorted descending
+grep -H 'Swap:' /proc/*/smaps_rollup 2>/dev/null | awk -F'[: ]' '{print $1, $4}' | sort -t: -k2 -nr | head -20
+```
+
+`/proc/*/smaps_rollup` has been available since kernel 4.14 (2017). Every currently supported distro has it.
+
+```bash
+# Verify your kernel version
+uname -r
+```
+
+Note: Reading the full `/proc/<PID>/smaps` for every process is expensive. `htop` had performance issues with this (see [htop issue #1712](https://github.com/htop-dev/htop/issues/1712)). Use `smaps_rollup` instead.
+
+### Clean awk script (no dependencies)
+
+Save this as `swap-users.sh` for a reusable, readable script:
+
+```bash
+#!/bin/bash
+# swap-users.sh - List processes using swap, sorted by usage
+printf '%-10s %12s  %s\n' "PID" "Swap" "Command"
+for s in /proc/[0-9]*/status; do
+    awk '/^Name:/{n=$2} /^Pid:/{p=$2} /^VmSwap:/{if($2>0) printf "%-10s %10s kB  %s\n",p,$2,n}' "$s" 2>/dev/null
+done | sort -k2 -n -r
+```
+
+Make it executable and run:
+
+```bash
+chmod +x swap-users.sh
+./swap-users.sh
+```
+
+Output:
+
+```
+PID             Swap  Command
+1746         112000 kB  gunicorn
+1387          12416 kB  gunicorn
+449142        17536 kB  node
+1588          42496 kB  next-server
+1315          61568 kB  litellm
+812            9344 kB  unattended-upgr
+875            6528 kB  dockerd
+780            3328 kB  containerd
+```
+
+**Verify:** Output should be sorted by swap usage descending. Empty output means no processes are using swap (which is fine).
+
+For a quick inline version without saving a file:
+
+```bash
+for f in /proc/[0-9]*/status; do
+    awk '/^Name:/{n=$2}/^Pid:/{p=$2}/^VmSwap:/{if($2>0)print p,$2,n}' "$f" 2>/dev/null
+done | sort -k2 -nr | head -20 | column -t
+```
+
+## Other tools: top, htop, and vmstat
+
+The original article mentioned `top` and `htop` as monitoring tools. There are important caveats.
+
+### top's SWAP column: what it actually shows
+
+<Notice type="warning" title="top SWAP column trap">
+If your <code>top</code> shows processes using hundreds of MB of swap while <code>free -h</code> shows only a few MB total, you're running the old <code>procps</code> top that computes SWAP = VIRT - RES. This is not real swap usage. It includes memory-mapped files, video memory, and other virtual memory. Upgrade to <code>procps-ng</code> (standard on Ubuntu 16.04+, RHEL 7+, Debian 9+) or use <code>smem</code> instead.
+</Notice>
+
+On modern distros, `top` from procps-ng (version 3.3.10+) reads `VmSwap` from `/proc` correctly. Check your version:
+
+```bash
+top -v
+```
+
+If it shows `procps-ng` and a version ≥3.3.10, the SWAP column is accurate. If it shows just `procps` (no `-ng`), treat the SWAP column as fiction.
+
+Source: [Red Hat KB 237633](https://access.redhat.com/solutions/237633), [htop FAQ](https://hisham.hm/htop/index.php?page=faq)
+
+### Why htop doesn't have a SWAP column
+
+htop deliberately omits a per-process swap column. The reason: shared memory pages make per-process swap accounting unreliable. A shared library page can be "charged" to multiple processes, inflating the numbers. The htop developers decided it was better to show no swap column than a misleading one.
+
+Use `smem` or the `/proc` methods above for per-process swap data.
+
+### Detecting swap thrashing with vmstat
+
+`vmstat` shows real-time swap activity. The `si` (swap in) and `so` (swap out) columns are the key indicators:
+
+```bash
+vmstat 1 5
+```
+
+```
+procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st
+ 1  0 294000 678528  12032 5712832    0    0     2    15   89   12  3  1 96  0  0
+ 0  0 294000 678528  12032 5712832    0    0     0     0  102   15  2  1 97  0  0
+ 0  0 294000 678528  12032 5712832    0    0     0     0   98   12  1  1 98  0  0
+```
+
+<Notice type="info" title="Interpreting si/so">
+<ul>
+<li><strong>si/so near zero</strong>: Normal. Swap space is allocated but not actively being read/written.</li>
+<li><strong>si/so in the hundreds of KB/s</strong>: Actively swapping. Investigate with smem.</li>
+<li><strong>si/so in the thousands of KB/s</strong>: Thrashing. The system is spending more time swapping than doing work. Take action immediately.</li>
+</ul>
+</Notice>
+
+With `sysstat` installed, you can also use:
+
+```bash
+# Swap activity report (10 samples, 1s interval)
+sar -S 1 10
+
+# Page fault and paging rate
+sar -B 1 10
+```
+
+If swap thrashing is impacting your server performance, consider [benchmarking your cloud server](https://www.bitdoze.com/benchmark-cloud-servers/) to compare upgrade options.
+
+## Swap and Docker containers
+
+If you run Docker or Dokploy, this section is critical. Standard container monitoring doesn't show swap at all.
+
+### Why docker stats doesn't show swap
+
+`docker stats` shows a "MEM USAGE" column, but that's RSS + page cache. It does not include swap. A container could be swapping heavily and `docker stats` would show nothing unusual.
+
+This is a common blind spot for anyone [monitoring server and Docker resources](https://www.bitdoze.com/sever-monitoring/). The memory numbers in `docker stats` look fine while the system is actually thrashing because a container's anonymous pages are piling up in swap.
+
+For [Docker management commands](https://www.bitdoze.com/docker-commands/) beyond memory monitoring.
+
+### Tracking container swap with cgroups v2
+
+On systems with cgroups v2 (default on Ubuntu 22.04+, Fedora 31+, Debian 11+), you can read per-container swap usage directly:
+
+```bash
+# Check cgroups version (should show "cgroup2fs")
+stat -fc %T /sys/fs/cgroup/
+
+# Swap used by a specific container
+cat /sys/fs/cgroup/system.slice/docker-<container-id>.scope/memory.swap.current
+```
+
+The value is in bytes. Convert to MB: divide by 1048576.
+
+Loop through all containers:
+
+```bash
+for cg in /sys/fs/cgroup/system.slice/docker-*.scope; do
+    name=$(basename "$cg")
+    bytes=$(cat "$cg/memory.swap.current" 2>/dev/null)
+    if [ -n "$bytes" ] && [ "$bytes" -gt 0 ]; then
+        mb=$((bytes / 1048576))
+        echo "$name: ${mb} MB"
+    fi
 done
 ```
 
-## Understanding the Swap Monitoring Script
+<Notice type="info" title="Requires cgroups v2">
+This only works on cgroups v2. If <code>stat -fc %T /sys/fs/cgroup/</code> returns <code>tmpfs</code> instead of <code>cgroup2fs</code>, you're on cgroups v1. Enabling cgroups v2 requires kernel boot parameters. Check your distro documentation.
+</Notice>
 
-Our custom script provides a more detailed view of per-process swap usage. Let's break down how it works:
+Also useful: if you're [reclaiming disk space from Docker](https://www.bitdoze.com/clean-docker-overlay2-dir/), remember that swap files also consume disk space.
 
-```sh
-# Print header
-printf '%12s %15s  %s\n' Pid Swap\ Usage Command
+## Tuning swap behavior with vm.swappiness
 
-# Sort by swap usage (2nd column)
-sort -nk2 < <(
-   sed -ne '
-       /^Name:/h;
-       /^Pid:/H;
-       /^VmSwap:/!b
-       H
-       x
-       s/^.*:\s*\(.*\)\n.*:\s*\(.*\)\n.*:\s*\(.*\) kB/           \2           \3  \1/;
-       s/^ *\([0-9 ]\{12\}\)\b *\([0-9 ]\{12\}\)\b /\1 \2 kB /p;
-       s/^ *[0-9]\+ \+\([0-9]\+\) .*/+\1/;
-       w /dev/fd/9' /proc/[1-9]*/status 9> >(
-           printf 'Total:%19d Kb\n' $(( $( cat ) ))
-       )
-)
-```
+The existing swappiness guidance in most articles is oversimplified or outdated. Here's what actually matters.
 
-The script performs these key functions:
-- Reads process information from /proc
-- Extracts PID, swap usage, and process name
-- Sorts results by swap usage
-- Provides a total swap usage summary
+### What swappiness actually controls
 
-## Implementing the Solution
+Swappiness is not "how aggressively the kernel swaps." It controls the kernel's weighting between reclaiming two types of memory pages:
 
-To use the script effectively, follow these steps:
+- **File-backed pages** (page cache) — reading them back from disk is fast (sequential I/O on the filesystem)
+- **Anonymous pages** (application memory) — reading them back requires swap I/O (random I/O)
 
-1. Create a new file (e.g., `swap-usage.sh`)
-2. Copy the script contents into the file
-3. Make the script executable:
-   ```bash
-   chmod +x swap-usage.sh
-   ```
-4. Run the script:
-   ```bash
-   ./swap-usage.sh
-   ```
+A higher swappiness value tells the kernel to prefer evicting anonymous pages to swap. A lower value tells it to prefer dropping page cache.
 
-The output will look similar to:
-```sh
-Pid      Swap Usage  Command
-1461            0 kB  dumb-init
-1822            0 kB  containerd-shim
-1943            0 kB  containerd-shim
-2113            0 kB  containerd-shim
-2309155            0 kB  tail
-2309985            0 kB  containerd-shim
-2310006            0 kB  npm run start
-2310051            0 kB  sh
-2310052            0 kB  node
-2674878            0 kB  multipathd
-3167786            0 kB  pickup
-3169626            0 kB  systemd
-3169629            0 kB  (sd-pam)
-3169717            0 kB  bash
-3169827            0 kB  sort
-3169828            0 kB  sed
-449122            0 kB  containerd-shim
-449189            0 kB  sh
-449190            0 kB  node
-449449            0 kB  containerd-shim
-458198            0 kB  tail
-458206            0 kB  tail
-458286            0 kB  tail
-459036            0 kB  tail
-459133            0 kB  tail
-459142            0 kB  tail
-463698            0 kB  tail
-463964            0 kB  tail
-504465            0 kB  tail
-504706            0 kB  tail
-562701            0 kB  tail
-564403            0 kB  tail
-712927            0 kB  tail
-779            0 kB  atd
-988208            0 kB  tail
-1694          128 kB  master
-1696          128 kB  qmgr
-756178          128 kB  polkitd
-762          128 kB  cron
-769          128 kB  qemu-ga
-902          128 kB  agetty
-905          128 kB  agetty
-91220          128 kB  agent
-449468          256 kB  traefik
-763          256 kB  dbus-daemon
-813          256 kB  rsyslogd
-  1          384 kB  systemd
-449412          384 kB  docker-proxy
-1362          512 kB  containerd-shim
-1438          512 kB  containerd-shim
-264777          512 kB  systemd-udevd
-449082          512 kB  docker-proxy
-91200          512 kB  containerd-shim
-1295          640 kB  containerd-shim
-1829          640 kB  docker-proxy
-264759          640 kB  systemd-journal
-264766          640 kB  sshd
-264771          640 kB  systemd-timesyn
-449099          640 kB  docker-proxy
-449392          640 kB  docker-proxy
-449403          640 kB  docker-proxy
-449420          640 kB  docker-proxy
-778          640 kB  systemd-logind
-3169622          728 kB  sshd
-1808          768 kB  docker-proxy
-1915          768 kB  docker-proxy
-1926          768 kB  docker-proxy
-264780          768 kB  systemd-network
-2043         1024 kB  redis-server
-524744         1024 kB  postgres
-653062         1024 kB  postgres
-653861         1024 kB  postgres
-654028         1024 kB  postgres
-654029         1024 kB  postgres
-654030         1024 kB  postgres
-654031         1024 kB  postgres
-654032         1024 kB  postgres
-654033         1024 kB  postgres
-2829330         1124 kB  postgres
-2958425         1124 kB  postgres
-3021373         1124 kB  postgres
-3035581         1124 kB  postgres
-3122741         1124 kB  postgres
-3140881         1124 kB  postgres
-1964         1152 kB  postgres
-2300         1152 kB  postgres
-2301         1152 kB  postgres
-2310         1152 kB  postgres
-2311         1152 kB  postgres
-2547         1152 kB  query-engine-de
-2309         1280 kB  postgres
-264770         1408 kB  systemd-resolve
-2155         1792 kB  postgres
-2333         1792 kB  postgres
-2334         1792 kB  postgres
-2340         1792 kB  postgres
-2341         1920 kB  postgres
-2342         2048 kB  postgres
-780         3328 kB  containerd
-875         6528 kB  dockerd
-812         9344 kB  unattended-upgr
-1387        12416 kB  gunicorn
-449142        17536 kB  node
-1588        42496 kB  next-server (v1
-1315        61568 kB  litellm
-1746       112000 kB  gunicorn
-Total:             318256 Kb
-```
+On SSDs, the cost of reading swap is similar to reading page cache, so higher swappiness values (100) are reasonable. On spinning disks, swap reads are expensive random I/O, so lower values make more sense.
 
-## Managing High Swap Usage
+Source: Chris Down, [In defence of swap](https://chrisdown.name/2018/01/02/in-defence-of-swap.html)
 
-When you identify processes with high swap usage, consider these management strategies:
+### Swappiness 0-200: kernel 5.8+ changes
 
-1. **Immediate Actions:**
-   - Kill unnecessary processes
-   - Restart memory-hungry applications
-   - Clear system cache
+Since kernel 5.8 (August 2020), `vm.swappiness` accepts values 0-200, not just 0-100. Values above 100 bias more heavily toward swapping anonymous pages.
 
-2. **Long-term Solutions:**
-   - [Increase system RAM](https://www.bitdoze.com/best-mini-pc-home-server/)
-   - Optimize application configurations
-   - Adjust swappiness value
+Critical distinction:
 
-To modify system swappiness:
+| Value | Behavior |
+|---|---|
+| **0** | Never swap anonymous pages unless the system is near OOM (special semantics since kernel 3.5, 2012) |
+| **1** | Lowest "normal" value — avoids swap but doesn't have the special-case behavior of 0 |
+| **60** | Default on most distros. Balanced for general use |
+| **100** | Treats file and anonymous pages equally. Good default for SSD-based systems |
+
+### Persistent configuration with sysctl.d
+
+The old approach of appending to `/etc/sysctl.conf` works but is messy. The modern method uses drop-in files:
+
 ```bash
-# Check current swappiness
-cat /proc/sys/vm/swappiness
+# Check current value
+sysctl vm.swappiness
 
-# Temporarily modify swappiness
-sudo sysctl vm.swappiness=60
+# Apply temporarily (resets on reboot)
+sudo sysctl -w vm.swappiness=60
 
-# Permanently modify swappiness
-echo 'vm.swappiness=60' | sudo tee -a /etc/sysctl.conf
+# Apply permanently with a drop-in file
+echo 'vm.swappiness=60' | sudo tee /etc/sysctl.d/99-swap.conf
+sudo sysctl --system
 ```
 
-## Additional Tools and Resources
+Verify the change took effect:
 
-Besides our custom script, consider these additional tools for monitoring system resources:
+```bash
+sysctl vm.swappiness
+```
 
-1. htop - Interactive process viewer
-2. vmstat - Virtual memory statistics
-3. [Docker stats](https://www.bitdoze.com/docker-commands/) - For containerized environments
-4. sysstat package tools
+**Failure mode:** Value not persisting after reboot? Another file in `/etc/sysctl.d/` might be overriding it. Check with:
 
-Remember to regularly monitor your system's performance using these tools and maintain proper [system security practices](https://www.bitdoze.com/secure-ssh-server-linux/).
+```bash
+sudo sysctl --system 2>&1 | grep swappiness
+```
+
+## Modern swap technologies: zswap and zram
+
+If you're running Linux 5.x+, there are better options than raw disk swap alone.
+
+### zswap: compressed write-back cache
+
+zswap sits between the kernel's memory allocator and disk swap. When the kernel wants to swap a page out, zswap compresses it first. If the compressed page fits in a RAM cache, no disk I/O happens. When the cache fills up, the least-recently-used pages get written to disk swap automatically.
+
+This is the "enable and forget" option for most servers. On a VPS with SSD-backed swap, zswap reduces disk swap writes significantly.
+
+<Notice type="info" title="Enable zswap on SSD-based servers">
+Add <code>zswap.enabled=1</code> to your kernel command line (via GRUB or bootloader config). It's a free performance win — compressed pages stay in RAM when possible, and only hit disk when necessary.
+</Notice>
+
+Check if zswap is active:
+
+```bash
+dmesg | grep zswap
+cat /sys/module/zswap/parameters/enabled
+```
+
+### zram: compressed RAM block device
+
+zram creates a compressed block device entirely in RAM and uses it as swap. No disk I/O at all. Everything stays in memory, just compressed. Fedora uses zram by default (paired with `systemd-oomd`).
+
+The tradeoff: zram has a hard capacity limit (typically 50% of RAM) and can cause LRU inversion when used alongside disk swap. It's best for memory-constrained systems like laptops and containers, not general-purpose servers.
+
+For most VPS/Dokploy setups, zswap with disk swap is the better choice.
+
+## Swap troubleshooting and verification
+
+### How to verify swap is active
+
+```bash
+# List all active swap devices with priorities
+cat /proc/swaps
+
+# Human-readable version
+swapon --show
+
+# Quick check
+free -h
+```
+
+If `swapon --show` returns nothing, you have no swap configured. For most cloud VPS instances, this is the default — you need to [create a swap file](#how-much-swap-should-you-allocate) manually.
+
+### When swap is normal vs. when it's a problem
+
+<Notice type="success" title="Normal">
+Swap used 10–20%, vmstat si/so near zero. The kernel is keeping cold pages in swap to free up RAM for active workloads. This is expected behavior and not a problem.
+</Notice>
+
+<Notice type="error" title="Problem">
+Swap growing steadily over time, vmstat si/so consistently in the hundreds of KB/s or higher. The system is thrashing — spending more time swapping pages than doing actual work. Add RAM, kill processes, or optimize memory-hungry applications.
+</Notice>
+
+The distinction: swap *allocation* (pages sitting in swap) is fine. Swap *activity* (pages being constantly moved between RAM and swap) is the problem. `vmstat` si/so columns tell you which one you have.
+
+### How to safely clear swap
+
+To move all swap pages back to RAM:
+
+```bash
+sudo swapoff -a && sudo swapon -a
+```
+
+<Notice type="warning" title="Check free RAM first">
+Before clearing swap, run <code>free -h</code> and confirm that available RAM is greater than swap used. If there's not enough free RAM, <code>swapoff</code> will hang or trigger the OOM killer. Stop memory-heavy services first if needed.
+</Notice>
+
+Verify swap cleared:
+
+```bash
+free -h
+# Swap used should drop to near zero
+```
+
+### Using systemd-oomd to prevent swap storms
+
+On Ubuntu 22.04+ and Fedora, `systemd-oomd` is enabled by default. It uses PSI (Pressure Stall Information) to detect when the system is under memory pressure and kills memory-hungry processes before swap fills up completely.
+
+Check if it's running:
+
+```bash
+systemctl status systemd-oomd
+```
+
+If it's not active and you're on Ubuntu 22.04+ or Fedora, enable it:
+
+```bash
+sudo systemctl enable --now systemd-oomd
+```
+
+For older distros, `earlyoom` is a simpler alternative available in most repos:
+
+```bash
+sudo apt install earlyoom    # Debian/Ubuntu
+sudo dnf install earlyoom    # RHEL/Fedora
+sudo systemctl enable --now earlyoom
+```
 
 ## Conclusion
 
-Monitoring swap usage is crucial for maintaining optimal system performance. The provided script and methods in this guide will help you identify and manage processes that heavily use swap space. Regular monitoring and proactive management of swap usage will ensure your Linux system runs efficiently and reliably.
+Three things to remember about swap on Linux:
 
-For more Linux administration tips and tools, check out our guides on [Linux commands](https://www.bitdoze.com/linux-commands/) and [system monitoring](https://www.bitdoze.com/monitor-cpu-usage-and-send-email-alerts-in-linux/).
+1. **Use `smem` as your go-to tool.** `smem -s swap -r -k` gives you the clearest, most accurate per-process swap picture. Fall back to `/proc` scripts when you can't install packages.
+
+2. **vmstat si/so is the real danger signal.** Swap allocation is normal. Swap activity (high si/so) means the system is thrashing and needs attention.
+
+3. **Enable zswap on SSD-based servers.** It's a one-line kernel parameter that reduces disk swap writes for free.
+
+If you're consistently hitting swap limits, the fix is usually more RAM — not more tuning. For affordable VPS upgrades, [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) starts at a few euros per month with SSD storage. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) and [Vultr](https://go.bitdoze.com/vultr) are solid alternatives with global datacenter coverage. [DigitalOcean](https://go.bitdoze.com/do) is another option if you want a developer-friendly platform.
+
+For more Linux administration guides, check out our [essential Linux commands](https://www.bitdoze.com/linux-commands/) reference and the guide to [monitoring system resources on Linux](https://www.bitdoze.com/monitor-cpu-usage-and-send-email-alerts-in-linux/) with email alerts.
