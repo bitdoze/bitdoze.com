@@ -15,6 +15,7 @@ export const translations = {
     // Common labels
     home: "Home",
     blog: "Blog",
+    news: "News",
     categories: "Categories",
     tags: "Tags",
     authors: "Authors",
@@ -75,6 +76,7 @@ export const translations = {
     // Common labels
     home: "Inicio",
     blog: "Blog",
+    news: "Noticias",
     categories: "Categorías",
     tags: "Etiquetas",
     authors: "Autores",
@@ -135,6 +137,7 @@ export const menuLabelKeys: Record<string, TranslationKey> = {
   Resources: "resources",
   About: "about",
   Series: "series",
+  News: "news",
   Pages: "pages",
   Authors: "authors",
   Categories: "categories",

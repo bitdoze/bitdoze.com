@@ -93,6 +93,62 @@ node scripts/restructure-taxonomy.mjs --dry-run
 node scripts/restructure-taxonomy.mjs
 ```
 
+## Daily News Digest (src/content/news/)
+
+Daily AI & tech news digests live in the `news` content collection. An external AI-agent workflow researches and writes them; this documents the file contract the site expects.
+
+### File rules
+
+- One file per day: `src/content/news/YYYY-MM-DD.mdx` (e.g. `2026-08-20.mdx`) → published at `/news/YYYY-MM-DD/`.
+- English only. Never edit past digests except factual corrections.
+- **No images** — no cover image, no inline images. Ever.
+- Frontmatter (schema-enforced, see `newsCollection` in `src/content.config.ts`):
+
+  ```yaml
+  ---
+  title: "AI & Tech News Digest — August 20, 2026"
+  description: "One or two sentences naming the biggest story of the day (feeds cards, RSS, and SEO; keep under ~200 chars)."
+  date: 2026-08-20
+  draft: false   # omit or set true to hold back an unfinished digest
+  ---
+  ```
+
+### Body structure (fixed six sections, in this order)
+
+1. `## 1. AI News (Top 5)` — bold lead with date + 2-3 source links, then a fact-dense paragraph.
+2. `## 2. Developer & DevOps News (Top 5)` — same item format, each with a *Why it matters:* line.
+3. `## 3. Self-Hosting & Homelab (Top 4)` — GitHub project, stars/language/license, what it does and who it's for.
+4. `## 4. Trending GitHub Repositories (Top 10, last 7 days)` — markdown table: `# | Repo | Stars | Lang | One-line`.
+5. `## 5. Hacker News Top Stories` — numbered list with points/comments and links.
+6. `## 6. Reddit Highlights (Top 5)` — subreddit, thread title, link, one-line takeaway.
+
+### Item line format (the digest design depends on this)
+
+Sections 1–3 and 5–6 are list items. Each item is exactly two lines: a bold-lead line, then the summary indented by 2 spaces on the NEXT line (soft continuation of the same item — NOT a blank-line-separated paragraph; the styling targets `strong:first-child` inside the item's paragraph):
+
+```markdown
+- **Item title (Aug 19)** — [Primary source](https://example.com) | [Second source](https://example2.com)
+  One fact-dense paragraph summarizing what happened, with numbers. Why it matters: one line for the reader.
+```
+
+- Section headings MUST keep the pattern `## N. Title (Qualifier)` — the layout parses the number and qualifier into chips.
+- Section 4 table column order is fixed: `# | Repo | Stars | Lang | One-line` (the third column is mono-styled).
+- Trailing italic asides (`*Also tracked: ...*`) go directly after a section's list.
+
+Trailing italic `*Also tracked:...*` / `*Also hot:...*` lines after a section are fine. See `src/content/news/2026-08-20.mdx` for the reference digest.
+
+### Writing rules for the agent
+
+- Every link must be a real URL seen in search results — never invent or reconstruct URLs.
+- Bitdoze voice: practical, direct, numbers over adjectives, zero hype words.
+- Prefer primary sources (official blogs, changelogs, release notes) over aggregators; link 2-3 sources per top item.
+- 5-8 minute read. Cut items rather than compressing summaries into mush.
+- Before pushing, `bun run build:ci` must pass (it validates the frontmatter schema and renders `/news/`).
+
+### SEO policy
+
+Individual digest pages are intentionally `noindex` (set in `NewsLayout.astro`) and excluded from the sitemap — only the `/news/` hub is indexed. Digest distribution is RSS (`/news/rss.xml`) and social. Do not remove the noindex.
+
 ## SVG Creation Guidelines
 
 To maintain a consistent, premium, and polished brand aesthetic across the site, all article SVG covers must follow these guidelines:

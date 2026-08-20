@@ -126,10 +126,29 @@ const aboutCollection = defineCollection({
   }),
 });
 
+// Daily news digest collection — written by an AI agent, no cover images
+const newsCollection = defineCollection({
+  loader: glob({
+    base: "./src/content/news",
+    pattern: "**/*.{md,mdx}",
+  }),
+  schema: z.object({
+    title: z.string(),
+    description: z
+      .string()
+      .min(1, "Digest description is required")
+      .transform((s) => s.trim()),
+    date: z.date(),
+    draft: z.boolean().optional(),
+  }),
+});
+
+
 // Export collections
 export const collections = {
   posts: postsCollection,
   pages: pagesCollection,
   authors: authorsCollection,
   about: aboutCollection,
+  news: newsCollection,
 };
