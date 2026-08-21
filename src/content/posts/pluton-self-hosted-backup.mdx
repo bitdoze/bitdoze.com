@@ -1,0 +1,184 @@
+---
+date: 2026-08-21T00:00:00Z
+title: "Pluton: Self-Hosted Backups with Restic and Rclone"
+description: "Hands-on Pluton review: a self-hosted backup platform that wraps Restic and Rclone. Docker Compose setup, replication for 3-2-1 backups, restore workflow, and a comparison with Zerobyte."
+image: "../../assets/images/26/08/pluton-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["backup", "restic", "rclone"]
+canonical: "https://www.bitdoze.com/pluton-self-hosted-backup/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Pluton is an open-source backup platform you self-host, and it runs the backups on my own server. Under the hood, two familiar tools do the work: [Restic](https://restic.net/) handles the encrypted, deduplicated snapshots, and [Rclone](https://rclone.org/) connects it to more than 80 storage providers. Pluton wraps both in a web UI where you define plans, schedules, retention, and replication without touching a terminal.
+
+I have it deployed on my server backing up my Docker stacks, project folders, and Docker volumes. Setup notes below, plus a comparison with [Zerobyte](https://www.bitdoze.com/zerobyte-restic-gui/), another Restic GUI I wrote about earlier this year.
+
+## What is Pluton?
+
+[Pluton](https://github.com/plutonhq/pluton) is a TypeScript application (Apache-2.0 licensed) that turns Restic and Rclone into a managed backup service. The split of responsibilities looks like this:
+
+| Layer | Responsibility | What you get |
+| --- | --- | --- |
+| Restic | Snapshots, encryption, deduplication, compression | Fast incremental backups that are encrypted client-side |
+| Rclone | Storage connectivity | S3, B2, Google Drive, OneDrive, SFTP, pCloud, and 80+ more |
+| Pluton | Web UI, scheduling, retention, replication, agents | A control plane for all of it |
+
+The project is young. It appeared in November 2025 and sits at v0.18.3 as of August 2026, but development is active and the feature list already covers most of what people patch together with cron jobs and shell scripts.
+
+### Key features
+
+<ListCheck>
+- Backup plans with flexible schedules, including cron expressions
+- Retention policies that keep daily, weekly, monthly, and yearly snapshots
+- Built-in replication: mirror every backup to up to two extra destinations
+- Pluton Agent for backing up remote machines into one central console
+- Real-time progress tracking and detailed per-job logs
+- Notifications via Email, Slack, Discord, and NTFY
+- Automatic retries for failed jobs
+- Pre/post scripts for database dumps or cleanup tasks
+- Snapshot browsing like a file manager, plus full or partial restores
+- Download any snapshot as a TAR archive straight from the UI
+- Two-factor authentication for the dashboard
+</ListCheck>
+
+<Notice type="info" title="Light on resources">
+Pluton idles at around 50 MB of RAM, so it runs fine on a Raspberry Pi or a small VPS next to your other containers.
+</Notice>
+
+## Pluton vs Zerobyte
+
+Both tools wrap Restic, so snapshot format, encryption, and deduplication are identical. The difference is scope. [Zerobyte](https://www.bitdoze.com/zerobyte-restic-gui/) is a lean dashboard for backing up one server. Pluton aims to be a small backup platform.
+
+| | Pluton | Zerobyte |
+| --- | --- | --- |
+| Backup engine | Restic | Restic |
+| Cloud destinations | 80+ providers through built-in Rclone integration | Local, S3, GCS, Azure, or rclone remotes via mounted config |
+| Replication | Up to 2 mirror destinations per plan | One repository per job |
+| Remote machines | Pluton Agent reports into the central console | Single node only |
+| Network sources | Through agent devices | NFS, SMB, WebDAV mounts via FUSE |
+| Scripts | Pre/post job hooks | Not built in |
+| Auth | Users, sessions, 2FA | Single user |
+| Dashboard port | 5173 | 4096 |
+| Privileges | None beyond your volume mounts | SYS_ADMIN + FUSE device if you mount shares |
+| Maturity | v0.18.x, first release Nov 2025 | 0.x series |
+
+My take after running both: pick **Zerobyte** if you back up a single server and want the simplest possible setup, especially when your sources live on NFS or SMB shares. Pick **Pluton** if you want built-in replication for proper 3-2-1 backups, or you have more than one machine to protect. The replication feature alone settles it for me: every plan can push its snapshots to two extra destinations automatically, which is exactly what the 3-2-1 rule asks for.
+
+## Install Pluton with Docker Compose
+
+This is the compose file from my server. It joins the Caddy network instead of publishing ports, and mounts everything I want backed up as read-only:
+
+```yaml
+services:
+  pluton:
+    image: plutonhq/pluton:latest
+    container_name: pluton
+    restart: unless-stopped
+    volumes:
+      - pluton-data:/data
+      - /home/user/docker-apps:/mnt/docker-apps:ro
+      - /home/user/projects:/mnt/projects:ro
+      - /var/lib/docker/volumes:/mnt/docker-volumes:ro
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      USER_NAME: ${USER_NAME}
+      USER_PASSWORD: ${USER_PASSWORD}
+      APP_TITLE: ${APP_TITLE:-Pluton}
+      APP_URL: ${APP_URL:-http://localhost:5173}
+      SERVER_PORT: ${SERVER_PORT:-5173}
+      NODE_ENV: production
+      IS_DOCKER: "true"
+    networks:
+      - web
+    expose:
+      - "5173"
+
+volumes:
+  pluton-data:
+
+networks:
+  web:
+    external: true
+```
+
+The `.env` file needs three required values:
+
+```env
+ENCRYPTION_KEY=generate-a-long-random-string
+USER_NAME=admin
+USER_PASSWORD=use-a-real-password
+```
+
+Generate the key with `openssl rand -base64 32`. The `ENCRYPTION_KEY` protects your restic snapshots and rclone configs, so back it up somewhere safe. Lose it and the backups are decoration.
+
+A few details worth knowing:
+
+- Source mounts can be read-only (`:ro`). A backup destination must be writable, so never add `:ro` to a local repository path.
+- `APP_URL` must match how you reach the UI, especially behind a reverse proxy.
+- If you prefer exposing the port directly, replace `expose` with `ports: ["5173:5173"]`.
+
+Then start it:
+
+```bash
+docker compose up -d
+```
+
+### Reverse proxy with Caddy
+
+Since the container sits on the shared `web` network, a Caddy block is all it takes:
+
+```caddy
+backup.example.com {
+    reverse_proxy pluton:5173
+}
+```
+
+One quirk I noticed behind the proxy: the logs fill up with `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` warnings because the app does not set Express' trust-proxy setting. Backups run fine; it is log noise, not a failure. If you expose Pluton directly without a proxy, the warnings do not appear.
+
+## Create your first backup plan
+
+The workflow is three steps: destination, plan, schedule.
+
+1. **Add a storage destination.** For local storage, point Pluton at a writable container path such as `/mnt/backups`. For cloud storage, pick a provider from the Rclone-backed list and enter credentials in the UI. No config files to edit.
+2. **Create a backup plan.** Choose source paths, destination, schedule, and a retention policy (keep N daily, weekly, monthly, yearly snapshots). Compression and AES-256 encryption come from Restic automatically.
+3. **Add replication (optional).** Attach up to two extra destinations so every run is mirrored. This is the 3-2-1 shortcut.
+
+Run the plan once manually and watch the real-time progress view. Check the logs tab if anything looks off, then let the scheduler take over. Before trusting it, set up notifications under settings so failed jobs reach you on Discord, Slack, NTFY, or email. A backup system without notifications fails silently, and silent failures are how you find out during a disaster.
+
+## Restore and download
+
+Restores are where most backup GUIs fall apart, so I tested this early. Open a plan, browse a snapshot like a regular file manager, then either restore selected files or the whole snapshot to the original location or a custom path. You can also download the entire snapshot as a TAR file, which is handy for pulling a copy onto your laptop without touching the CLI.
+
+## My setup notes
+
+For reference, my instance backs up three read-only mounts: my Docker app configs, my project folders, and `/var/lib/docker/volumes` for the databases and stateful containers. Snapshots go to a local disk, with replication to cloud storage for the offsite copy. The whole thing replaced a pile of cron-driven restic commands that worked but had no visibility.
+
+Two habits worth keeping regardless of tool:
+
+- Test a restore on real files, not in your head. Do it after the first week and then monthly.
+- Keep the `ENCRYPTION_KEY` and a copy of your Pluton data directory outside the machine it lives on.
+
+## FAQ
+
+<Accordion label="Does Pluton replace Restic?" group="faq" expanded="true">
+No, it drives Restic. Your repositories stay standard restic repositories, so you can still restore from the CLI if Pluton disappears tomorrow. That also means no vendor lock-in.
+</Accordion>
+
+<Accordion label="Can Pluton back up Docker volumes?" group="faq">
+Yes. Mount `/var/lib/docker/volumes` into the container read-only and add it as a source path. For databases, use a pre-script to dump data first so you are not copying live files mid-write.
+</Accordion>
+
+<Accordion label="Is there a desktop version?" group="faq">
+Yes. Installers exist for Windows, macOS, and Linux desktops, plus a headless Linux server install. The desktop builds are useful for backing up workstations into the same central console through the agent.
+</Accordion>
+
+## Final thoughts
+
+Pluton has earned its place on my server. Restic keeps the snapshots trustworthy, Rclone puts any storage target a dropdown away, and the UI handles scheduling, retention, and replication. It is younger than Zerobyte, so pin your version and read release notes before updating. But for proper 3-2-1 backups across multiple machines, it is the stronger platform of the two.
+
+<Button text="View Pluton on GitHub" link="https://github.com/plutonhq/pluton" variant="solid" color="blue" size="md" icon="arrow-right" />
