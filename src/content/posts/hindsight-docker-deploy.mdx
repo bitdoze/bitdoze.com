@@ -1,7 +1,7 @@
 ---
-date: 2026-07-03T00:00:00Z
+date: 2026-08-24T00:00:00Z
 title: "Deploy Hindsight Agent Memory on Docker: Complete Setup Guide"
-description: "Step-by-step guide to deploying Hindsight, an open-source agent memory system, using Docker Compose with PostgreSQL and pgvector for production use."
+description: "Deploy Hindsight with Docker Compose and pgvector, then configure Retain, Observations and Reflect missions, run it on OpenCode Go, connect coding agents like Claude Code, Pi, OMP and Droid, and set up backups."
 image: "../../assets/images/26/07/hindsight-docker-deploy.webp"
 categories: ["ai"]
 authors: ["Dragos"]
@@ -25,7 +25,7 @@ Most AI agents forget everything the moment a conversation ends. You tell them y
 
 The core idea: agents should get better the more you use them, the same way a human assistant learns your preferences over weeks and months.
 
-This guide walks through deploying Hindsight on Docker with a proper PostgreSQL backend, configuring it for production use, and interacting with it through the API and client libraries.
+This guide walks through deploying Hindsight on Docker with a proper PostgreSQL backend, then covers everything I set up after installation: the Retain, Observations and Reflect missions that shape what it remembers, running the LLM on an OpenCode Go subscription, wiring coding agents into it (I run Pi, OMP and Droid against mine), and backing the whole thing up.
 
 ## What Hindsight actually does
 
@@ -55,7 +55,7 @@ You'll need:
 <ListCheck>
 - A VPS or home server running Linux. I recommend [Hetzner](https://go.bitdoze.com/hetzner) or [Hostinger](https://go.bitdoze.com/hostinger-vps) for VPS hosting
 - Docker and Docker Compose installed
-- An OpenAI API key (or another supported LLM provider)
+- An LLM API key. OpenAI works out of the box, or use an [OpenCode Go](https://go.bitdoze.com/opencode-go) subscription like I do (covered below)
 - At least 2 GB of RAM available (the slim image uses less, the full image needs more)
 </ListCheck>
 
@@ -212,6 +212,182 @@ Open the web UI in your browser and enter your access key when prompted. The Con
 
 <Picture src={hindsightUi} alt="Hindsight Control Plane web UI" formats={["webp", "png"]} />
 
+## Post-install: configure Retain, Observations and Reflect
+
+A fresh Hindsight install works with defaults, but the defaults are generic. Three settings turn it from a fact dump into something that reasons the way you want: the **retain mission** (what gets extracted), the **observations mission** (how knowledge gets consolidated), and the **reflect disposition and mission** (how it answers). All of them are per memory bank, so you can tune each project differently.
+
+You can set everything through the web UI (open your bank in the Control Plane and edit its settings), but I'll use curl so each step is copy-paste ready. Every request needs your access key as a Bearer token. Export it once:
+
+```bash
+export HINDSIGHT_URL=http://localhost:18888
+export HINDSIGHT_KEY=your-access-key
+```
+
+### Step 1: Store a first memory
+
+Banks are created automatically on the first retain, so store one fact to get started:
+
+```bash
+curl -X POST $HINDSIGHT_URL/v1/default/banks/my-project/memories \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"content":"Production runs PostgreSQL 17 on a Hetzner CX22"}]}'
+```
+
+The call returns immediately. Fact extraction, entity resolution and embedding generation run in the background, which is why your LLM choice matters for ingest speed.
+
+### Step 2: Set the retain mission
+
+By default, retain extracts all significant facts from whatever you feed it. The mission is a plain-language instruction injected into the extraction prompt that steers what the LLM keeps. This is the single highest-value setting in Hindsight: without it, banks fill up with noise; with it, extraction focuses on what you actually want recalled later.
+
+Here's the prompt I use on my personal bank:
+
+```text
+Keep technical facts and decisions: commands that worked, configs, versions,
+error messages together with their fixes, and URLs worth remembering.
+Keep preferences about tools and workflows.
+Ignore greetings, small talk, and throwaway debugging output that has no lasting value.
+```
+
+Apply it with a PATCH to the bank config:
+
+```bash
+curl -X PATCH $HINDSIGHT_URL/v1/default/banks/my-project/config \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "updates": {
+      "retain_mission": "Keep technical facts and decisions: commands that worked, configs, versions, error messages together with their fixes, and URLs worth remembering. Keep preferences about tools and workflows. Ignore greetings, small talk, and throwaway debugging output that has no lasting value.",
+      "retain_extraction_mode": "concise"
+    }
+  }'
+```
+
+The extraction mode controls how chatty the LLM gets:
+
+| Mode | When to use |
+|------|-------------|
+| `concise` (default) | General purpose, selective, fast |
+| `verbose` | Richer facts with full context and relationships |
+| `custom` | You write complete extraction rules yourself |
+
+If you'd rather set this server-wide instead of per bank, add `HINDSIGHT_API_RETAIN_MISSION` to the compose environment.
+
+### Step 3: Set the observations mission
+
+After every retain, Hindsight consolidates related facts into **observations**: deduplicated beliefs backed by evidence, each tracking how many sources support it. Contradictions don't overwrite history. If you switch from React to Vue, the observation ends up capturing the journey, not just the destination.
+
+The observations mission defines what shape those beliefs should take. Default behavior is already good (durable facts, preferences, recurring patterns), but you can narrow it:
+
+```bash
+curl -X PATCH $HINDSIGHT_URL/v1/default/banks/my-project/config \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "updates": {
+      "observations_mission": "Observations are durable facts about my projects, infrastructure, and preferences. Always include recurring problems together with their fixes. Ignore ephemeral state such as running processes or current session details."
+    }
+  }'
+```
+
+Consolidation runs automatically after each retain. If you're importing months of history and want to batch first, set `HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false` in the compose file and trigger it manually with a call to `/v1/default/banks/my-project/consolidate` when the import finishes.
+
+### Step 4: Give reflect a personality
+
+Recall retrieves facts. Reflect reasons about them, and its reasoning style comes from three disposition traits plus a mission. The traits sit on a 1-5 scale:
+
+| Trait | Low (1) | High (5) |
+|-------|---------|----------|
+| Skepticism | Trusts information at face value | Questions and doubts claims |
+| Literalism | Reads between the lines | Takes things literally |
+| Empathy | Detached, facts only | Weighs emotional context |
+
+Recommended combinations from the docs: code review wants skepticism 4, literalism 5, empathy 2. Customer support wants skepticism 2, literalism 2, empathy 5. Research assistant sits in the middle at 4/3/3.
+
+For my DevOps-flavored bank, I keep traits at 3/3/3 and let the mission do the work:
+
+```text
+You are my DevOps and development assistant. You help manage Linux servers,
+Docker services, and side projects. Prefer concrete commands over abstract
+advice. Before recommending a risky change, state what breaks if it goes
+wrong. Say so when the memories don't cover the answer.
+```
+
+Set the reflect mission and disposition from the bank settings in the web UI, or through the client SDK's `update_bank_config()` method. Like the other missions, there's an env var (`HINDSIGHT_API_REFLECT_MISSION`) if you want it server-wide.
+
+### Step 5: Add hard rules with directives
+
+Disposition shapes tone; directives are rules the agent must follow. They get injected into every reflect response. Good candidates: compliance constraints, privacy guardrails, output requirements.
+
+```bash
+curl -X POST $HINDSIGHT_URL/v1/default/banks/my-project/directives \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Safety first",
+    "content": "Never suggest destructive commands (rm -rf, drop database, force push) without warning about backups first.",
+    "priority": 10
+  }'
+```
+
+Rule of thumb from the docs: personality goes in the disposition, compliance goes in directives.
+
+### Step 6: Tune recall
+
+Recall has two knobs you'll actually touch:
+
+- **`budget`**: search depth. `low` for chatbot-speed lookups, `mid` for balanced queries, `high` when the question needs multi-hop reasoning across entities ("what did Alice's manager's team work on?").
+- **`max_tokens`**: how much memory content comes back, default 4096 tokens (about four pages). Drop to 2048 for focused answers, raise to 8192 for research-style questions.
+
+Both are per-request parameters, not config, so pass them per call depending on the query. There's also a `types` filter if you want only observations, or only raw world facts.
+
+### Step 7: Test the whole loop
+
+Give it a minute after retaining (extraction and consolidation need time), then query:
+
+```bash
+# Recall: fast multi-strategy search
+curl -X POST $HINDSIGHT_URL/v1/default/banks/my-project/memories/recall \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"What database does production run?"}'
+
+# Reflect: agentic reasoning over the bank
+curl -X POST $HINDSIGHT_URL/v1/default/banks/my-project/reflect \
+  -H "Authorization: Bearer $HINDSIGHT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Summarize my production infrastructure"}'
+```
+
+If recall returns nothing at Step 7, check that extraction finished (look at the operations view in the web UI) and that your LLM key works. That's also the moment you'll be glad you set a cheap model for extraction.
+
+### Mental models and knowledge pages
+
+Two more features worth knowing, both best added after a few weeks of real usage:
+
+**Mental models** are standing answers to questions you ask often. You define the question once, Hindsight writes the answer, and rewrites it in the background as the bank learns. Fetching one is a database read: no retrieval, no LLM call, no latency. Create them from the web UI once you notice yourself asking the same thing repeatedly.
+
+**Knowledge pages** are the same engine wearing a wiki costume: living documents organized in folders ("Architecture", "Runbooks", "Decisions") that rewrite themselves as knowledge changes. The CLI can mirror a bank onto disk as real markdown files:
+
+```bash
+hindsight fs mount --bank my-bank
+```
+
+From there, grep, fzf, and any editor work normally. Pages heal themselves: delete one and it re-projects from memory.
+
+### Small VPS performance tweaks
+
+Hindsight does heavy LLM lifting during writes (extraction, consolidation) so reads stay fast: expect 100-600 ms for recall and under three seconds for reflect. On a small VPS, three environment variables help:
+
+```yaml
+      # Don't saturate the LLM provider with parallel requests
+      - HINDSIGHT_API_LLM_MAX_CONCURRENT=4
+      # Skip reasoning-token overhead during extraction
+      - HINDSIGHT_API_LLM_REASONING_EFFORT=low
+      # Smaller consolidation batches = more reliable small-model responses
+      - HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=4
+```
+
 ## Using the Hindsight API
 
 ### Install the client
@@ -358,6 +534,7 @@ Hindsight supports several LLM providers. The choice affects both cost and quali
 | Anthropic | Claude models | Strong extraction quality |
 | Gemini | Gemini models | Google's offering |
 | Groq | Various | Fast inference, lower cost. Recommended by Hindsight for speed |
+| OpenCode Go | 16 models, one key | Flat-rate subscription, covered below |
 | Ollama | Local models | Self-hosted, no API costs, needs more hardware |
 | LM Studio | Local models | Another local option |
 
@@ -370,6 +547,36 @@ environment:
   - HINDSIGHT_API_LLM_MODEL=gpt-oss-20b
 ```
 
+### Using OpenCode Go
+
+My pick: [OpenCode Go](https://go.bitdoze.com/opencode-go) is a $10/month subscription that bundles 16 models behind a single OpenAI-compatible key. Grok 4.5, Kimi K3, DeepSeek V4 Pro, GLM-5.2, MiniMax M3, Qwen and more, no per-token billing. Hindsight ships native support for it as a provider:
+
+Add the key to `.env`:
+
+```bash
+OPENCODE_GO_API_KEY=your-opencode-go-key
+```
+
+Then switch the LLM block in the compose file:
+
+```yaml
+      # LLM - OpenCode Go
+      - HINDSIGHT_API_LLM_PROVIDER=opencode-go
+      - HINDSIGHT_API_LLM_API_KEY=${OPENCODE_GO_API_KEY}
+      - HINDSIGHT_API_LLM_MODEL=deepseek-v4-flash
+      # Embeddings stay on OpenAI (OpenCode Go covers chat models only)
+      - HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
+      - HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=${OPENAI_API_KEY}
+```
+
+Recreate with `docker compose up -d` and you're done. This exact setup runs my production instance (I currently have `hy3` in the model field).
+
+Why flat-rate matters here specifically: fact extraction and consolidation are token-hungry background jobs. Every conversation your coding agents retain gets processed by this LLM around the clock, and with per-token pricing that shows up as a surprise line on next month's invoice. With OpenCode Go the bill stays $10 regardless of how much memory churn happens.
+
+<Button link="https://go.bitdoze.com/opencode-go" text="Try OpenCode Go ($5 First Month)" />
+
+One caveat: it covers chat models only, so embeddings still need their own provider. Keeping the OpenAI key around just for embeddings costs pennies at typical volumes. For a deeper look at limits and benchmarks, see my [OpenCode Go review](/opencode-go-plan/).
+
 ## Exposing Hindsight securely
 
 Running Hindsight on port 9999 is fine for local access. If you need to reach it from the internet, put it behind a reverse proxy.
@@ -377,6 +584,21 @@ Running Hindsight on port 9999 is fine for local access. If you need to reach it
 <Tabs>
   <Tab name="Cloudflare Tunnel">
     The easiest option if you already use Cloudflare. Add the tunnel container to your compose file and configure it to route traffic to the Hindsight services. No ports need to be exposed on the host.
+  </Tab>
+  <Tab name="Caddy">
+    What I run. Two hostnames in the Caddyfile, certificates handled automatically:
+
+    ```caddy
+    hindsight.example.com {
+        reverse_proxy localhost:9999
+    }
+
+    hindsight-api.example.com {
+        reverse_proxy localhost:18888
+    }
+    ```
+
+    The API hostname is what your coding agents point at, including the MCP endpoint at `/mcp/your-bank/`.
   </Tab>
   <Tab name="Traefik">
     Add labels to the hindsight service in your compose file for Traefik to pick up. You'll need separate routers for the API (port 8888) and the web UI (port 9999).
@@ -390,19 +612,54 @@ Running Hindsight on port 9999 is fine for local access. If you need to reach it
 Always keep `HINDSIGHT_API_TENANT_API_KEY` set. Without it, anyone who can reach the API port can read and write memories. The access key protects both the API and the web UI.
 </Notice>
 
-## Backing up your data
+## Backup options
 
-The PostgreSQL data lives in the `./pgdata` directory. Back it up regularly:
+Everything lives in PostgreSQL inside `./pgdata`. Lose that directory and every fact, observation and mental model is gone. Three ways to protect it, in increasing order of effort.
+
+### Option 1: nightly pg_dump (start here)
+
+A logical dump stays consistent even while the container is running, compresses well, and restores into any PostgreSQL 17 instance. Save this as `~/scripts/hindsight-backup.sh`:
 
 ```bash
-# Simple file backup
-tar -czf hindsight-backup-$(date +%Y%m%d).tar.gz pgdata/
-
-# Or use pg_dump for a proper database dump
-docker exec hindsight-db pg_dump -U hindsight hindsight > hindsight-$(date +%Y%m%d).sql
+#!/usr/bin/env bash
+set -e
+BACKUP_DIR=~/backups/hindsight
+mkdir -p "$BACKUP_DIR"
+docker exec hindsight-db pg_dump -U hindsight hindsight | gzip > "$BACKUP_DIR/hindsight-$(date +%F).sql.gz"
+# keep two weeks
+find "$BACKUP_DIR" -name "hindsight-*.sql.gz" -mtime +14 -delete
 ```
 
-For automated backups, add a cron job that runs one of these commands nightly and copies the output to your backup storage.
+Make it executable and schedule it:
+
+```bash
+chmod +x ~/scripts/hindsight-backup.sh
+crontab -e
+# add:
+15 4 * * * ~/scripts/hindsight-backup.sh >> ~/backups/hindsight/backup.log 2>&1
+```
+
+Restoring into a fresh database container:
+
+```bash
+gunzip -c hindsight-2026-08-24.sql.gz | docker exec -i hindsight-db psql -U hindsight -d hindsight
+```
+
+### Option 2: offsite copies
+
+A backup on the same VPS survives most accidents, not all of them. Push the dump folder somewhere else with rclone (S3, Backblaze B2, any supported remote):
+
+```bash
+rclone copy ~/backups/hindsight remote:hindsight-backups --max-age 48h
+```
+
+Append that line to the script and your dumps leave the server within hours of being taken. If you prefer deduplicated snapshots over plain files, restic works the same way against the same folder.
+
+### Option 3: full backup tooling
+
+For automated, versioned backups across many containers I use [Pluton](/pluton-self-hosted-backup/) (Restic + Rclone under the hood); [Zerobyte](/zerobyte-restic-gui/) covers the same ground. Point a plan at the dump folder, not at `pgdata` itself. Copying live PostgreSQL data files while the database is running produces snapshots that may not restore cleanly. If you want file-level backups of pgdata anyway, stop both containers first (`docker compose stop hindsight && docker compose stop db`), snapshot, then start them again.
+
+One habit worth stealing from production databases: test restores. A backup you've never restored is a theory. Once a quarter, spin up a throwaway postgres container on your laptop, load the latest dump, and check that recall still returns sensible answers.
 
 ## Troubleshooting
 
@@ -424,37 +681,88 @@ Check the logs with `docker compose logs hindsight`. Common issues:
 The full image loads local embedding and reranker models that consume 1.5-2 GB of RAM. Switch to the slim image (which this guide uses) to drop to around 500 MB for the Hindsight process itself. PostgreSQL will use whatever you give it, but 512 MB is enough for most workloads.
 </Accordion>
 
-## Integrations with coding agents and AI tools
+## Connecting coding agents
 
-Hindsight plugs into most of the popular coding agents and AI assistants through its MCP server, direct SDK integrations, and hooks. If you're already running one of these tools, adding persistent memory is usually a few lines of config.
+This is where Hindsight pays off. Your agents already produce the raw material (conversations, decisions, fixes that worked); the integrations below pipe it into memory automatically and inject relevant context back at session start. Three ways to wire an agent: the official integration package, native support in the agent itself, or the plain MCP server as a fallback.
 
-### Coding agents
+### The official package: Claude Code, Codex, opencode, Cursor CLI and friends
 
-**Claude Code** - Hindsight has first-class support through [hooks](https://hindsight.vectorize.io/integrations). Every conversation gets captured automatically, and relevant context is recalled on each prompt. You can also connect it as an [MCP server](https://hindsight.vectorize.io/sdks/integrations/local-mcp) for more control over when memories are stored and retrieved.
+One npm package wires up twelve agents natively:
 
-**[OpenCode](/opencode-setup-guide/)** - There's a [community plugin](https://hindsight.vectorize.io/integrations) that auto-retains conversations and recalls context on session start. It adds retain, recall, and reflect tools directly into OpenCode's tool palette.
+```bash
+npx @vectorize-io/hindsight-coding-agents install claude-code
+```
 
-**[OpenClaw](/clawdbot-setup-guide/)** - Hindsight integrates with OpenClaw to add memory capabilities to Claude-based agent workflows. The production memory infrastructure includes server-side access control and a plugin with auto-managed embeddings.
+Supported targets: `claude-code`, `codex`, `opencode`, `cursor-cli`, `copilot-cli`, `kilo`, `cline-cli`, `prime-agent`, `dsh` (DeepSeek Harness), `agy` (Antigravity), `devin-cli`, `grok-build`. Or `install all` for every agent it detects on the machine. It asks where memory should live; since you're self-hosting, answer with flags instead:
 
-**Codex CLI** - Similar to the Claude Code integration, Hindsight hooks capture conversations and recall context automatically.
+```bash
+npx @vectorize-io/hindsight-coding-agents install claude-code \
+  --server self-hosted --api-url http://localhost:8888
+```
 
-**Zed** - The Zed editor's AI assistant gets long-term memory through Hindsight's MCP server. Add it as an HTTP transport entry in Zed's MCP configuration.
+(If your instance sits behind a reverse proxy, pass its public URL and add your access key via `apiToken` in the config file.)
 
-**Cursor** - Connect Hindsight as an MCP server to give Cursor persistent memory across coding sessions.
+What you get is more than recall-on-prompt. The integration creates one bank per repository (`coding-agent::{repo}`) shared by every agent, seeds a cold repo from git history, runs a read-only codebase survey capped at $2 of tokens, keeps knowledge pages current, and writes completed sessions back into memory. Config lives in one file, `~/.hindsight/coding-agent.json`:
 
-### AI assistants and frameworks
+```json
+{
+  "optInOnly": true,
+  "optInPaths": ["~/work/client-x", "~/oss"],
+  "gitIngest": "full"
+}
+```
 
-**[Hermes Agent](/hermes-agent-setup-guide/)** - Hindsight serves as the memory backend for the Hermes multi-agent messaging framework. If you're running Hermes, this replaces the built-in MEMORY.md and session search with a more capable vector-based system.
+That example flips memory to opt-in only (nothing outside the listed paths gets remembered), and turns on full-diff git ingestion. Updating is the same install command again; uninstall removes exactly what was added.
 
-**[Agno](/agno-get-start/)** - There's a direct integration for Agno agents. Instead of SQLite-backed chat history, you get structured long-term memory with entity extraction and semantic search.
+### Pi
 
-**[Obsidian](https://obsidian.md)** - Through the MCP server, you can connect Obsidian's AI plugins to Hindsight for persistent memory across your notes and research workflows.
+Pi has a dedicated extension package:
 
-**n8n** - A community node for n8n workflows adds retain, recall, and reflect operations. Drop it into any workflow alongside Slack, Sheets, OpenAI, and 400+ other integrations.
+```bash
+pi install npm:@luxusai/pi-hindsight
+```
 
-### MCP server
+Then open Pi inside a repo and run `/hindsight`. It asks for your API URL (default `http://localhost:8888`) and a memory profile: **Project + User**, **Project Only**, **User Only**, or **Recall Only**. After setup it recalls relevant memory before each model call and retains session deltas after completed runs, redacting common secrets before anything is written.
 
-The most flexible option is the MCP server itself. It works with any MCP-compatible client:
+### OMP (Oh My Pi)
+
+[OMP](https://omp.sh/) ships Hindsight support natively, no plugin needed. Edit `~/.omp/agent/config.yml`:
+
+```yaml
+memory:
+  backend: hindsight
+
+hindsight:
+  apiUrl: https://hindsight.example.com/
+  apiToken: your-access-key
+  bankId: my-bank
+```
+
+Point `apiUrl` at your instance (local or behind a proxy), set `bankId` to wherever you want OMP's memories to land, and restart. Its autolearn feature rides on the same backend.
+
+### Droid (Factory)
+
+Droid connects through Hindsight's MCP server. Edit `~/.factory/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "hindsight": {
+      "type": "http",
+      "url": "http://localhost:8888/mcp/my-bank/",
+      "headers": {
+        "Authorization": "Bearer YOUR_ACCESS_KEY"
+      }
+    }
+  }
+}
+```
+
+The bank name in the URL path selects single-bank mode, so everything Droid does lands in one place. For a remote instance, swap in your public URL; the Bearer header works the same way.
+
+### Anything else: the MCP server fallback
+
+Any MCP-compatible client can connect directly:
 
 ```bash
 # Connect Claude Code
@@ -464,16 +772,42 @@ claude mcp add --transport http hindsight http://localhost:8888/mcp/
 claude mcp add --transport http hindsight http://localhost:8888/mcp/my-bank/
 ```
 
-The MCP server exposes 29 tools including retain, recall, reflect, mental model management, directive creation, and memory browsing. See the [full integrations list](https://hindsight.vectorize.io/integrations) for all supported tools.
+The MCP server exposes 29 tools including retain, recall, reflect, mental model management, directive creation, and memory browsing. See the [full integrations list](https://hindsight.vectorize.io/integrations) for all supported clients.
+
+### Which integration should you use?
+
+| Situation | Pick |
+|-----------|------|
+| Daily driver is Claude Code, Codex, opencode or Cursor CLI | Official package, let it manage per-repo banks |
+| You want one shared brain across several different agents | Native config or MCP pointing all agents at one bank |
+| Client or employer repos where mixing memories would be wrong | Official package with `optInOnly` / per-bank overrides |
+| Agent not on any list above | MCP server |
+
+My actual setup: OMP, Droid and Pi all talk to the same self-hosted instance. OMP and Droid share the single `bitdoze` bank because I want cross-project recall ("what did I decide about DNS last month?"). Pi keeps separate per-project banks through its profiles for client work where memories shouldn't mix. If you run only one agent, use the official package and don't think about banks at all; if you run several like me, decide early whether shared or separated memory fits how you work, because migrating banks later is manual work.
+
+### AI assistants and frameworks
+
+**[OpenClaw](/clawdbot-setup-guide/)** - Hindsight integrates with OpenClaw to add memory capabilities to Claude-based agent workflows. The production memory infrastructure includes server-side access control and a plugin with auto-managed embeddings.
+
+**[Hermes Agent](/hermes-agent-setup-guide/)** - Hindsight serves as the memory backend for the Hermes multi-agent messaging framework. If you're running Hermes, this replaces the built-in MEMORY.md and session search with a more capable vector-based system.
+
+**[Agno](/agno-get-start/)** - There's a direct integration for Agno agents. Instead of SQLite-backed chat history, you get structured long-term memory with entity extraction and semantic search.
+
+**Zed** - The Zed editor's AI assistant gets long-term memory through Hindsight's MCP server. Add it as an HTTP transport entry in Zed's MCP configuration.
+
+**Obsidian** - Through the MCP server, you can connect Obsidian's AI plugins to Hindsight for persistent memory across your notes and research workflows.
+
+**n8n** - A community node for n8n workflows adds retain, recall, and reflect operations. Drop it into any workflow alongside Slack, Sheets, OpenAI, and 400+ other integrations.
 
 ## What's next
 
 Once Hindsight is running, here are some things to try:
 
-- **Wire it into an existing agent** using the LLM wrapper for automatic memory management
+- **Set the three missions** from the post-install section above; it's the difference between a fact dump and a brain
+- **Wire in your coding agent** using the official package or the Pi/OMP/Droid setups covered earlier
 - **Create separate memory banks** for different projects or users to keep memories organized
-- **Set up the [Hindsight MCP server](https://github.com/vectorize-io/hindsight)** to give coding agents like Claude or Cursor persistent memory across sessions
-- **Monitor memory growth** through the web UI's entity browser to understand what your agent is learning
+- **Add mental models** for the questions you ask every week, and let knowledge pages grow into a self-maintaining wiki
+- **Schedule the nightly pg_dump** before you forget (see the backup options above)
 - **Compare with [Cognee](/cognee-vs-hindsight/)** if you also need knowledge extraction from documents and multimodal data
 
 Hindsight is one of those tools that gets more valuable the longer you run it. The first few days of memories are useful. A few months in, the agent starts making connections you didn't explicitly tell it about. That's the mental models kicking in, and it's where the real value shows up.
