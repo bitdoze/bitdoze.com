@@ -1,266 +1,477 @@
 ---
-date: 2025-07-20T00:00:00Z
-title: "How to Add Users to a Docker Container"
-description: "Master Docker user management by learning how to create users, assign permissions, and implement security best practices in containers."
+date: 2026-08-26T00:00:00Z
+title: "Add Users to a Docker Container: Non-Root User Guide"
+meta_title: "Add Users to a Docker Container: UID/GID & Non-Root Guide"
+description: "Learn how to add users to a Docker container the secure way: Dockerfile USER, UID/GID pinning, docker exec -u, Compose user & group_add, and permission fixes."
 image: "../../assets/images/23/07/add-users-docker-container.jpeg"
 categories: ["self-hosting"]
 authors: ["Dragos"]
-tags: ["docker"]
+tags: ["docker", "dockerfile", "docker-compose"]
 canonical: "https://www.bitdoze.com/add-users-to-docker-container/"
 ---
 
-By default, Docker containers run as root. That's fine for quick tests but bad for production. This guide shows you how to add users properly.
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
 
-Three ways to handle this:
-1. **Dockerfile** - Create users at build time (recommended)
-2. **Runtime** - Add users to running containers (temporary)
-3. **User mapping** - Match host and container users (for permissions)
+Docker containers run as **root** by default. Fine for a quick test, a liability in production. This guide shows you how to **add users to a Docker container** the right way: bake non-root users into your image, pin UID/GID, fix volume permissions, and verify before you deploy.
 
-Let's go through each one.
+Three approaches, in order of preference:
 
-## Why Bother?
+1. **Dockerfile:** create users at build time (recommended for anything that needs to survive a restart)
+2. **Runtime overrides:** `docker run -u` and `docker exec -u` (debugging and one-off tasks)
+3. **UID/GID mapping:** match container and host users to fix bind-mount permission headaches
 
-Running as root in containers is risky:
+This guide covers Ubuntu 24.04 and Alpine 3.24, Docker Compose V2, and Docker Engine 29.x. If you need a Linux VPS to practice on, you can start with a [Hetzner VPS](https://go.bitdoze.com/hetzner) or [Hostinger VPS](https://go.bitdoze.com/hostinger-vps).
 
-- **Security**: If the app gets compromised, the attacker has root
-- **Permissions**: Writing files as root messes up host permissions
-- **Best practice**: Least privilege principle applies here too
+## Why Run Containers as a Non-Root User?
 
-Bottom line: Production containers should not run as root.
+Running as root in containers creates three problems:
 
-## Method 1: Create Users in Dockerfile
+- **Security**: If the application gets compromised, the attacker has root inside the container. On misconfigured hosts (especially with `--privileged` or writable bind mounts), that can escalate to root on the host.
+- **Permissions**: A root process writing to a bind-mounted volume creates root-owned files on the host. Your host user (UID 1000) can't edit or delete them without `sudo`.
+- **Least privilege**: Same principle that applies everywhere else. Production containers should not run as root.
 
-Best practice is to set up users when building the image.
+<Notice type="warning" title="The Bind-Mount Trap">
+This is the #1 problem self-hosters hit. A container running as root writes to a mounted volume, and suddenly every file on the host is owned by `root:root`. You end up running `sudo chown` on the host after every container restart. The fix: pin the container's UID to match your host user (usually 1000). We cover this in Method 3 below.
+</Notice>
 
-### Basic User Creation
+## Know Your Base Image
+
+Before creating a user, check whether the image already ships one. Some official images include a non-root user out of the box:
+
+```bash
+docker run --rm node id
+# uid=1000(node) gid=1000(node) groups=1000(node)
+```
+
+| Image | Default non-root user | UID |
+|-------|----------------------|-----|
+| `node` | `node` | 1000 |
+| `postgres` | `postgres` (via gosu in entrypoint) | 999 |
+| `nginx` | `nginx` (worker processes) | 101 |
+| `ubuntu` / `debian` / `alpine` | None, you must create one | - |
+
+<Notice type="info" title="Check Before You Create">
+Run `docker run --rm <image> id` to see if the image already has a non-root user. If it does, just use `USER <name>`. Don't create a second one that might conflict.
+</Notice>
+
+## Method 1: Add Users in the Dockerfile (Recommended)
+
+Building users into the image is the durable approach. Users belong to images; containers inherit them. This survives restarts, redeployments, and `docker compose up` cycles.
+
+### Create a Non-Root User with `useradd`
+
+The hardened pattern uses `--no-log-init`, pinned UID/GID, and a non-login shell:
 
 ```dockerfile
-FROM ubuntu:20.04
+FROM ubuntu:24.04
 
-# Create a non-root user
-RUN useradd -m -s /bin/bash appuser
+# Create a dedicated app user with a pinned UID/GID.
+# 1001 leaves 1000 free to match the host user in bind mounts.
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
 
-# Switch to the new user
-USER appuser
-
-# Set working directory
+# Run the container as the unprivileged user (numeric UID: survives /etc/passwd changes)
+USER 1001:1001
 WORKDIR /home/appuser
 ```
 
-### Advanced User Setup
+Flag breakdown:
 
+| Flag | What it does |
+|------|-------------|
+| `--no-log-init` | Avoids the faillog sparse-file disk-exhaustion bug with large UIDs (Go archive/tar issue) |
+| `-u 1001` | Pins the UID, deterministic across rebuilds |
+| `-g appgroup` | Sets primary group (must exist first, that's why `groupadd` comes before `useradd`) |
+| `-m` | Creates the home directory |
+| `-s /usr/sbin/nologin` | Non-login shell for service accounts; use `/bin/bash` only if you need interactive access |
+
+<Notice type="info" title="Why --no-log-init?">
+Without this flag, `useradd` writes to `/var/log/faillog` and `/var/log/lastlog`. With a large UID, these files can balloon to gigabytes of NULL bytes due to a sparse-file bug in Go's archive/tar. Always pass `--no-log-init` in Dockerfiles.
+</Notice>
+
+You can parameterize UID/GID via build args. See [ARG and ENV in Docker](https://www.bitdoze.com/docker-env-vars/) for the full pattern.
+
+### The Alpine Variant: `adduser` and `addgroup`
+
+Alpine uses busybox `adduser`/`addgroup`, not the shadow-utils `useradd`. The flags are different:
+
+<Tabs>
+<Tab name="Ubuntu/Debian">
 ```dockerfile
-FROM ubuntu:20.04
+FROM ubuntu:24.04
 
-# Update package list
-RUN apt-get update && apt-get install -y sudo
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
 
-# Create user with specific UID/GID
-RUN groupadd -r appgroup --gid=1001 && \
-    useradd -r -g appgroup --uid=1001 --shell=/bin/bash --create-home appuser
-
-# Add user to sudo group (if needed)
-RUN usermod -aG sudo appuser
-
-# Set password (for development only)
-RUN echo 'appuser:password' | chpasswd
-
-# Switch to non-root user
-USER appuser
-
+USER 1001:1001
 WORKDIR /home/appuser
 ```
+</Tab>
+<Tab name="Alpine">
+```dockerfile
+FROM alpine:3.24
 
-### Key Commands Explained
+RUN addgroup -g 1001 appgroup && \
+    adduser -D -u 1001 -G appgroup -s /bin/sh appuser
 
-| Command | Purpose | Example |
-|---------|---------|---------|
-| `useradd -m` | Create user with home directory | `useradd -m john` |
-| `groupadd` | Create user group | `groupadd developers` |
-| `usermod -aG` | Add user to group | `usermod -aG sudo john` |
-| `USER` | Set default user for container | `USER appuser` |
+USER 1001:1001
+WORKDIR /home/appuser
+```
+</Tab>
+</Tabs>
 
-Some other docker articles that can help you in your docker journey:
+Alpine flag differences: `-D` = no password (equivalent to `--disabled-password`), `-G` = primary group, `-s /bin/sh` = shell (Alpine doesn't have bash by default).
+
+### Lock It Down With Numeric `USER 1001:1001`
+
+Docker's own guidance recommends numeric UIDs:
+
+```dockerfile
+# Good: survives /etc/passwd changes, no name resolution needed
+USER 1001:1001
+
+# Works but fragile: depends on /etc/passwd entry existing
+USER appuser
+```
+
+When you specify a group (the `:1001` part), the user gets **only** that group. No supplementary groups from `/etc/group`. This is usually what you want for a service account.
+
+### Set File Ownership with `COPY --chown`
+
+Use `COPY --chown` to set ownership at build time instead of running `chown` in a separate `RUN` layer:
+
+```dockerfile
+COPY --chown=1001:1001 app/ /home/appuser/app/
+USER 1001:1001
+```
+
+`COPY --chown` accepts names or numeric UID/GID. Names require `/etc/passwd` resolution during the build. If the user doesn't exist yet at that layer, the build fails. Numeric UIDs are safer and more portable.
+
+For keeping Dockerfile layers lean, see [copying multiple files in a single Dockerfile layer](https://www.bitdoze.com/copy-multiple-files-in-one-layer-using-a-dockerfile/).
+
+### Multi-Stage Builds: Build as Root, Run as User
+
+Multi-stage builds let you install packages and compile as root in a build stage, then copy only the artifacts into a clean runtime stage running as a non-root user:
+
+```dockerfile
+# Build stage: runs as root, installs dependencies
+FROM ubuntu:24.04 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential
+COPY . /src
+WORKDIR /src
+RUN make build
+
+# Runtime stage: minimal image, non-root user
+FROM ubuntu:24.04
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
+COPY --chown=1001:1001 --from=builder /src/app /home/appuser/app
+USER 1001:1001
+WORKDIR /home/appuser
+CMD ["./app"]
+```
+
+The runtime image never has `build-essential`, source code, or build artifacts. Smaller attack surface, smaller image.
+
+## Method 2: Add Users at Runtime (Debugging Only)
+
+Runtime user changes are temporary and useful only for debugging or one-off tasks. They live in the writable container layer and are **lost when the container is recreated**.
+
+<Notice type="warning" title="Runtime Changes Are Ephemeral">
+Any users or permission changes made inside a running container are lost when it's recreated (`docker compose up`, `docker rm`). Bake users into the image for anything that needs to survive a restart. See [updating containers with Docker Compose](https://www.bitdoze.com/updating-container-docker-compose/) for how redeployments wipe the writable layer.
+</Notice>
+
+### `docker run -u` / `--user` and `--group-add`
+
+The `-u` / `--user` flag overrides the container's default user at runtime. Numeric IDs don't require an `/etc/passwd` entry:
+
+```bash
+# Run as UID 1001 with GID 1001
+docker run --rm -it -u 1001:1001 myimage sh
+
+# Add supplementary group 2000 (e.g., a shared volume group)
+docker run --rm -it --user 1001:1001 --group-add 2000 myimage id
+
+# Accepted formats:
+#   -u user          # looked up in /etc/passwd
+#   -u user:group    # both looked up
+#   -u uid           # numeric, no lookup needed
+#   -u uid:gid       # numeric, no lookup needed
+#   -u user:gid      # mixed
+#   -u uid:group     # mixed
+```
+
+This is useful for testing whether your app works as a non-root user before committing the change to the Dockerfile.
+
+### Inspect as Another User With `docker exec -u`
+
+Instead of modifying a running container, use `docker exec -u` to run commands as a different user:
+
+```bash
+# Open a shell as appuser inside a running container
+docker exec -it -u appuser mycontainer sh
+
+# Run a single command as a specific UID
+docker exec -u 1001:1001 mycontainer whoami
+# appuser
+
+# Check what files the app user can access
+docker exec -u 1001:1001 mycontainer ls -la /app
+```
+
+This doesn't modify the container — you're just running a process as a different user. Great for diagnosing permission issues. For debugging container logs, see [redirecting Docker logs to a single file](https://www.bitdoze.com/redirect-docker-logs-to-a-single-file/).
+
+## Method 3: Map Host UID/GID to Fix Volume Permissions
+
+This is the section that solves the bind-mount ownership problem from the intro. The core issue: container UID 0 (root) writes files to a mounted volume, and the host sees root-owned files that your host user (UID 1000) can't edit.
+
+The fix: pin the app UID to match the host user.
+
+### Build-Arg UID/GID Mapping
+
+Pass the host user's UID/GID at build time:
+
+```dockerfile
+FROM ubuntu:24.04
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+
+RUN groupadd -g "$GROUP_ID" appgroup && \
+    useradd --no-log-init -u "$USER_ID" -g "$GROUP_ID" -m -s /usr/sbin/nologin appuser
+
+USER "$USER_ID:$GROUP_ID"
+```
+
+Build with your host user's IDs:
+
+```bash
+docker build --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t myapp .
+```
+
+The default of 1000 matches the standard first user on most Linux systems. On a single-user VPS, this is almost always correct. For more on build args, see [ARG and ENV in Docker](https://www.bitdoze.com/docker-env-vars/).
+
+### Docker Compose: `user`, `group_add`, and `PUID`/`PGID`
+
+The Compose spec supports `user` and `group_add` directly. No `version:` key needed (it's obsolete in Compose V2), and the command is `docker compose`, not `docker-compose`:
+
+```yaml
+services:
+  app:
+    build: .
+    user: "1001:1001"
+    group_add:
+      - "2000"
+    volumes:
+      - .:/app
+    environment:
+      - USER_ID=${USER_ID:-1001}
+      - GROUP_ID=${GROUP_ID:-1001}
+```
+
+```bash
+docker compose up -d --build
+```
+
+For a single-user VPS, hard-code `user: "1000:1000"` to match the `ubuntu` deploy user. The `${UID}`/`${GID}` shell-export trick that some tutorials recommend breaks on macOS and Docker Desktop where the VM's UIDs differ.
+
+<Notice type="info" title="PUID/PGID Convention">
+Many popular self-hosted images (LinuxServer.io containers like Plex, Sonarr, Jellyfin) use `PUID` and `PGID` environment variables to set the runtime user at startup. The entrypoint script reads these values and creates/switches to the matching user. This is a convention, not a Docker feature — check your image's docs. If you're [running a Python app in Docker Compose as a non-root user](https://www.bitdoze.com/docker-run-python/), the `user:` field is the cleaner approach.
+</Notice>
+
+If you're setting up Docker for the first time, see [installing Docker on Ubuntu ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/).
+
+## Privilege Escalation Done Right: gosu Instead of sudo
+
+The old advice was to install `sudo` in your image and add users to the sudo group. Docker's own best practices now say to avoid this:
+
+> Avoid installing or using sudo as it has unpredictable TTY and signal-forwarding behavior. Instead, use gosu.
+> — Docker build best practices
+
+The gosu pattern (same as the official Postgres image) starts the entrypoint as root, fixes ownership of data directories, then drops to the app user:
+
+```dockerfile
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gosu && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m appuser
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
+```
+
+```bash
+#!/bin/sh
+set -e
+
+# If running as root, fix ownership and drop to appuser
+if [ "$(id -u)" = "0" ]; then
+    chown -R appuser:appgroup /data
+    exec gosu appuser "$@"
+fi
+
+exec "$@"
+```
+
+The container starts as root (so it can `chown` the data volume), then `exec gosu appuser` replaces the process with the unprivileged user. The app never runs as root.
+
+<Notice type="error" title="Never Bake Secrets Into Image Layers">
+Passwords and keys in `RUN` commands are visible via `docker history`. The old pattern of `echo 'appuser:password' | chpasswd` puts a plaintext password in the image forever. Use runtime environment variables or [securing secrets in Docker Compose](https://www.bitdoze.com/docker-compose-secrets/) instead.
+</Notice>
+
+## Advanced Hardening: Userns-Remap and Rootless Docker
+
+The `USER` instruction handles most cases. If you need stronger isolation (multi-tenant hosts, untrusted images, compliance requirements), two options exist:
+
+### User-Namespace Remapping
+
+Maps container root (UID 0) to an unprivileged host UID. Add to `/etc/docker/daemon.json`:
+
+```json
+{ "userns-remap": "default" }
+```
+
+```bash
+sudo systemctl restart docker
+id dockremap                              # daemon-created remap user
+grep dockremap /etc/subuid /etc/subgid    # verify 65536-range subordinate IDs
+```
+
+Caveats:
+
+- **Enable on a fresh install only** — it masks existing images and containers. You'll need to re-pull everything.
+- Per-container opt-out: `docker run --userns=host` (but this has side effects on file ownership).
+- `--privileged` requires `--userns=host`; `mknod` is denied in user namespaces.
+- Bind-mount ownership must be pre-arranged — the remapped UID on the host won't match your expectations unless you plan for it.
+
+<Notice type="warning" title="Docker 29 + Userns-Remap">
+On Docker 29.x fresh installs, the containerd image store is the default and is temporarily incompatible with userns-remap (moby/moby#47377). Enabling remap switches the daemon back to the legacy image store. Verify behavior on your exact Docker version before enabling in production.
+</Notice>
+
+### Rootless Mode
+
+Runs the Docker daemon itself as an unprivileged user. Prerequisites: `newuidmap`/`newgidmap` and at least 65,536 subordinate UIDs in `/etc/subuid` and `/etc/subgid`.
+
+```bash
+# Install the rootless setup tool
+dockerd-rootless-setuptool.sh install
+
+# Start the rootless daemon
+systemctl --user start docker
+```
+
+Docker 29.5.0 made `gvisor-tap-vsock` the default rootless network driver, which improves compatibility.
+
+**When to bother:** If you're running untrusted images, hosting for multiple users, or have compliance requirements. For a single-user VPS running your own images, `USER` in the Dockerfile is enough. For more on Docker security, see [hardening Docker on a Hetzner VPS](https://www.bitdoze.com/bsi-security-report-docker-ufw/).
+
+## Verify Before You Deploy
+
+Don't assume — verify. Run these commands after building and after every deploy:
+
+<ListCheck>
+<ul>
+<li>`docker run --rm myimage id` — expect `uid=1001(appuser) gid=1001(appgroup)`</li>
+<li>`docker inspect --format '{{.Config.User}}' myimage` — expect `1001:1001`</li>
+<li>`docker exec -it mycontainer id` — confirm inside a running container</li>
+<li>`docker compose exec app id` — Compose equivalent</li>
+<li>`docker exec mycontainer touch /app/check.txt && ls -l ./check.txt` — expect your UID, not root</li>
+<li>`docker build --check .` — Dockerfile linter catches missing `USER` (Dockerfile v1.8.0+)</li>
+</ul>
+</ListCheck>
+
+Quick verification script:
+
+```bash
+# After build — confirm the image's default user
+docker run --rm myimage id
+
+# Inspect without running
+docker create --name tmp myimage && docker inspect --format '{{.Config.User}}' tmp && docker rm tmp
+
+# Inside a running container
+docker exec -it mycontainer id
+
+# Bind-mount ownership check (host side)
+docker exec mycontainer touch /app/check.txt && ls -l ./check.txt
+# Should show your host UID (e.g., 1000), not root
+```
+
+## Troubleshooting: Common Permission Failure Modes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Files in bind mount owned by root | Container ran as root | Pin app UID to host UID (`user: "1000:1000"`) or one-time `sudo chown -R $(id -u):$(id -g) ./data` |
+| `COPY --chown=name` fails at build | Name not in `/etc/passwd` yet at that layer | Use numeric UID: `COPY --chown=1001:1001` |
+| Port &lt; 1024 denied for non-root | Non-root can't bind privileged ports | `--cap-add NET_BIND_SERVICE` or use a high port |
+| Users vanished after `docker compose up` | Runtime changes are ephemeral | Bake user into the Dockerfile |
+| Entrypoint needs root to chown volumes | App user can't fix ownership at startup | Use gosu entrypoint pattern or Compose `pre_start` hook with `user: root` |
+| `userns-remap` hides existing images | Remap masks the image/container store | Enable on fresh hosts only; re-pull images |
+| macOS host UID doesn't match container | Docker Desktop VM UIDs differ | Test on a Linux VPS; hard-code UID for production |
+
+<Accordion label="Why are my files owned by root after Docker writes to them?" group="faq">
+When a container runs as root (the default) and writes to a bind-mounted volume, the files are created with UID 0 on the host. Your host user (typically UID 1000) can't edit or delete them without `sudo`.
+
+**Fix in the image:** Set `USER 1000:1000` in your Dockerfile (or `user: "1000:1000"` in Compose) so the process runs as your host user.
+
+**Fix after the fact:** Run `sudo chown -R $(id -u):$(id -g) ./data` on the host. To prevent it from happening again, pin the UID in your Dockerfile.
+</Accordion>
+
+<Accordion label="Why does COPY --chown fail with a username?" group="faq">
+`COPY --chown=name:group` resolves the name against `/etc/passwd` and `/etc/group` during the build. If the user hasn't been created yet at that point in the Dockerfile (or the file doesn't exist in the build stage), the build fails.
+
+**Fix:** Use numeric UIDs instead: `COPY --chown=1001:1001`. This works regardless of whether `/etc/passwd` has the entry.
+</Accordion>
+
+<Accordion label="Why can't my non-root container bind port 80?" group="faq">
+On Linux, ports below 1024 are privileged — only root (or processes with `CAP_NET_BIND_SERVICE`) can bind them. This is why the official Nginx image keeps a root master process.
+
+**Fix options:**
+1. `--cap-add NET_BIND_SERVICE` on the container (grants just the bind capability)
+2. Use a high port (8080, 8443) and map it in Compose: `ports: ["8080:80"]`
+3. Use a reverse proxy (Caddy, Traefik) that handles port 80/443 and forwards to your app's high port
+</Accordion>
+
+For more Docker commands and patterns, bookmark the [essential Docker commands](https://www.bitdoze.com/docker-commands/) reference.
+
+## Quick Reference: User Creation Commands
+
+| Task | Ubuntu/Debian | Alpine |
+|------|--------------|--------|
+| Create user with home dir | `useradd --no-log-init -m -s /bin/bash user` | `adduser -D -s /bin/sh user` |
+| Create group | `groupadd -g 1001 appgroup` | `addgroup -g 1001 appgroup` |
+| Create user with specific UID/GID | `useradd --no-log-init -u 1001 -g appgroup -m user` | `adduser -D -u 1001 -G appgroup user` |
+| Add user to group | `usermod -aG sudo user` | `addgroup user sudo` |
+| Set Dockerfile default user | `USER 1001:1001` | `USER 1001:1001` |
+| Run as specific user | `docker run -u 1001:1001 img` | Same |
+| Exec as specific user | `docker exec -u user container cmd` | Same |
+| Compose user override | `user: "1001:1001"` | Same |
+| Compose supplementary groups | `group_add: ["2000"]` | Same |
+| Copy with ownership | `COPY --chown=1001:1001 src/ dest/` | Same |
+
+## TL;DR
+
+<ListCheck>
+<ul>
+<li>Always create non-root users for production containers — `USER 1001:1001` in the Dockerfile</li>
+<li>Pin UID/GID (e.g., 1001:1001) to avoid permission headaches with bind-mounted volumes</li>
+<li>Use `COPY --chown=1001:1001` with numeric UIDs — names can fail at build time</li>
+<li>Verify with `docker run --rm myimage id` and `ls -l` on bind mounts before deploying</li>
+<li>Use gosu (not sudo) when your entrypoint needs root at startup to fix volume ownership</li>
+</ul>
+</ListCheck>
+
+Some other Docker articles that can help you in your Docker journey:
 
 - [Copy Multiple Files in One Layer Using a Dockerfile](https://www.bitdoze.com/copy-multiple-files-in-one-layer-using-a-dockerfile/)
 - [Install Docker & Docker-compose for Ubuntu ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/)
 - [Redirect Docker Logs to a Single File](https://www.bitdoze.com/redirect-docker-logs-to-a-single-file/)
 - [Environment Variables ARG and ENV in Docker](https://www.bitdoze.com/docker-env-vars/)
-
-## Method 2: Add Users at Runtime
-
-Sometimes you need to create users in an already running container. Not recommended for production, but useful for debugging.
-
-### Create User in Running Container
-
-```bash
-# Enter the container
-docker exec -it container_name bash
-
-# Create user inside container
-useradd -m -s /bin/bash newuser
-
-# Set password
-passwd newuser
-
-# Add to sudo group (if needed)
-usermod -aG sudo newuser
-
-# Switch to new user
-su - newuser
-```
-
-### Using Docker Exec with Specific User
-
-```bash
-# Run commands as specific user
-docker exec -it --user newuser container_name bash
-
-# Or run single commands
-docker exec --user newuser container_name whoami
-```
-
-## Method 3: Map Host Users to Container
-
-When you mount volumes, file ownership can get messy. This method keeps host and container permissions in sync.
-
-### User ID/Group ID Mapping
-
-```dockerfile
-FROM ubuntu:20.04
-
-# Create user with specific UID/GID that matches host user
-ARG USER_ID=1000
-ARG GROUP_ID=1000
-
-RUN groupadd -g $GROUP_ID appgroup && \
-    useradd -u $USER_ID -g $GROUP_ID -m -s /bin/bash appuser
-
-USER appuser
-```
-
-Build with host user IDs:
-```bash
-docker build --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t myapp .
-```
-
-### Docker Compose User Mapping
-
-```yaml
-version: '3.8'
-services:
-  app:
-    build: .
-    user: "${UID}:${GID}"
-    volumes:
-      - .:/app
-    environment:
-      - USER_ID=${UID}
-      - GROUP_ID=${GID}
-```
-
-Run with:
-```bash
-UID=$(id -u) GID=$(id -g) docker-compose up
-```
-
-## Best Practices
-
-### 1. Never Run as Root in Production
-```dockerfile
-# Good
-FROM ubuntu:20.04
-RUN useradd -m appuser
-USER appuser
-
-# Bad - root by default
-FROM ubuntu:20.04
-```
-
-### 2. Use Specific UID/GID
-Avoid permission headaches with mounted volumes:
-```dockerfile
-RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -g appgroup -m appuser
-USER appuser
-```
-
-### 3. Use Multi-Stage Builds
-Build as root, run as user:
-```dockerfile
-# Build stage
-FROM ubuntu:20.04 as builder
-RUN apt-get update && apt-get install -y build-essential
-COPY . /src
-WORKDIR /src
-RUN make build
-
-# Runtime stage
-FROM ubuntu:20.04
-RUN useradd -m appuser
-USER appuser
-COPY --from=builder /src/app /home/appuser/app
-```
-
-### 4. Set File Ownership
-Use `COPY --chown` to avoid permission issues:
-```dockerfile
-COPY --chown=appuser:appuser app/ /home/appuser/app/
-USER appuser
-```
-
-### Quick Checklist
-
-| ✅ Do | ❌ Don't |
-|-------|----------|
-| Create dedicated users | Run as root in production |
-| Set specific UID/GID | Use random UIDs |
-| Set proper ownership | Use 777 permissions |
-| Test before deploying | Assume it just works |
-
-## Quick Reference
-
-### Common User Creation Commands
-```bash
-# Create user with home directory
-useradd -m -s /bin/bash username
-
-# Create user with specific UID/GID
-useradd -u 1001 -g 1001 -m username
-
-# Add user to group
-usermod -aG groupname username
-
-# Change file ownership
-chown -R username:groupname /path/to/files
-```
-
-### Dockerfile User Examples
-```dockerfile
-# Simple non-root user
-FROM ubuntu:20.04
-RUN useradd -m appuser
-USER appuser
-
-# User with sudo access
-FROM ubuntu:20.04
-RUN apt-get update && apt-get install -y sudo
-RUN useradd -m -s /bin/bash appuser
-RUN usermod -aG sudo appuser
-USER appuser
-
-# User with specific UID/GID
-FROM ubuntu:20.04
-RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -g appgroup -m appuser
-USER appuser
-```
-
-## TL;DR
-
-1. **Always create non-root users** for production containers
-2. **Use specific UID/GID** to avoid permission issues with volumes
-3. **Set file ownership** with `COPY --chown`
-4. **Test before deploying** - run `whoami` and check permissions
-
-Start simple. Create a non-root user in your Dockerfile. Worry about namespaces and advanced security later.
