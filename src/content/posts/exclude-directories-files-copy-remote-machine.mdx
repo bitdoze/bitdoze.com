@@ -1,123 +1,533 @@
 ---
-date: 2025-07-20T00:00:00Z
-title: "How to Exclude Directories or Files When Copying to a Remote Machine"
-description: "Learn how to exclude specific files and directories when copying to remote servers using rsync and scp commands with practical examples."
+date: 2026-08-26T00:00:00Z
+title: "Rsync Exclude Files & Directories: Copy to a Remote Machine"
+meta_title: "Rsync Exclude Files & Directories: Remote Copy Guide"
+description: "Learn how to rsync exclude files and directories when copying to a remote machine: --exclude patterns, --exclude-from, dry runs, scp caveats, safe deploys."
+slug: exclude-directories-files-copy-remote-machine
 image: "../../assets/images/23/07/linux-scp-rsync-exclude-files.jpeg"
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["linux", "rsync", "scp"]
 canonical: https://www.bitdoze.com/exclude-directories-files-copy-remote-machine/
 ---
 
-You need to copy files to a remote server but skip certain directories like `node_modules` or `.git`. Two options:
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
 
-- **rsync** - Has built-in exclude support (use this)
-- **scp** - No native exclude, needs workarounds
+# How to Exclude Files and Directories with Rsync When Copying to a Remote Machine
 
-Rsync is the clear winner here.
+Need to copy files to a remote machine but skip `node_modules`, `.git`, or build artifacts? Use **rsync to exclude files and directories** with the `--exclude` flag. It's the industry-standard answer. scp has no native exclude, and the old scp protocol is deprecated since OpenSSH 9.0.
 
-## Excluding Files or Directories with Rsync
+This guide covers the patterns, dry-run habits, security gotchas, and alternatives you need to copy safely. If you're [deploying a static Astro site to a VPS](/deploy-astro-on-vps/) or pushing app code to a server you [chose from a VPS provider comparison](/digitalocean-vs-vultr-vs-hetzner/), rsync handles this well.
 
-rsync provides powerful exclusion options through the `--exclude` flag:
+<ListCheck>
+<ul>
+<li>rsync `--exclude` basics and trailing-slash semantics</li>
+<li>Dry-run before you copy (the habit that saves production)</li>
+<li>Pattern rules: anchored, unanchored, directory-only</li>
+<li>Include/exclude ordering and the whitelist idiom</li>
+<li>`--delete` vs `--delete-excluded` for mirror deploys</li>
+<li>scp caveats (no native exclude, SFTP-based since 2022)</li>
+<li>Security: keep rsync patched on both ends</li>
+<li>Alternatives: tar over SSH, rclone</li>
+</ul>
+</ListCheck>
 
-### Basic Exclusion Syntax
+## Prerequisites
+
+Before you start, make sure you have:
+
+<ListCheck>
+<ul>
+<li>rsync installed on **both** local and remote machines</li>
+<li>SSH key access to the remote server</li>
+<li>A source directory to copy</li>
+</ul>
+</ListCheck>
+
+Check your rsync version on both ends:
+
+```shell
+rsync --version
+```
+
+You want **3.2.7 or newer** with distro security backports, or upstream 3.5.0. See the [security section](#security-keep-rsync-patched-on-both-ends) below for why this matters.
+
+<Notice type="warning" title="macOS ships outdated rsync">
+macOS bundles an ancient 2.6.9-derived rsync that is vulnerable to CVE-2024-12084 (CVSS 9.8). If you're on a Mac, install the current version with Homebrew: `brew install rsync`.
+</Notice>
+
+## Rsync exclude basics: skip files and directories
+
+The core command shape for rsync exclude is:
+
 ```shell
 rsync -av --exclude 'pattern' source/ user@remote:/destination/
 ```
 
-### Common Use Cases
+You can repeat `--exclude` as many times as needed. Each pattern is checked against every file and directory being transferred.
 
-**Exclude specific directories:**
+### Trailing-slash semantics (source/ vs source)
+
+This is the #1 rsync gotcha. The trailing slash on the source path changes what gets copied:
+
+**With trailing slash** copies the *contents* of `source/` into `/destination/`:
+
+```shell
+rsync -av source/ user@remote:/destination/
+# Result: source/file.txt → /destination/file.txt
+```
+
+**Without trailing slash** creates `/destination/source/` and copies into it:
+
+```shell
+rsync -av source user@remote:/destination/
+# Result: source/file.txt → /destination/source/file.txt
+```
+
+The same convention applies to the destination path. When in doubt, add the trailing slash on both sides and verify with a dry run.
+
+### Exclude directories: node_modules and .git
+
+The most common use case: skip heavy directories during deploys.
+
 ```shell
 rsync -av --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
 ```
 
-**Exclude by file patterns:**
+Without a trailing slash, the pattern matches both files and directories with that name. Add a trailing slash to match directories only:
+
+```shell
+rsync -av --exclude 'node_modules/' source/ user@remote:/destination/
+```
+
+### Exclude files by pattern
+
+Use shell-glob-style wildcards (`*`, `?`, `[...]`), not regex:
+
 ```shell
 rsync -av --exclude '*.log' --exclude '*.tmp' source/ user@remote:/destination/
 ```
 
-**Exclude multiple items:**
+### Exclude multiple items (two --exclude flags, NOT {} braces)
+
+<Notice type="error" title="rsync does NOT support brace expansion">
+`--exclude '*.{log,tmp}'` (quoted) matches **nothing** in rsync. The `{}` syntax only works when bash expands it before rsync sees it (unquoted). Use two separate `--exclude` flags instead:
+
 ```shell
-rsync -av --exclude={'*.log','tmp/','cache/'} source/ user@remote:/destination/
+# Wrong: matches nothing when quoted
+rsync -av --exclude '*.{log,tmp}' source/ user@remote:/dest/
+
+# Correct: two separate flags
+rsync -av --exclude '*.log' --exclude '*.tmp' source/ user@remote:/dest/
+```
+</Notice>
+
+The unquoted brace form `--exclude={'*.log','tmp/','cache/'}` does work, but only because **bash** expands it into three separate `--exclude` arguments before rsync runs. It's a shell trick, not an rsync feature. If you put that in a script with `#!/bin/sh`, it breaks.
+
+## Dry-run first: preview before you copy
+
+Always run with `--dry-run` (`-n`) before the real copy. This shows what *would* be transferred without touching anything:
+
+```shell
+rsync -avn --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
 ```
 
-**Using exclude files:**
-Create a `.rsync-exclude` file with patterns:
-```
-*.log
-*.tmp
-node_modules/
-.git/
-cache/
+Add `-i` / `--itemize-changes` to see exactly which files move and how:
+
+```shell
+rsync -avni --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
 ```
 
-Then use:
+Output looks like:
+
+```
+>f+++++++++ src/index.ts
+>f+++++++++ src/app.ts
+.d..t...... .git/
+cd+++++++++ node_modules/
+```
+
+The `>` means a file is being transferred. `*deleting` means a file would be removed on the destination (with `--delete`). If the output doesn't match what you expect, fix your exclude patterns before running the real copy.
+
+<Notice type="info" title="Always dry-run first">
+A bad exclude pattern can delete files on the destination when used with `--delete`. Preview with `-n` before committing. This is the most important habit for safe rsync usage.
+</Notice>
+
+## Rsync exclude patterns that actually matter
+
+Here's the corrected pattern reference, the patterns rsync understands:
+
+| Pattern | Matches | Example |
+|---------|---------|---------|
+| `*.txt` | All .txt files at any depth | `file.txt`, `src/readme.txt` |
+| `temp*` | Files/dirs starting with "temp" at any depth | `temp1`, `temporary` |
+| `cache/` | Any directory named "cache" at any depth | `app/cache/`, `src/cache/` |
+| `/node_modules/` | Only TOP-LEVEL node_modules (anchored) | `./node_modules/` ✅, `./src/node_modules/` ❌ |
+| `*.log` + `*.tmp` | Multiple extensions (use two flags) | `error.log`, `data.tmp` |
+
+Key concepts:
+
+- **Anchored patterns**: A leading `/` anchors the pattern to the transfer root. `/node_modules/` excludes only the top-level `node_modules`; bare `node_modules/` excludes any `node_modules` directory at any depth.
+- **Trailing `/`**: Restricts the match to directories only. `cache/` matches directories named `cache`; `cache` matches both files and directories named `cache`.
+- **Interior slash**: A pattern containing a slash is matched against the full path from the transfer root. `src/cache/` only matches `src/cache/` relative to the source.
+- **No brace expansion**: rsync does not support `{a,b}` in filter patterns. Use separate `--exclude` flags.
+
+## Include and exclude ordering: first match wins
+
+rsync processes `--include` and `--exclude` in the order you specify them. First match wins. This lets you build whitelist patterns: include what you want, then exclude everything else.
+
+Example: keep only `.git/config` from the `.git` directory, drop everything else:
+
+```shell
+rsync -av --include='.git/config' --exclude='.git/**' --exclude='*' source/ user@remote:/destination/
+```
+
+This is useful when you need a specific config file from a directory you'd normally exclude entirely. The order matters: the `--include` must come before the `--exclude` that would catch it.
+
+## --delete vs --delete-excluded: exact-mirror deploys
+
+By default, rsync **preserves** excluded files on the destination. If `node_modules/` exists on the remote but you excluded it, rsync leaves it alone.
+
+`--delete` removes extraneous files on the destination, but only files that are **not** excluded:
+
+```shell
+rsync -av --delete --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
+```
+
+`--delete-excluded` goes further. It actively deletes destination copies of excluded paths:
+
+```shell
+rsync -av --delete --delete-excluded --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
+```
+
+<Notice type="warning" title="--delete-excluded is destructive">
+`--delete-excluded` will delete files on the remote that match your exclude patterns. If you exclude `*.log` and the destination has logs you want to keep, they're gone. Always `--dry-run` first.
+</Notice>
+
+For exact-mirror CI/CD deploys where the destination should be a clean copy of the source (minus excludes), `--delete-excluded` is what you want. For everything else, plain `--delete` or no delete flag is safer.
+
+## Using an exclude file: --exclude-from
+
+For repeatable deploys, put your patterns in a file:
+
 ```shell
 rsync -av --exclude-from='.rsync-exclude' source/ user@remote:/destination/
 ```
 
-### Advanced Patterns
+Example `.rsync-exclude` file:
 
-| Pattern | Matches | Example |
-|---------|---------|---------|
-| `*.txt` | All text files | `file.txt`, `readme.txt` |
-| `temp*` | Files starting with "temp" | `temp1`, `temporary` |
-| `**/cache/` | Cache directories anywhere | `app/cache/`, `src/cache/` |
-| `*.{log,tmp}` | Multiple extensions | `error.log`, `data.tmp` |
-
-## Excluding Files with SCP
-
-## Excluding Files with SCP
-
-SCP doesn't have built-in exclusion options like rsync, but you can use bash extended globbing patterns.
-
-### Enable Extended Globbing
-```shell
-shopt -s extglob
+```
+# Build artifacts
+*.log
+*.tmp
+/node_modules/      # anchored: only TOP-LEVEL node_modules
+.git/
+cache/
+dist/
+.env
 ```
 
-### Exclude Files with Patterns
+Comments start with `#`. Blank lines are ignored. The same pattern rules apply: anchored patterns, trailing slashes, no brace expansion.
+
+This is the approach I use for app deploys. The exclude file lives in the repo root, and the CI pipeline references it directly. Pair it with a [Dokploy backup setup](/dokploy-backups-cloudflare-r2/) for a complete deploy-and-backup workflow.
+
+## Deploy-ready rsync flags
+
+When you're running rsync in CI/CD or pushing to a VPS, these flags make the difference between "works on my machine" and a reliable deploy:
+
+- `--mkpath` (rsync >= 3.2.3) auto-creates missing destination path components. No more `ssh user@remote 'mkdir -p /srv/app'` before the copy.
+- `--checksum` / `-c` compares files by checksum instead of modification time. Useful when CI checkouts reset mtimes.
+- `--info=progress2` gives one overall progress bar instead of per-file spam. Much better for large transfers.
+- `-z` compresses data during transfer. Helps on slow WAN links. On modern rsync, `--zc zstd --compress-level=3` uses zstd for better compression.
+- `-e 'ssh -o ConnectTimeout=10'` sets custom SSH options. Set timeouts, use a specific key, or [reach a target host through an SSH jump host](/ssh-proxyjump-jumphost/).
+- `--bwlimit` rate-limits the transfer. `--bwlimit=5m` caps at 5 MB/s. Useful when you don't want rsync eating all your bandwidth.
+
+Full deploy command:
+
 ```shell
-# Copy everything except .txt files
+rsync -az --delete --checksum --info=progress2 \
+      --exclude='node_modules' --exclude='.git' --exclude='.env' \
+      --mkpath \
+      -e 'ssh -o ConnectTimeout=10' \
+      ./ user@remote:/srv/app
+```
+
+If you're [self-hosting deploys with Dokploy](/dokploy-install/), this is the kind of command that runs in your CI pipeline.
+
+## Security: keep rsync patched on both ends
+
+<Notice type="error" title="Security: upgrade rsync on both ends">
+rsync versions up to and including 3.4.4 have **33 known CVEs** from a focused security audit. The headline was CVE-2024-12084 (CVSS 9.8, heap buffer overflow in checksum parsing, remote code execution). rsync 3.5.0 (2026-08-13) fixed all 33 issues.
+
+You don't need upstream 3.5.0. Distro backports carry the fixes. But you **must** be on a patched build:
+
+- **Ubuntu 24.04 LTS**: `3.2.7-1ubuntu1.5` (patched via security updates)
+- **Debian trixie (stable)**: `3.4.1+ds1-5+deb13u4` (patched)
+
+Check and upgrade:
+
+```shell
+rsync --version
+sudo apt update && sudo apt upgrade rsync
+```
+
+Run this on **both** local and remote machines.
+</Notice>
+
+Other security notes:
+
+- **Don't pull from untrusted rsync daemons.** A malicious rsync server has historically been able to write outside the destination or leak files from older clients. Use rsync-over-SSH, not bare rsync daemon mode.
+- **Keep SSH hardened.** rsync runs over SSH. [Keep your SSH server hardened](/secure-ssh-server-linux/) with key-only auth, fail2ban, and a non-standard port if you're paranoid.
+
+## What about scp?
+
+scp still has **no native exclude**. That hasn't changed. But the protocol underneath has.
+
+Since **OpenSSH 9.0** (April 2022), `scp` defaults to the **SFTP protocol**, not the legacy rcp/scp protocol. The legacy protocol is deprecated. RHEL 9 ships a kill-switch (`/etc/ssh/disable_scp`) that can disable it entirely. OpenSSH's own release notes say: *"We recommend the use of more modern protocols like sftp and rsync for file transfer instead."*
+
+The bash `extglob` trick still works as a shell-level hack — it filters files *before* scp runs:
+
+<Tabs>
+<Tab name="extglob hack (fragile)">
+```shell
+# Enable extended globbing
+shopt -s extglob
+
+# Copy everything except .txt files (no -r — files only)
 scp !(*.txt) user@remote:/destination/
 
-# Copy everything except specific directories
+# Copy everything except specific directories (needs -r)
 scp -r !(node_modules|.git) user@remote:/destination/
 
 # Copy everything except log and temp files
 scp !(*.log|*.tmp) user@remote:/destination/
 ```
 
-### Extended Globbing Patterns
-
-| Pattern | Description | Example |
-|---------|-------------|---------|
-| `!(pattern)` | Matches anything except pattern | `!(*.txt)` excludes text files |
-| `*(pattern)` | Matches zero or more occurrences | `*(backup)` matches backup files |
-| `+(pattern)` | Matches one or more occurrences | `+(test*)` matches test files |
-| `?(pattern)` | Matches zero or one occurrence | `?(config)` matches config file |
-| `@(pattern)` | Matches exactly one pattern | `@(*.js|*.css)` matches JS or CSS |
-
-### Practical Examples
+Caveats:
+- Missing `-r` on file-only globs silently skips directories
+- Doesn't match dotfiles by default
+- If the negated pattern matches nothing, the literal string gets sent
+- Shell-level filtering, not an scp feature — breaks in `#!/bin/sh` scripts
+</Tab>
+<Tab name="just use rsync">
 ```shell
-# Copy only source files (exclude build artifacts)
-scp -r !(build|dist|node_modules) user@remote:/app/
+# Same result, reliable, resumable, with dry-run support
+rsync -av --exclude '*.txt' source/ user@remote:/destination/
 
-# Copy configuration files only
-scp @(*.conf|*.json|*.yaml) user@remote:/config/
+# Exclude directories
+rsync -av --exclude 'node_modules' --exclude '.git' source/ user@remote:/destination/
+
+# Exclude log and temp files
+rsync -av --exclude '*.log' --exclude '*.tmp' source/ user@remote:/destination/
 ```
 
-**Recommendation**: Use rsync instead of scp for complex exclusion needs, as it's more reliable and feature-rich.
+No hacks needed. Works in any shell. Supports dry-run, incremental sync, and compression.
+</Tab>
+</Tabs>
 
-## Quick Comparison: rsync vs scp
+<Notice type="warning" title="scp legacy protocol is deprecated">
+Since OpenSSH 9.0, scp uses SFTP under the hood. The legacy scp/rcp protocol is deprecated and may be disabled server-side (RHEL 9). If you need exclude support, use rsync. If you need a simple one-shot transfer without rsync on the remote, use tar over SSH (see below).
+</Notice>
+
+## Alternatives: tar over SSH and rclone
+
+### tar over SSH (no rsync needed on remote)
+
+When the remote doesn't have rsync installed, tar piped over SSH works as a one-shot copy. Only needs `tar` on both ends:
+
+```shell
+tar -czf - --exclude='node_modules' --exclude='.git' -C /path/to/app . \
+  | ssh user@host 'tar -xzf - -C /srv/app'
+```
+
+This preserves permissions (with `-p`, default as root). Good escape hatch for fresh servers before you've installed rsync.
+
+### rclone (cloud storage and SFTP sync)
+
+rclone is a solid alternative when you're syncing to S3-compatible storage, SFTP remotes, or need pattern-file-based sync with more filter flexibility than rsync:
+
+```shell
+rclone copy /srv/app sftp:backups/app --exclude-from .rsync-exclude --dry-run
+rclone sync /srv/app s3:backups/app --filter-from filters.txt --delete-excluded
+```
+
+Unlike rsync, rclone **does** support `{a,b}` alternates in filter patterns. It also has `--exclude-if-present` (exclude directories containing a marker file) and `--filter` / `--filter-from` for ordered include/exclude rules.
+
+If you're running [self-hosted backups with Restic and Rclone](/pluton-self-hosted-backup/), rclone's filtering is already in your toolkit.
+
+## Quick comparison: rsync vs scp
 
 | Feature | rsync | scp |
 |---------|-------|-----|
-| Built-in exclusion | ✅ `--exclude` | ❌ Requires bash globbing |
-| Pattern flexibility | ✅ Very flexible | ⚠️ Limited |
+| Built-in exclusion | ✅ `--exclude` | ❌ No native exclude |
+| Protocol | rsync protocol over SSH | SFTP-based since OpenSSH 9.0 (2022); legacy scp deprecated |
+| Pattern flexibility | ✅ Very flexible | ⚠️ Shell glob hacks only |
 | Resumable transfers | ✅ Yes | ❌ No |
-| Incremental sync | ✅ Yes | ❌ No |
-| Performance | ✅ Faster for large transfers | ⚠️ Slower |
+| Incremental sync | ✅ Delta transfer | ❌ No |
+| Security | ✅ Actively maintained (3.5.0) | ⚠️ Legacy protocol has CVE history; may be disabled server-side |
 
-**Bottom line**: Use rsync for file exclusion tasks - it's more powerful and easier to use.
+**Bottom line**: Use rsync for anything involving file exclusion. scp is fine for a quick one-off copy of a single file, but for directory sync with excludes, rsync is the only real option.
+
+## Exit codes: script rsync reliably
+
+When you're running rsync in CI/CD scripts, the exit codes matter:
+
+| Code | Meaning | Action |
+|------|---------|--------|
+| `0` | Success | Done |
+| `23` | Partial transfer (I/O errors) | Check disk space, permissions |
+| `24` | Files vanished from source | Expected on live dirs — treat as warning |
+| `25` | `--max-delete` exceeded | Safety limit hit, check your exclude patterns |
+| `11–14` | Protocol/socket errors | Network issue, SSH problem |
+
+Exit code 24 is the one that trips up CI pipelines. Files changing during a sync on a live system is normal. Handle it:
+
+```shell
+rsync -av --exclude 'node_modules' source/ user@remote:/destination/
+rc=$?
+if [ "$rc" -eq 24 ]; then
+  echo "some files vanished mid-sync (rc=24) — likely OK"
+  rc=0
+fi
+exit $rc
+```
+
+rsync ships `atomic-rsync` and `rsync-no-vanished` in its `support/` directory as CI-friendly wrappers that handle this automatically.
+
+## Verify the copy landed
+
+After a large sync, confirm everything arrived. Run a checksum dry-run against the destination:
+
+```shell
+rsync -rcn source/ user@remote:/destination/
+```
+
+If it reports no changes, everything arrived correctly. For smaller directory trees, `diff -rq` works too — see how to [compare two folders for differences](/compare-folders-content-differences/).
+
+<Notice type="success" title="Trust but verify">
+After a large sync, `rsync -rcn source/ user@remote:/destination/` is a quick sanity check. If the output is empty, the destination matches the source.
+</Notice>
+
+## Common failure modes and fixes
+
+<Accordion label="Permission denied on remote" group="troubleshooting">
+**Symptom**: `rsync: send_files failed to open "/path": Permission denied (13)`
+
+**Cause**: The SSH user doesn't have write permissions on the destination directory.
+
+**Fix**: Check SSH access and destination permissions:
+```shell
+ssh user@remote 'ls -la /destination/'
+```
+Make sure the user owns or has write access to the destination. If needed: `sudo chown -R user:user /destination/`
+</Accordion>
+
+<Accordion label="No such file or directory" group="troubleshooting">
+**Symptom**: `rsync: mkdir "/destination/path" failed: No such file or directory (2)`
+
+**Cause**: The destination path doesn't exist.
+
+**Fix**: Use `--mkpath` (rsync ≥ 3.2.3) to auto-create it, or create it manually first:
+```shell
+rsync -av --mkpath source/ user@remote:/destination/new/path/
+# or
+ssh user@remote 'mkdir -p /destination/new/path/'
+```
+</Accordion>
+
+<Accordion label="Exclude pattern not working" group="troubleshooting">
+**Symptom**: Files you meant to exclude are still being copied.
+
+**Cause**: Brace expansion, missing trailing slash, or anchored vs unanchored mismatch.
+
+**Fix**: Dry-run with `-n` to test patterns:
+```shell
+rsync -avn --exclude 'yourpattern' source/ user@remote:/destination/
+```
+Common mistakes: using `*.{log,tmp}` (rsync doesn't expand braces), forgetting the trailing `/` for directory-only matching, or using `/node_modules/` (anchored) when you need `node_modules/` (any depth).
+</Accordion>
+
+<Accordion label="Exit code 23 (partial transfer)" group="troubleshooting">
+**Symptom**: rsync exits with code 23.
+
+**Cause**: I/O errors during transfer — usually disk full on the remote.
+
+**Fix**: Check disk space on the remote:
+```shell
+ssh user@remote 'df -h'
+```
+</Accordion>
+
+<Accordion label="Exit code 24 (vanished files)" group="troubleshooting">
+**Symptom**: rsync exits with code 24.
+
+**Cause**: Files were deleted or changed on the source during the sync. Common on live application directories.
+
+**Fix**: Usually safe to ignore. Treat as a warning, not a failure. See the [exit codes section](#exit-codes-script-rsync-reliably) for the scripting idiom.
+</Accordion>
+
+<Accordion label="Slow transfer" group="troubleshooting">
+**Symptom**: rsync is transferring data much slower than expected.
+
+**Cause**: No compression on a WAN link, or network bottleneck.
+
+**Fix**: Add `-z` for compression, or use zstd on modern rsync:
+```shell
+rsync -az --zc zstd --compress-level=3 source/ user@remote:/destination/
+```
+</Accordion>
+
+<Accordion label="Ancient rsync on macOS" group="troubleshooting">
+**Symptom**: `rsync --version` shows 2.6.9 on macOS.
+
+**Cause**: macOS ships an outdated, vulnerable rsync.
+
+**Fix**: Install current rsync via Homebrew:
+```shell
+brew install rsync
+```
+</Accordion>
+
+## Frequently asked questions
+
+<Accordion label="Can I use rsync exclude with cron or automated backups?" group="faq">
+Yes. Combine `--exclude-from` with a pattern file in your cron job:
+
+```shell
+0 2 * * * rsync -az --exclude-from /home/user/.rsync-exclude /srv/app/ user@backup:/backups/app/
+```
+
+For a more complete backup strategy, [schedule remote backups from Dokploy](/dokploy-backups-cloudflare-r2/) or set up [self-hosted backups with Restic and Rclone](/pluton-self-hosted-backup/).
+</Accordion>
+
+<Accordion label="Does rsync exclude work with --delete?" group="faq">
+Yes, but excluded files are **preserved** on the destination by default. `--delete` only removes extraneous non-excluded files. Use `--delete-excluded` to also remove destination copies of excluded paths. Always `--dry-run` first when using `--delete`.
+</Accordion>
+
+<Accordion label="What's the difference between rsync exclude and filter?" group="faq">
+`--exclude 'pattern'` is shorthand for `--filter '- pattern'`. Filters give more control — you can combine include and exclude rules in order, and the first match wins. For most use cases, `--exclude` is enough. Use `--filter` when you need the whitelist idiom (include specific files, exclude everything else).
+</Accordion>
+
+<Accordion label="Can I exclude files based on size?" group="faq">
+Yes, but it's not an exclude pattern — it's a separate flag. `--max-size=10m` excludes files larger than 10 MB. Useful for skipping large build artifacts or media files:
+
+```shell
+rsync -av --max-size=10m source/ user@remote:/destination/
+```
+</Accordion>
+
+<Accordion label="Is rsync secure for transferring sensitive files?" group="faq">
+Yes. rsync-over-SSH is encrypted end-to-end. Keep rsync patched (3.5.0+ or distro backports). Don't use untrusted rsync daemons — stick to SSH transport. For SSH hardening tips, see [keep your SSH server hardened](/secure-ssh-server-linux/).
+</Accordion>
+
+## Conclusion
+
+rsync `--exclude` is the answer for excluding files and directories when copying to a remote machine. The pattern is simple: dry-run first, then copy. Keep rsync patched on both ends — the 33 CVEs fixed in 3.5.0 are not theoretical.
+
+scp has no native exclude and its legacy protocol is deprecated. For cloud or SFTP sync, rclone is a solid alternative with better filter flexibility. For one-shot copies without rsync on the remote, tar over SSH works.
+
+If you're building out your Linux skills, check out [our 100+ essential Linux commands guide](/linux-commands/). And if you're setting up a new server to deploy to, start with a solid VPS — [Hetzner](https://go.bitdoze.com/hetzner) is my default for cheap reliable EU boxes, and [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) is a good budget alternative.
