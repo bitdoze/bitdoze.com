@@ -1,273 +1,317 @@
 ---
-date: 2025-07-24T00:00:00Z
-title: "Bulk URL Checker with uv: Validate Website Accessibility in Python"
-description: "Learn how to build a powerful URL checker script using uv that validates multiple websites concurrently, detects broken links, and generates detailed reports."
+date: 2026-08-27T00:00:00Z
+lastmod: 2026-08-27T00:00:00Z
+title: "Bulk URL Checker with uv: Find Broken Links in Python"
+meta_title: "Bulk URL Checker with uv | Find Broken Links in Python"
+description: "Learn how to build a bulk URL checker in Python with uv: check hundreds of URLs concurrently, flag broken links, 404s, and timeouts, and schedule it in CI."
 image: "@images/25/01/uv-url-checker.webp"
+imageAlt: "Terminal running a bulk URL checker Python script with uv, printing HTTP status codes for a list of URLs"
 categories: ["tools"]
 authors: ["Dragos"]
-tags: ["uv", "python"]
+tags: ["uv", "python", "url-checker"]
 canonical: "https://www.bitdoze.com/uv-url-checker-script/"
 ---
 
-Broken links suck. They annoy users, hurt your SEO, and make you look unprofessional. I wrote this script to check hundreds of URLs at once because manually clicking through links is a waste of time.
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
 
-This tool checks URLs in parallel, categorizes what went wrong, and saves the broken ones to a file. I use it for auditing sites, checking external links, and monitoring APIs. It's simple but gets the job done.
+Broken links hurt your SEO, annoy visitors, and make a site look abandoned. I wrote this bulk URL checker to scan hundreds of URLs at once, flag 404s, 500s, timeouts, and connection errors, then write the broken ones to a file for review. It runs as a single Python script with `uv run`. No virtualenv, no `requirements.txt`, no pip install. Updated for uv 0.12 (Aug 2026).
 
 <Notice type="info" title="New to uv?">
   If you're new to uv or want to learn how to set up full Python projects, start
-  with our comprehensive guide [Getting Started with uv: Setting Up Your Python
-  Project in 2025](https://www.bitdoze.com/uv-get-start/) before diving into
-  this advanced script.
+  with [Getting Started with uv: Python Project Setup in
+  2026](https://www.bitdoze.com/uv-get-start/) before diving into this script.
 </Notice>
 
-## What This Script Does
+## What this script does
 
-- **Checks multiple URLs at once**: Uses ThreadPoolExecutor to run requests in parallel
-- **Fixes URLs without protocols**: Automatically adds HTTPS if missing
-- **Catches different error types**: Timeouts, connection errors, HTTP errors
-- **Shows response times**: See how fast each URL responds
-- **Reads from files**: Load URLs from a text file
-- **Saves broken links**: Writes problematic URLs to a file for review
-- **Shows progress**: Real-time counter while checking
+<ListCheck>
+<ul>
+<li>Checks multiple URLs concurrently with ThreadPoolExecutor</li>
+<li>Auto-prepends `https://` when no scheme is provided</li>
+<li>Classifies errors: TIMEOUT, CONNECTION_ERROR, SSL_ERROR, CLIENT_ERROR, SERVER_ERROR</li>
+<li>Reads URLs from a text file (skips comments and blank lines)</li>
+<li>Writes broken URLs to an output file for review</li>
+<li>Real-time progress counter while checking</li>
+<li>CLI flags for automation: `--timeout`, `--workers`, `--output`, `--head`, `--insecure`</li>
+<li>Exits with code 1 when broken links are found (for CI integration)</li>
+</ul>
+</ListCheck>
 
-## The Script
+## Why uv? Run Python scripts with zero setup
+
+The script uses [PEP 723 inline script metadata](https://peps.python.org/pep-0723/), a `# /// script` block at the top of the file that declares dependencies. When you run `uv run url_checker.py`, uv reads that block, installs `requests` in an isolated environment, and executes the script. No virtualenv activation, no `requirements.txt`, no `pip install`.
+
+You can pin the Python version with `requires-python`, pin dependency versions (`requests<3`), and lock the whole resolution with `uv lock --script url_checker.py` to get a `.lock` file for reproducible runs. The same pattern powers other single-file tools. See [uv run: run Python scripts with zero dependency management](https://www.bitdoze.com/uv-run-scripts-guide/) for the full workflow, and [the same pattern powers our uv text-to-speech script](https://www.bitdoze.com/uv-text-to-speech-script/) as another example.
+
+## The script
 
 Save this as `url_checker.py`:
 
 ```python
-#!/usr/bin/env -S uv run
+#!/usr/bin/env -S uv run --script
 # /// script
+# requires-python = ">=3.10"
 # dependencies = [
-#     "requests",
+#     "requests<3",
 # ]
+# [tool.uv]
+# exclude-newer = "2026-08-01T00:00:00Z"
 # ///
 
-import requests
-from urllib.parse import urlparse
+"""
+Bulk URL checker — checks hundreds of URLs concurrently,
+flags broken links (4xx, 5xx, timeouts, SSL errors), and
+writes results to a file.
+
+Usage:
+    uv run url_checker.py urls.txt
+    uv run url_checker.py urls.txt --workers 20 --timeout 15
+    uv run url_checker.py urls.txt --head --output broken.txt
+"""
+
+import argparse
+import csv
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import sys
+from urllib.parse import urlparse
 
-def check_url(url, timeout=10):
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Shared session with connection pooling and a realistic User-Agent
+SESSION = requests.Session()
+SESSION.headers["User-Agent"] = "url-checker/2.0 (bitdoze.com)"
+retries = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
+SESSION.mount("http://", HTTPAdapter(max_retries=retries))
+
+
+def normalize_url(url: str) -> str:
+    """Add https:// if no scheme is present."""
+    if not url.startswith(("http://", "https://")):
+        return "https://" + url
+    return url
+
+
+def check_url(url: str, timeout: float = 10, use_head: bool = False, verify: bool = True) -> dict:
     """
-    Check if a URL is accessible and return status information.
+    Check a single URL and return a result dict.
 
-    Args:
-        url (str): The URL to check
-        timeout (int): Timeout in seconds (default: 10)
-
-    Returns:
-        dict: Contains url, status, error_type, and response_time
+    Returns dict with keys: url, status, status_code, error_type, response_time
     """
-    # Add http:// if no scheme is provided
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
+    url = normalize_url(url)
+    start = time.monotonic()
 
-    start_time = time.time()
+    methods = ("head", "get") if use_head else ("get",)
 
-    try:
-        response = requests.get(url, timeout=timeout, allow_redirects=True)
-        response_time = time.time() - start_time
+    for method in methods:
+        try:
+            r = SESSION.request(
+                method, url, timeout=timeout, allow_redirects=True, verify=verify
+            )
+            elapsed = round(time.monotonic() - start, 2)
 
-        return {
-            'url': url,
-            'status': 'OK',
-            'status_code': response.status_code,
-            'error_type': None,
-            'response_time': round(response_time, 2)
-        }
+            # HEAD rejected — fall back to GET
+            if r.status_code == 405 and method == "head":
+                continue
 
-    except requests.exceptions.Timeout:
-        return {
-            'url': url,
-            'status': 'TIMEOUT',
-            'status_code': None,
-            'error_type': 'Connection timeout',
-            'response_time': timeout
-        }
+            code = r.status_code
+            if 200 <= code < 300:
+                return {"url": url, "status": "OK", "status_code": code, "error_type": None, "response_time": elapsed}
+            elif 400 <= code < 500:
+                return {"url": url, "status": "CLIENT_ERROR", "status_code": code, "error_type": f"{code} Client Error", "response_time": elapsed}
+            else:
+                return {"url": url, "status": "SERVER_ERROR", "status_code": code, "error_type": f"{code} Server Error", "response_time": elapsed}
 
-    except requests.exceptions.ConnectionError as e:
-        return {
-            'url': url,
-            'status': 'CONNECTION_ERROR',
-            'status_code': None,
-            'error_type': f'Connection error: {str(e)[:100]}...',
-            'response_time': time.time() - start_time
-        }
+        except requests.exceptions.SSLError as e:
+            return {"url": url, "status": "SSL_ERROR", "status_code": None, "error_type": f"SSL error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.Timeout:
+            return {"url": url, "status": "TIMEOUT", "status_code": None, "error_type": "Connection timeout", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.ConnectionError as e:
+            return {"url": url, "status": "CONNECTION_ERROR", "status_code": None, "error_type": f"Connection error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.RequestException as e:
+            return {"url": url, "status": "ERROR", "status_code": None, "error_type": f"Request error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
 
-    except requests.exceptions.RequestException as e:
-        return {
-            'url': url,
-            'status': 'ERROR',
-            'status_code': None,
-            'error_type': f'Request error: {str(e)[:100]}...',
-            'response_time': time.time() - start_time
-        }
+    return {"url": url, "status": "ERROR", "status_code": None, "error_type": "All methods failed", "response_time": round(time.monotonic() - start, 2)}
 
-def read_urls_from_file(filename):
-    """Read URLs from a text file, one per line."""
+
+def read_urls(filename: str) -> list[str]:
+    """Read URLs from a text file, one per line. Skips blank lines and # comments."""
     urls = []
     try:
-        with open(filename, 'r', encoding='utf-8') as file:
-            for line in file:
+        with open(filename, encoding="utf-8") as f:
+            for line in f:
                 url = line.strip()
-                if url and not url.startswith('#'):  # Skip empty lines and comments
+                if url and not url.startswith("#"):
                     urls.append(url)
-        return urls
     except FileNotFoundError:
-        print(f"Error: File '{filename}' not found.")
-        return []
-    except Exception as e:
-        print(f"Error reading file: {e}")
-        return []
+        print(f"Error: file '{filename}' not found.", file=sys.stderr)
+        sys.exit(1)
+    return urls
 
-def check_urls_batch(urls, timeout=10, max_workers=10):
-    """
-    Check multiple URLs concurrently.
 
-    Args:
-        urls (list): List of URLs to check
-        timeout (int): Timeout per request in seconds
-        max_workers (int): Maximum number of concurrent threads
-
-    Returns:
-        list: List of results for each URL
-    """
+def check_urls(urls: list[str], timeout: float, workers: int, use_head: bool, verify: bool) -> list[dict]:
+    """Check URLs concurrently and return a list of result dicts."""
     results = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_url = {executor.submit(check_url, url, timeout): url for url in urls}
-
-        # Process completed tasks
-        for i, future in enumerate(as_completed(future_to_url), 1):
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(check_url, u, timeout, use_head, verify): u for u in urls}
+        for i, future in enumerate(as_completed(futures), 1):
             result = future.result()
             results.append(result)
-
-            # Progress indicator
-            print(f"Checked {i}/{len(urls)} URLs: {result['url']} - {result['status']}")
-
+            status_icon = "✓" if result["status"] == "OK" else "✗"
+            code_str = f" ({result['status_code']})" if result["status_code"] else ""
+            print(f"  [{i}/{len(urls)}] {status_icon} {result['url']} — {result['status']}{code_str}  ({result['response_time']}s)")
     return results
 
-def main():
-    # Configuration
-    filename = input("Enter the filename containing URLs (or press Enter for 'urls.txt'): ").strip()
-    if not filename:
-        filename = 'urls.txt'
 
-    timeout = input("Enter timeout in seconds (or press Enter for 10): ").strip()
-    timeout = int(timeout) if timeout.isdigit() else 10
-
-    print(f"\nReading URLs from '{filename}'...")
-    urls = read_urls_from_file(filename)
-
-    if not urls:
-        print("No URLs found to check.")
+def save_broken(results: list[dict], filename: str) -> None:
+    """Write broken URLs grouped by error type."""
+    broken = [r for r in results if r["status"] != "OK"]
+    if not broken:
         return
 
-    print(f"Found {len(urls)} URLs to check.")
-    print(f"Using timeout: {timeout} seconds")
-    print("-" * 50)
+    groups: dict[str, list[dict]] = {}
+    for r in broken:
+        groups.setdefault(r["status"], []).append(r)
 
-    # Check all URLs
-    results = check_urls_batch(urls, timeout=timeout)
-
-    # Separate problematic URLs
-    problematic_urls = [r for r in results if r['status'] != 'OK']
-    working_urls = [r for r in results if r['status'] == 'OK']
-
-    print("\n" + "=" * 50)
-    print("SUMMARY")
-    print("=" * 50)
-    print(f"Total URLs checked: {len(results)}")
-    print(f"Working URLs: {len(working_urls)}")
-    print(f"Problematic URLs: {len(problematic_urls)}")
-
-    if problematic_urls:
-        print("\n" + "=" * 50)
-        print("PROBLEMATIC URLs")
-        print("=" * 50)
-
-        # Group by error type
-        timeout_urls = [r for r in problematic_urls if r['status'] == 'TIMEOUT']
-        connection_error_urls = [r for r in problematic_urls if r['status'] == 'CONNECTION_ERROR']
-        other_error_urls = [r for r in problematic_urls if r['status'] == 'ERROR']
-
-        if timeout_urls:
-            print(f"\nTIMEOUT ERRORS ({len(timeout_urls)}):")
-            for result in timeout_urls:
-                print(f"  - {result['url']}")
-
-        if connection_error_urls:
-            print(f"\nCONNECTION ERRORS ({len(connection_error_urls)}):")
-            for result in connection_error_urls:
-                print(f"  - {result['url']}")
-                print(f"    Error: {result['error_type']}")
-
-        if other_error_urls:
-            print(f"\nOTHER ERRORS ({len(other_error_urls)}):")
-            for result in other_error_urls:
-                print(f"  - {result['url']}")
-                print(f"    Error: {result['error_type']}")
-
-        # Save problematic URLs to file
-        with open('problematic_urls.txt', 'w', encoding='utf-8') as f:
-            f.write("# Problematic URLs found during check\n")
-            f.write(f"# Checked on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-
-            if timeout_urls:
-                f.write("# TIMEOUT ERRORS\n")
-                for result in timeout_urls:
-                    f.write(f"{result['url']}\n")
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"# Broken URLs — checked {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        for group_name in ("CLIENT_ERROR", "SERVER_ERROR", "TIMEOUT", "CONNECTION_ERROR", "SSL_ERROR", "ERROR"):
+            items = groups.get(group_name, [])
+            if items:
+                f.write(f"# {group_name}\n")
+                for r in items:
+                    code = f" ({r['status_code']})" if r["status_code"] else ""
+                    f.write(f"{r['url']}{code}\n")
                 f.write("\n")
 
-            if connection_error_urls:
-                f.write("# CONNECTION ERRORS\n")
-                for result in connection_error_urls:
-                    f.write(f"{result['url']}\n")
-                f.write("\n")
 
-            if other_error_urls:
-                f.write("# OTHER ERRORS\n")
-                for result in other_error_urls:
-                    f.write(f"{result['url']}\n")
+def save_to_csv(results: list[dict], filename: str) -> None:
+    """Export all results to CSV."""
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["url", "status", "status_code", "error_type", "response_time"])
+        writer.writeheader()
+        writer.writerows(results)
 
-        print(f"\nProblematic URLs saved to 'problematic_urls.txt'")
 
-    if working_urls:
-        print(f"\nWORKING URLs ({len(working_urls)}):")
-        for result in working_urls:
-            print(f"  ✓ {result['url']} (Status: {result['status_code']}, Time: {result['response_time']}s)")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Bulk URL checker — find broken links fast")
+    parser.add_argument("file", nargs="?", default="urls.txt", help="file with URLs, one per line (default: urls.txt)")
+    parser.add_argument("--timeout", type=float, default=10, help="request timeout in seconds (default: 10)")
+    parser.add_argument("--workers", type=int, default=10, help="concurrent threads (default: 10)")
+    parser.add_argument("--output", default="problematic_urls.txt", help="output file for broken URLs")
+    parser.add_argument("--csv", default=None, help="export all results to a CSV file")
+    parser.add_argument("--head", action="store_true", help="use HEAD requests, fall back to GET on 405")
+    parser.add_argument("--insecure", action="store_true", help="disable TLS verification (internal hosts only)")
+    args = parser.parse_args()
+
+    if args.insecure:
+        print("WARNING: TLS verification disabled. Do not use --insecure on public URLs.", file=sys.stderr)
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    verify = not args.insecure
+
+    print(f"Reading URLs from '{args.file}'...")
+    urls = read_urls(args.file)
+    if not urls:
+        print("No URLs found.")
+        return 0
+
+    print(f"Found {len(urls)} URLs — checking with {args.workers} workers, {args.timeout}s timeout\n")
+    results = check_urls(urls, timeout=args.timeout, workers=args.workers, use_head=args.head, verify=verify)
+
+    ok = [r for r in results if r["status"] == "OK"]
+    broken = [r for r in results if r["status"] != "OK"]
+
+    print(f"\n{'=' * 50}")
+    print(f"RESULTS: {len(ok)} working, {len(broken)} broken out of {len(results)}")
+    print(f"{'=' * 50}")
+
+    if broken:
+        save_broken(results, args.output)
+        print(f"\nBroken URLs saved to '{args.output}'")
+
+        # Group summary
+        groups: dict[str, int] = {}
+        for r in broken:
+            groups[r["status"]] = groups.get(r["status"], 0) + 1
+        for name, count in sorted(groups.items()):
+            print(f"  {name}: {count}")
+
+    if args.csv:
+        save_to_csv(results, args.csv)
+        print(f"All results exported to '{args.csv}'")
+
+    return 1 if broken else 0
+
 
 if __name__ == "__main__":
-    print("URL Connection Checker")
-    print("=" * 30)
-    main()
+    sys.exit(main())
 ```
 
-## How It Works
+## How it works
 
-| Function | What It Does |
-|----------|-------------|
-| `check_url()` | Checks one URL, handles errors, times the response |
-| `read_urls_from_file()` | Loads URLs from a text file, skips comments and empty lines |
-| `check_urls_batch()` | Runs multiple checks in parallel using threads |
-| `main()` | Handles user input, runs the checks, prints results |
+### Check the status code, not just exceptions
 
-### Error Types
+The original version of this script had a bug: it only caught exceptions. A 404 or 500 response doesn't raise. `requests.get()` returns normally. So `httpstat.us/404` was reported as "OK" in the sample output. For a tool whose whole purpose is finding broken links, that's a problem.
 
-- **OK**: URL works fine
-- **TIMEOUT**: Took too long to respond
-- **CONNECTION_ERROR**: DNS or connection issues
-- **ERROR**: Other request failures
+The fix: classify on `response.status_code`. Only 2xx is OK. Everything else (4xx client errors, 5xx server errors) gets flagged as broken. If a URL redirects (301 to 404), `allow_redirects=True` means the script sees the final status code, so a redirect to a missing page is correctly flagged.
 
-## Running It
+<Notice type="warning" title="Common mistake">
+  Checking only for exceptions misses 4xx and 5xx responses entirely. A 404 Not Found returns a normal response object. It does not raise. Always check `response.status_code` for the full picture.
+</Notice>
 
-With `uv`, you just run the file. No setup needed.
+### Reuse connections with requests.Session()
 
-### Quick Start
+Each bare `requests.get()` call opens a new TCP connection. The updated script creates a shared `requests.Session()` with connection pooling and HTTP keep-alive. On a list of 200+ URLs, this is noticeably faster because the script reuses existing connections to the same host instead of doing a fresh TCP handshake every time.
 
-1. **Create a URL file** (`urls.txt`):
+The session also sets a default User-Agent header and configures automatic retries for transient server errors (429, 500, 502, 503, 504) with exponential backoff.
+
+### HEAD requests first, GET fallback
+
+With the `--head` flag, the script sends HEAD requests, which only fetch headers, not response bodies. This is much faster for status checks on pages with large HTML or images. If a server returns 405 (Method Not Allowed) for HEAD, the script automatically falls back to GET.
+
+Some servers misbehave on HEAD requests (returning wrong status codes or rejecting them outright). The GET fallback handles that. Use `--head` when checking large lists of content-heavy pages; skip it when you need to verify the page actually loads.
+
+### Error types
+
+| Status | Meaning | When it fires |
+|--------|---------|---------------|
+| OK | 2xx response | URL is working |
+| CLIENT_ERROR | 4xx response | 404 Not Found, 403 Forbidden, etc. |
+| SERVER_ERROR | 5xx response | 500 Internal Server Error, 503, etc. |
+| TIMEOUT | Request timed out | Server too slow or unreachable |
+| CONNECTION_ERROR | DNS or network failure | Host doesn't exist, DNS resolution failed |
+| SSL_ERROR | Certificate problem | Expired, self-signed, or mismatched cert |
+| ERROR | Other request failure | Catch-all for unexpected issues |
+
+### SSL/TLS handling
+
+Self-signed and expired certificates are common on internal server fleets. The script catches `SSLError` as a distinct error category so you can see at a glance which URLs have cert problems.
+
+For internal hosts with self-signed certs, pass `--insecure` to disable TLS verification:
+
+```bash
+uv run url_checker.py internal-urls.txt --insecure
+```
+
+<Notice type="warning" title="Security warning">
+  Never use `--insecure` on public-facing URLs. It disables certificate verification entirely, which means the connection is vulnerable to man-in-the-middle attacks. Only use it for internal or intranet hosts where you control the network.
+</Notice>
+
+## Running it
+
+### Quick start
+
+1. Save the script as `url_checker.py`
+2. Create a `urls.txt` with one URL per line (`#` for comments):
 ```text
 # URLs to check
 https://www.google.com
@@ -276,168 +320,233 @@ https://nonexistent-website-12345.com
 bitdoze.com
 example.com
 ```
-
-2. **Run it**:
+3. Run it:
 ```bash
-uv run url_checker.py
+uv run url_checker.py urls.txt
 ```
 
-3. **Follow the prompts**:
-   - Press Enter for `urls.txt` or type a different filename
-   - Press Enter for 10 second timeout or enter your own
+Common flag combinations:
 
-### Sample Output
-
-```
-URL Connection Checker
-==============================
-Enter the filename containing URLs (or press Enter for 'urls.txt'):
-Enter timeout in seconds (or press Enter for 10):
-
-Reading URLs from 'urls.txt'...
-Found 8 URLs to check.
-Using timeout: 10 seconds
---------------------------------------------------
-Checked 1/8 URLs: https://www.google.com - OK
-Checked 2/8 URLs: https://www.github.com - OK
-Checked 3/8 URLs: https://www.stackoverflow.com - OK
-Checked 4/8 URLs: https://nonexistent-website-12345.com - CONNECTION_ERROR
-Checked 5/8 URLs: https://httpstat.us/500 - OK
-Checked 6/8 URLs: https://httpstat.us/404 - OK
-Checked 7/8 URLs: https://bitdoze.com - OK
-Checked 8/8 URLs: https://example.com - OK
-
-==================================================
-SUMMARY
-==================================================
-Total URLs checked: 8
-Working URLs: 7
-Problematic URLs: 1
-
-==================================================
-PROBLEMATIC URLs
-==================================================
-
-CONNECTION ERRORS (1):
-  - https://nonexistent-website-12345.com
-    Error: Connection error: HTTPSConnectionPool(host='nonexistent-website-12345.com', port=443)...
-
-Problematic URLs saved to 'problematic_urls.txt'
-
-WORKING URLs (7):
-  ✓ https://www.google.com (Status: 200, Time: 0.15s)
-  ✓ https://www.github.com (Status: 200, Time: 0.23s)
-  ✓ https://www.stackoverflow.com (Status: 200, Time: 0.18s)
-  ✓ https://httpstat.us/500 (Status: 500, Time: 1.02s)
-  ✓ https://httpstat.us/404 (Status: 404, Time: 0.98s)
-  ✓ https://bitdoze.com (Status: 200, Time: 0.45s)
-  ✓ https://example.com (Status: 200, Time: 0.32s)
-```
-
-## Tips and Tricks
-
-### Custom Settings
-
-Run with your own file and timeout:
 ```bash
-uv run url_checker.py
-# Enter: my_links.txt
-# Enter: 5
+# Check with 20 workers and 15s timeout
+uv run url_checker.py urls.txt --workers 20 --timeout 15
+
+# Use HEAD requests, save broken URLs to a custom file
+uv run url_checker.py urls.txt --head --output broken.txt
+
+# Export all results to CSV
+uv run url_checker.py urls.txt --csv results.csv
 ```
 
-### Organize URL Files
+### Lock the script for reproducibility
 
-Use separate files for different checks:
+Lock the dependency resolution so every run uses the same package versions:
 
-**APIs** (`apis.txt`):
+```bash
+uv lock --script url_checker.py
+# Creates url_checker.py.lock
+```
+
+If you run the script inside a repo that has a `pyproject.toml`, uv 0.12+ discovers the project from the script's directory and may pull in unrelated project dependencies. Use `--no-project` to avoid that:
+
+```bash
+uv run --no-project url_checker.py urls.txt --workers 10
+```
+
+## Test it yourself
+
+Here's a deterministic test file using httpbin.org endpoints. Create this as `urls.txt`:
+
 ```text
-https://api.github.com
-https://httpbin.org/get
+https://httpbin.org/status/200      # should be OK
+https://httpbin.org/status/404      # should be CLIENT_ERROR (broken)
+https://httpbin.org/status/500      # should be SERVER_ERROR (broken)
+https://httpbin.org/delay/5         # should TIMEOUT with --timeout 3
+https://nonexistent-website-12345.invalid  # should be CONNECTION_ERROR
+https://expired.badssl.com          # should be SSL_ERROR
 ```
 
-**Social** (`social.txt`):
-```text
-https://twitter.com/myhandle
-https://linkedin.com/in/me
+Run it:
+
+```bash
+uv run url_checker.py urls.txt --timeout 3 --workers 4
 ```
 
-### Speed It Up
+Expected results:
 
-For lots of URLs, increase workers:
-```python
-results = check_urls_batch(urls, timeout=timeout, max_workers=20)
-```
+| URL | Expected status | Why |
+|-----|----------------|-----|
+| httpbin.org/status/200 | OK | 2xx response |
+| httpbin.org/status/404 | CLIENT_ERROR | 404 is not 2xx |
+| httpbin.org/status/500 | SERVER_ERROR | 500 is not 2xx |
+| httpbin.org/delay/5 | TIMEOUT | 5s delay exceeds 3s timeout |
+| nonexistent...invalid | CONNECTION_ERROR | DNS resolution fails |
+| expired.badssl.com | SSL_ERROR | Expired certificate |
 
-| URLs | Workers | Approx Time |
-|------|---------|-------------|
-| 1-50 | 5-10 | 10-30 sec |
-| 51-200 | 10-15 | 30-60 sec |
-| 200+ | 15-25 | 1-3 min |
+<Notice type="info" title="Verify before publishing">
+  If you adapt this for your own blog or documentation, run the test file yourself first. The httpbin.org and badssl.com endpoints are public services, so verify they're live at publish time. The httpstat.us endpoints used in older versions of this article were unreachable during research; httpbin.org is more reliable.
+</Notice>
 
-## Reading the Output
+## Reading the output
 
-| Code | Meaning | What To Do |
+| Code | Meaning | What to do |
 |------|---------|------------|
-| 200 | Works fine | Nothing |
-| 301/302 | Redirect | Update if permanent |
-| 404 | Not found | Fix or remove link |
-| 500 | Server error | Contact site owner |
-| Timeout | Too slow | Check connection or increase timeout |
-| Connection Error | DNS/network | Check URL spelling |
+| 200 | OK | Nothing, link works |
+| 301/302 | Redirect | Script follows redirects; check the final destination |
+| 403 | Forbidden | May need auth headers or a realistic User-Agent |
+| 404 | Not found | Fix or remove the link |
+| 429 | Rate limited | Reduce `--workers` or add delays between requests |
+| 500 | Server error | Contact site owner or retry later |
+| TIMEOUT | Too slow | Increase `--timeout` or check connectivity |
+| CONNECTION_ERROR | DNS/network | Check URL spelling and DNS resolution |
+| SSL_ERROR | Certificate problem | Use `--insecure` for internal hosts only |
 
-### Output File
+The script writes broken URLs to `problematic_urls.txt` (or whatever you pass with `--output`), grouped by error type with a timestamp header. It also exits with code 0 when all URLs are OK and code 1 when any are broken, which is what makes CI integration work.
 
-`problematic_urls.txt` gets created with broken links organized by error type.
+If you need to load-test the endpoints you're checking, take a look at [oha for website performance testing](https://www.bitdoze.com/oha-website-load-testing/) as a companion tool.
 
-## Use Cases
+## Schedule it in CI with GitHub Actions
 
-- **Site audits**: Check your external links
-- **SEO**: Validate backlinks
-- **API monitoring**: Check endpoint health
-- **Competitor tracking**: Monitor if competitor sites are down
-
-## Customizations
-
-### Add User-Agent
-
-Some sites block scripts without a user agent:
-```python
-headers = {'User-Agent': 'Mozilla/5.0 ...'}
-response = requests.get(url, headers=headers, ...)
-```
-
-### Export to CSV
-
-```python
-import csv
-
-def save_to_csv(results, filename='results.csv'):
-    with open(filename, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['url', 'status', ...])
-        writer.writeheader()
-        writer.writerows(results)
-```
-
-### CI/CD Integration
+Here's a complete workflow that runs the URL checker weekly and fails the build when broken links are found:
 
 ```yaml
-# GitHub Actions - check URLs weekly
 name: URL Check
 on:
   schedule:
-    - cron: "0 9 * * 1"
+    - cron: "0 9 * * 1"      # weekly, Monday 09:00 UTC
+  workflow_dispatch:          # allow manual runs
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - run: uv run url_checker.py
+      - uses: actions/checkout@7d8f2266908b6c964bc9f6b357c94adc9594baf3 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.6"
+          enable-cache: true
+          prune-cache: true
+      - name: Run URL check
+        run: uv run --no-project url_checker.py urls.txt --workers 20 --output problematic_urls.txt
 ```
 
-## Wrap Up
+A few things to know:
 
-That's it. A simple script that checks URLs fast and tells you what's broken. No virtual environments to manage, no dependencies to install manually. Just `uv run` and go.
+- **Pin immutable tags for setup-uv.** Version 8.0.0 removed `@v8`-style major/minor tags. They no longer resolve. Use `@v10.0.1` (immutable tag) or a full commit SHA.
+- **`--no-project` in repos.** Since uv 0.12.0, `uv run` discovers the project from the script's directory. If your checker lives in a repo with a `pyproject.toml`, pass `--no-project` to avoid pulling in unrelated dependencies.
+- **`prune-cache: true`.** Setup-uv v9.0.0 flipped the default to `false`, meaning the cache can grow and eat into your Actions cache quota (100 GB soft cap per repo). Set `prune-cache: true` to keep it lean.
+- **`workflow_dispatch`.** Lets you trigger the check manually from the Actions tab, useful after fixing a batch of broken links.
+- **Exit code 1.** The script exits 1 when broken links are found, so the workflow actually fails instead of silently passing.
 
-I use this regularly to keep sites clean. Works for me, should work for you too.
+<Notice type="info" title="Cost note">
+  GitHub Actions free tier covers weekly checks of a few hundred URLs with no issues. If you prefer running from a VPS, a cron job on a [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) works fine. The script is read-only GETs with zero blast radius. Schedule it with `0 9 * * 1` and redirect output to a log file.
+</Notice>
+
+For always-on monitoring (not just weekly cron), consider a [self-hosted Uptime Kuma](https://www.bitdoze.com/uptime-kuma-tool/) instance or [a Beszel and Uptime Kuma monitoring stack](https://www.bitdoze.com/beszel-uptime-kuma/) for broader server observability.
+
+## When Python is overkill: use lychee
+
+If link checking is the entire job, no custom auth headers, no scoring, no database persistence, a dedicated tool beats a Python script. [lychee](https://github.com/lycheeverse/lychee) is a Rust-based link checker: single static binary, async, per-host throttling built in, caching, and exit code 1 on broken links.
+
+<Tabs>
+<Tab name="Python script">
+**When to use:** You need custom logic — auth headers, custom scoring, DB persistence, API-specific checks, or embedding the checker into a larger pipeline.
+
+**Install:** Nothing — `uv run` handles it.
+
+**Run:**
+```bash
+uv run url_checker.py urls.txt --head --workers 20
+```
+</Tab>
+<Tab name="lychee">
+**When to use:** Link checking IS the job. Drop-in binary, no code to maintain, built-in per-host throttling.
+
+**Install:**
+```bash
+# macOS
+brew install lychee
+# Linux (binary)
+curl -LO https://github.com/lycheeverse/lychee/releases/latest/download/lychee-x86_64-unknown-linux-gnu.tar.gz
+tar xzf lychee-x86_64-unknown-linux-gnu.tar.gz
+```
+
+**Run:**
+```bash
+lychee --verbose urls.txt
+```
+
+Also available as a GitHub Action (`lycheeverse/lychee-action`) and Docker image.
+</Tab>
+</Tabs>
+
+## Tips and tricks
+
+### Send a realistic User-Agent
+
+Some sites block requests that don't look like browsers. The script sets a default User-Agent (`url-checker/2.0 (bitdoze.com)`). If you need a different one, change the session header near the top of the script:
+
+```python
+SESSION.headers["User-Agent"] = "Mozilla/5.0 (compatible; MyBot/1.0)"
+```
+
+### Export results to CSV
+
+Pass `--csv results.csv` to get a full CSV export of every URL with its status, status code, error type, and response time:
+
+```bash
+uv run url_checker.py urls.txt --csv results.csv
+```
+
+The CSV function uses Python's built-in `csv.DictWriter` — no extra dependencies:
+
+```python
+import csv
+
+def save_to_csv(results, filename="results.csv"):
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["url", "status", "status_code", "error_type", "response_time"])
+        writer.writeheader()
+        writer.writerows(results)
+```
+
+### Stay polite: per-host throttling
+
+Ten to twenty threads hammering one domain will trigger bot protection on most sites. If your URL list targets a single domain, reduce `--workers` to 3-5. For mixed-domain lists, the ThreadPoolExecutor naturally spreads load across different hosts.
+
+For heavy-duty per-host throttling, lychee has `--host-concurrency` and `--host-request-interval` built in.
+
+## Wrap up
+
+This bulk URL checker gives you a single-file Python script that runs with `uv run` — no virtualenv, no pip, no setup. It checks hundreds of URLs concurrently, properly classifies 4xx and 5xx as broken (not "OK"), supports HEAD requests for speed, and exits with code 1 for CI integration. Lock it with `uv lock --script` for reproducible runs, schedule it in GitHub Actions or a VPS cron, and export results to CSV when you need them.
+
+If you need to feed it a full site's worth of URLs, you can [export every WordPress post URL and title](https://www.bitdoze.com/export-wordpress-post-urls-titles/) first. And for broader ops context — [monitor your server and Docker resources](https://www.bitdoze.com/sever-monitoring/) to keep the infrastructure behind your sites healthy.
+
+## FAQ
+
+<Accordion label="How many URLs can this script check?" group="faq">
+Hundreds comfortably with the default 10 workers. For 10,000+ URLs, increase `--workers` to 20-30, but be polite to target servers — too many concurrent requests to one domain triggers bot protection. For very large lists, consider batching by domain or using lychee's async engine.
+</Accordion>
+
+<Accordion label="Can I check URLs that require authentication?" group="faq">
+Yes. Add auth headers to the session near the top of the script:
+
+```python
+SESSION.headers["Authorization"] = "Bearer YOUR_TOKEN"
+```
+
+For cookie-based auth, set `SESSION.cookies`. The session is shared across all threads, so every request carries the same headers.
+</Accordion>
+
+<Accordion label="Why not just use curl in a loop?" group="faq">
+You can, but you lose concurrency, error classification, and progress reporting. A `for url in $(cat urls.txt); do curl ...; done` loop checks one URL at a time and gives you raw HTTP codes with no grouping or output file. This script wraps the same HTTP logic with parallel execution, structured output, and CI-friendly exit codes.
+</Accordion>
+
+<Accordion label="Does this work on Windows?" group="faq">
+Yes. uv runs on Windows, macOS, and Linux. The script uses only Python stdlib plus `requests` — no platform-specific code. Install uv with `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` on Windows.
+</Accordion>
+
+<Accordion label="How do I check links across my whole site?" group="faq">
+Export your sitemap or URL list first. For WordPress sites, [export every WordPress post URL and title](https://www.bitdoze.com/export-wordpress-post-urls-titles/) to get a complete list, then feed it to this script. For static sites, parse your sitemap.xml or use a crawler to generate the URL list.
+</Accordion>
