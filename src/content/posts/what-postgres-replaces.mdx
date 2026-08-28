@@ -1,0 +1,229 @@
+---
+date: 2026-08-28T00:00:00Z
+title: "What Postgres Can Replace: Redis, Elasticsearch, MongoDB and More (2026)"
+description: "Postgres can replace Redis, Elasticsearch, MongoDB, Pinecone, cron tools and light queues. Real SQL for each swap, honest limits, and what it still can't do."
+image: "../../assets/images/26/08/what-postgres-replaces-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["postgresql", "redis", "elasticsearch"]
+canonical: "https://www.bitdoze.com/what-postgres-replaces/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+My VPS used to run four services for one side project: Postgres for app data, Redis for sessions and rate limits, Meilisearch for product search, and a cron container that restarted things when they broke. Three of the four are gone now. Postgres does the work, and the project has been boring ever since, which is the highest compliment I can give infrastructure.
+
+This is not a "Postgres can do everything" manifesto. Some of these swaps are free wins. Others have sharp limits that show up under load. For each one I'll give you the mechanism, SQL you can run today, and the point where you should go back to the dedicated tool.
+
+If you're still deciding whether you need a server at all, read [why a home server makes sense](/why-need-home-server/) first. Everyone else, here's the map.
+
+| Instead of | Use in Postgres | The catch |
+|---|---|---|
+| Redis (cache) | `UNLOGGED` tables | Wiped on crash, not on replicas |
+| Redis (locks, counters) | Advisory locks, atomic upserts | Slower than memory |
+| Pinecone, Qdrant | `pgvector` + HNSW | Index RAM above ~1M vectors |
+| Elasticsearch (most search) | `tsvector` + GIN, `pg_trgm` | Weak relevance ranking |
+| MongoDB | `JSONB` + GIN | One primary, no horizontal writes |
+| Cron containers | `pg_cron` | Dies with the database |
+| RabbitMQ (light use) | `SKIP LOCKED`, `pgmq` | Thousands per second, not millions |
+| InfluxDB | TimescaleDB | Community license terms |
+| Neo4j (light use) | Apache AGE, recursive CTEs | Rare on managed hosts |
+| One-off ETL scripts | Foreign data wrappers | Not a real pipeline |
+
+## 1. Cache: UNLOGGED tables instead of Redis
+
+Redis earns its keep at sub-millisecond scale. Below that, a table does the job.
+
+`UNLOGGED` tables skip the write-ahead log, which is where Postgres pays for crash safety. Writes get faster, and you accept the trade: if the database crashes, Postgres truncates the table on restart. For a cache, that's the correct behavior anyway. Nobody mourns a lost session cache.
+
+```sql
+CREATE UNLOGGED TABLE sessions (
+  token text PRIMARY KEY,
+  user_id int NOT NULL,
+  expires_at timestamptz NOT NULL
+);
+```
+
+Two limits before you migrate anything. First, UNLOGGED tables are not replicated, so the cache lives only on the primary. Second, a Postgres lookup crosses the network and the query planner, so you get single-digit milliseconds where Redis gives you microseconds. For session storage, response caching, and rate-limit counters on a self-hosted stack, that difference has never mattered on anything I run. It starts to matter around high traffic, and by then you can afford Redis.
+
+## 2. Vector search: pgvector instead of Pinecone
+
+[pgvector](https://github.com/pgvector/pgvector) adds a vector column type, distance operators, and indexes to Postgres. Embeddings live next to the rows they belong to, which kills the sync job between your database and a managed vector service.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE docs (
+  id bigserial PRIMARY KEY,
+  body text,
+  embedding vector(1536)
+);
+
+CREATE INDEX ON docs USING hnsw (embedding vector_cosine_ops);
+
+SELECT id, body FROM docs
+ORDER BY embedding <=> $1
+LIMIT 5;
+```
+
+The HNSW index handles approximate nearest-neighbor search and comfortably serves the RAG-sized datasets most projects actually have. Somewhere above a million vectors you start caring about index memory and build time, and that's where pgvectorscale from Timescale or a dedicated engine earns its place back.
+
+I keep a full setup guide for [pgvector on Docker](/deploy-pgvector-pgadmin-docker/), compose file to HNSW index. If you're building agents, the [Mastra assistant guide](/build-ai-agent-mastra/) wires retrieval into a working loop.
+
+## 3. Full-text search: tsvector instead of Elasticsearch
+
+Most projects that install Elasticsearch use about five percent of it. The other 95 percent is a document store with an index, which describes Postgres just as well.
+
+The built-in engine parses text, drops stop words, and stems words to their roots, so a search for "running" matches "run". A generated column keeps the index updated without triggers:
+
+```sql
+ALTER TABLE articles ADD COLUMN search tsvector
+  GENERATED ALWAYS AS (
+    to_tsvector('english', coalesce(title, '') || ' ' || coalesce(body, ''))
+  ) STORED;
+
+CREATE INDEX idx_articles_search ON articles USING gin (search);
+
+SELECT title FROM articles
+WHERE search @@ websearch_to_tsquery('english', 'postgres cache');
+```
+
+`websearch_to_tsquery` accepts the sloppy syntax users actually type, quotes and all.
+
+Where Postgres loses: ranking. Elasticsearch scores with BM25 and gives you knobs for everything. `ts_rank` is cruder. For site search, admin panels, and "find my blog post" this is genuinely fine. If search is the product itself, look at ParadeDB's [pg_search](https://github.com/paradedb/paradedb), which puts BM25 inside Postgres, or accept that you need the dedicated tool.
+
+## 4. Documents: JSONB instead of MongoDB
+
+MongoDB's original pitch was "schemaless". JSONB gives you the same shape with transactions and joins attached, which turns out to be what people wanted anyway.
+
+```sql
+CREATE TABLE events (
+  id bigserial PRIMARY KEY,
+  payload jsonb NOT NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX ON events USING gin (payload);
+
+-- every event whose payload contains {"type": "login"}
+SELECT * FROM events WHERE payload @> '{"type": "login"}';
+```
+
+JSONB is stored in a parsed binary form, GIN indexes make containment queries fast, and you can index individual keys inside documents. What you don't get is horizontal write scaling. One Postgres primary writes as fast as one server writes. For the document-shaped workloads of a typical app, that ceiling is far away. If you need the MongoDB wire protocol specifically, FerretDB and AWS's open-sourced DocumentDB extension both sit on top of Postgres.
+
+## 5. Cron: pg_cron instead of schedulers and glue scripts
+
+[pg_cron](https://github.com/citusdata/pg_cron) runs inside the database and speaks real cron syntax:
+
+```sql
+SELECT cron.schedule(
+  'nightly-cleanup',
+  '0 3 * * *',
+  $$DELETE FROM sessions WHERE expires_at < now()$$
+);
+```
+
+Every run and its errors land in `cron.job_run_details`, so debugging is a SELECT instead of a container log dive.
+
+The underrated move is pairing it with pg_net, which fires async HTTP requests from SQL. Scheduled API pings, webhook retries, cache warmups: jobs that used to need a script container now need one line. One catch, and it's an honest one: the scheduler lives where the database lives. A dead database stops your jobs. On a single VPS that was always true anyway; your cron container died with the same box.
+
+## 6. Geospatial: PostGIS instead of a GIS engine
+
+PostGIS is the oldest entry on this list and the least debated. It adds geometry and geography types, spatial indexes, and a few hundred functions.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- depots within 3 km of a point in Lisbon
+SELECT name FROM depots
+WHERE ST_DWithin(
+  location::geography,
+  ST_MakePoint(-9.14, 38.72)::geography,
+  3000
+);
+```
+
+The `geography` type does math on a spheroid, so distances come back in real meters instead of degrees. `ST_Contains` handles polygon checks for delivery zones or flood areas. The catch is operational: PostGIS is a big install, and managed providers each ship their own version. If your app needs "find stores near me", plain lat/lng columns cover it. PostGIS is for when geometry gets serious.
+
+## More swaps, rapid fire
+
+### Queues: SKIP LOCKED instead of RabbitMQ
+
+The whole worker pattern is one WHERE clause. `FOR UPDATE SKIP LOCKED` lets many workers pull different rows from the same table without stepping on each other. The [pgmq](https://github.com/pgmq/pgmq) extension wraps it into a proper message queue, and frameworks like pg-boss (Node), Oban (Elixir), and River (Go) already build job systems on this pattern. Honest ceiling: thousands of jobs per second, not hundreds of thousands.
+
+### Time-series: TimescaleDB instead of InfluxDB
+
+TimescaleDB chunks big tables by time, compresses old chunks, and maintains continuous aggregates in the background. For server metrics, sensor data, and dashboards, a hypertable replaces an InfluxDB instance. RDS supports it. Read the community license terms before you build a product on it.
+
+### Locks and rate limits: advisory locks instead of Redlock
+
+`SELECT pg_advisory_lock(42)` is a distributed lock with zero extra infrastructure. For rate limits, an atomic upsert counter with a timestamp column does what people deploy Redis for. Slower than memory, yes. Sufficient, usually.
+
+### Graphs: recursive CTEs and Apache AGE instead of Neo4j
+
+Org charts, category trees, threaded comments: a recursive CTE does these with no extension at all. For real graph queries, [Apache AGE](https://github.com/apache/age) adds openCypher to Postgres. Managed providers rarely ship it, so this swap usually means self-hosting.
+
+### Federated reads: FDWs instead of one-off ETL scripts
+
+Foreign data wrappers let Postgres query other databases, CSV files, and Parquet on S3 as if they were local tables. `postgres_fdw` joins across databases, `file_fdw` reads logs. It won't replace your data pipeline, but it retires a surprising number of export scripts.
+
+### Fuzzy matching: pg_trgm instead of a search service
+
+Trigram similarity powers "did you mean" autocomplete with one GIN index and `similarity(name, 'ibm') > 0.3`. Typo tolerance for an admin panel does not need its own infrastructure.
+
+## What Postgres will not replace
+
+Every "Postgres does everything" post skips this part, so here it is.
+
+**Object storage** stays. Blobs in the database bloat backups, slow down vacuums, and cost more than S3 or B2. Keep files outside, keep the keys in Postgres.
+
+**Kafka-class throughput** is out of reach. The SKIP LOCKED pattern serves thousands of messages per second. Kafka serves millions, with replay and partitions. Past that line they stop being the same tool.
+
+**Microsecond latency** belongs to Redis. Postgres crosses a network and plans a query. When every millisecond costs real money, keep the cache in memory.
+
+**Relevance tuning** is Elasticsearch's home turf. Postgres search is good enough for most sites and not good enough for search-centric products. Typesense or Meilisearch also fit here.
+
+**Horizontal writes** don't come free. One Postgres primary writes with one machine's budget. Citus and read replicas stretch that far, but MongoDB-style write scaling is a different architecture.
+
+<Notice type="warning" title="Check your provider's extension list first">
+Every swap above assumes you can enable the extension. Supabase and Neon ship most of them: pgvector, pg_cron, pg_net, pgmq. Amazon RDS has a shorter list and no pg_net or pgmq. Self-hosted Postgres has everything one CREATE EXTENSION away, which is part of why this pattern took off in homelab circles. Check before you design around a swap, not after.
+</Notice>
+
+## Which swaps to actually make
+
+<Tabs>
+<Tab name="Side project or homelab">
+Consolidate everything. One Postgres container plus pgvector, pg_cron, and pg_trgm replaces four or five services on a $5 box, and it slots into any [homelab container stack](/docker-containers-home-server/) you already run. Backups get simpler too: one dump covers app data, search, and the cache.
+</Tab>
+<Tab name="Growing SaaS">
+Consolidate selectively. Vectors, JSON, cron, and full-text search are safe swaps early. Keep Redis if session load is real. Pick a managed Postgres that ships the extensions you need on day one, because changing providers later is a migration project.
+</Tab>
+<Tab name="Established product">
+Swap the edges. Move cron jobs and glue scripts into pg_cron, retire a managed vector database if the bill annoys you, and leave Elasticsearch and Kafka alone unless someone owns the migration full-time.
+</Tab>
+</Tabs>
+
+## Questions that come up
+
+<Accordion label="Is Postgres as fast as Redis?" group="faq" expanded="true">
+No, and pretending otherwise would be dishonest. Redis answers in tens of microseconds from memory. Postgres answers indexed lookups in single-digit milliseconds. The useful question is whether your feature can tell the difference. Session validation during a page load can't.
+</Accordion>
+
+<Accordion label="Can I migrate off Redis gradually?" group="faq">
+Yes, and you should. The read-through pattern makes it boring: write new sessions to Postgres, keep reading old ones from Redis, and let TTLs expire the old store. No big-bang cutover, no rollback plan needed.
+</Accordion>
+
+<Accordion label="Does this work for local AI setups?" group="faq">
+It's arguably the best case for it. pgvector and [Ollama on the same machine](/ollama-docker-install/) give you embeddings, semantic search, and RAG without any data leaving your network.
+</Accordion>
+
+## Start with the swap that annoys you most
+
+None of this makes Redis or Elasticsearch bad tools. It means a default Postgres install covers more ground than most people expect, and every service you don't run is one you don't patch, back up, or pay for.
+
+My breaking point was the cron container that kept dying silently. Yours might be a $50/month vector database bill or a Meilisearch instance nobody maintains. Check your provider's extension list, run one of the queries above on a scratch table, and see if the boring database earns another job.
+
+Este artículo también está disponible en español: [Qué Puede Reemplazar Postgres](/es/que-reemplaza-postgres/).
