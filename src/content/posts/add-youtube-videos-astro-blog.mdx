@@ -1,7 +1,8 @@
 ---
-date: 2025-07-30T03:00:00Z
-title: "Display YouTube Videos on Your Astro Blog (SSG + SSR)"
-description: "Learn how to automatically display your latest YouTube videos on your Astro blog using both Static Site Generation (SSG) and Server-Side Rendering (SSR) approaches. Complete with code examples and explanations for beginners."
+date: 2026-09-01T00:00:00Z
+title: "How to Add YouTube Videos to Your Astro Blog (SSG + SSR)"
+meta_title: "Add YouTube Videos to Your Astro Blog (SSG + SSR Guide)"
+description: "Learn how to add YouTube videos to your Astro blog with Content Layer loaders (SSG) and server:defer islands (SSR), plus caching, thumbnails, troubleshooting."
 image: "../../assets/images/25/07/astro-add-yt-videos.jpg"
 categories: ["web-development"]
 authors: ["Dragos"]
@@ -9,102 +10,220 @@ tags: ["astro"]
 canonical: https://www.bitdoze.com/add-youtube-videos-astro-blog/
 ---
 
-Want to display your latest YouTube videos on your blog without manually updating them? This guide shows how to automatically display YouTube videos on your Astro blog.
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
 
-Whether you're using the [free Astro blog theme](https://www.bitdoze.com/build-astro-blog-free/) or your own setup, this guide covers two approaches: **Static Site Generation (SSG)** for performance, and **Server-Side Rendering (SSR)** for real-time updates.
+Want to add YouTube videos to your Astro blog without updating anything by hand? This guide shows how to automatically pull a channel's latest videos into your Astro 7 site at build time with Content Layer loaders (SSG) or on demand with `server:defer` server islands (SSR).
+
+Both approaches use YouTube's free RSS feed (no API key needed), and I'll cover the real-world gotchas: why the RSS endpoint sometimes 404s, why `maxresdefault.jpg` can break your build, and how to upgrade to the YouTube Data API when you need more resilience.
+
+Whether you're using the [free Astro blog theme](https://www.bitdoze.com/build-astro-blog-free/) or your own setup, this guide has copy-pasteable code for both methods.
 
 ## 🎯 What You'll Learn
 
 <ListCheck>
 
-- **SSG Approach**: Fetch YouTube videos at build time
-- **SSR Approach**: Dynamic video fetching with server-side rendering
-- **RSS Feed Parsing**: How to work with YouTube's RSS feeds
-- **Error Handling**: Handle failures gracefully
-- **Performance Optimization**: Best practices for both approaches
+- **SSG with Content Layer custom loader**: the recommended build-time approach with type safety
+- **SSR with `server:defer` server islands**: on-demand rendering for real-time updates
+- **YouTube RSS feed**: how it works, why it can 404, and how to build resilience
+- **Thumbnail optimization**: `hqdefault.jpg` fallback to avoid broken images
+- **YouTube Data API upgrade path**: still free at blog scale, more reliable than RSS
+- **Troubleshooting**: RSS outages, missing thumbnails, island failures
 
 </ListCheck>
 
 ## 🛠️ Prerequisites
 
-Before starting, make sure you have:
+<ListCheck>
 
-- An Astro blog (check out our [free Astro blog guide](https://www.bitdoze.com/build-astro-blog-free/) if you need one!)
-- Basic knowledge of JavaScript/TypeScript
-- A YouTube channel ID (we'll show you how to find it)
-- Node.js installed on your machine
+- **Node.js 22.12.0+.** Astro 6+ dropped Node 18 and 20. Pin it in `.nvmrc`:
+  ```
+  22.12.0
+  ```
+- **Astro 7.x.** This guide targets the current stable (7.2.10 as of Aug 2026). If you're starting fresh, check the [free Astro blog guide](https://www.bitdoze.com/build-astro-blog-free/).
+- **Basic JavaScript/TypeScript knowledge**
+- **A YouTube channel** with the channel ID (see below)
+- **An adapter** (Node or Cloudflare). Only required for the SSR/server islands method.
 
-<Notice type="info" title="Channel ID vs Username">
+</ListCheck>
 
-YouTube Channel IDs look like this: `UCGsUtKhXsRrMvYAWm8q0bCg`. You can find yours by going to your YouTube channel and looking at the URL, or using tools like YouTube Channel ID finder.
+<Notice type="info" title="Astro 7 brings stricter HTML">
+
+Astro 7 uses a Rust-based compiler and Vite 8. Build times drop 15-61%, but unclosed HTML tags now **error the build** instead of silently correcting. If you're copy-pasting code blocks, double-check your markup. See [what changed in Astro 7](https://www.bitdoze.com/astro-7-faster-builds/) for the full breakdown.
 
 </Notice>
 
+### Find your YouTube channel ID from an @handle
 
+<Notice type="warning" title="Channel URLs now show @handles, not IDs">
+
+YouTube channel URLs look like `youtube.com/@yourchannel`. That's a handle, not the `UC...` ID the RSS feed needs. Here's how to find the real ID:
+
+1. Go to your channel page in a browser
+2. Right-click → **View Page Source**
+3. Search (Ctrl+F) for `"channelId":"UC` or `"externalId":"UC`
+4. Copy the `UC...` string
+
+Alternatively, open any video from the channel and search the page source the same way. The RSS feed only returns the **~15 most recent videos** per channel.
+
+</Notice>
+
+### Companion video
 
 <YouTubeEmbed
   url="https://www.youtube.com/embed/x6pjyeQ_6V0"
-  label="Display Latest YouTube Videos on Your Astro Blog (SSG + SSR)"
+  label="How to Add YouTube Videos to Your Astro Blog (SSG + SSR)"
 />
 
+## 📡 How the YouTube RSS Feed Works (and Why It Can 404)
 
-## 🏗️ Method 1: SSG Approach (Build-Time Fetching)
+Both methods in this guide use the same zero-cost endpoint:
 
-The SSG approach fetches YouTube videos during build, creating static HTML that loads quickly. This works for most blogs where real-time updates aren't critical.
+```
+https://www.youtube.com/feeds/videos.xml?channel_id=YOUR_CHANNEL_ID
+```
 
-### Step 1: Create the SSG Component
+No API key, no authentication, no quota. It returns an Atom XML feed with the ~15 most recent videos from the channel: video ID, title, published date, thumbnail URL, and more.
 
-Create a component that fetches YouTube videos at build time:
+<Notice type="warning" title="RSS feed reliability">
+
+YouTube's RSS endpoint has documented intermittent 404 and 500 errors. These outages tend to cluster around 09:00-12:00 UTC, affect different channels randomly, and can last hours. A browser User-Agent header does **not** reliably fix it.
+
+This means a naive build-time fetch can fail on a normal deploy. The mitigation: use `AbortSignal.timeout()` for bounded fetch time, add a retry with backoff, and for SSG keep a last-good JSON snapshot committed in the repo so a YouTube hiccup never bricks your build.
+
+</Notice>
+
+<Notice type="success" title="Why RSS over API?">
+
+RSS is free and keyless, but it's not SLA'd and limited to ~15 videos. The YouTube Data API is the resilient, pro-grade path, and it stays free at blog scale (1-3 API units per refresh out of 10,000/day). I cover the upgrade path in the [Data API section](#-youtube-data-api-upgrade-path-resilient-and-still-free) below.
+
+</Notice>
+
+## 🏗️ Method 1: SSG with Content Layer Loader (Recommended)
+
+The modern SSG approach uses Astro's **Content Layer API** with a custom loader. This replaces the old pattern of fetching RSS in a component's frontmatter with regex parsing. Benefits: type safety via Zod, data-store caching, `astro sync` types, and the component stays presentation-only.
+
+### Step 1: Create the YouTube content loader
+
+Install the XML parser:
+
+```bash
+npm install fast-xml-parser
+```
+
+Create the loader at `src/loaders/youtube.ts`:
+
+```ts
+// src/loaders/youtube.ts
+import type { Loader } from 'astro/loaders';
+import { z } from 'astro/zod';
+import { XMLParser } from 'fast-xml-parser';
+
+export function youtubeVideosLoader(options: {
+  channelId: string;
+  maxVideos?: number;
+}): Loader {
+  return {
+    name: 'youtube-videos-loader',
+    load: async ({ store, parseData, logger }) => {
+      const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${options.channelId}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+
+      if (!res.ok) {
+        logger.error(`YouTube feed returned ${res.status}`);
+        return; // keeps prior data in store, build won't fail
+      }
+
+      const xml = new XMLParser({ ignoreAttributes: false }).parse(
+        await res.text()
+      );
+      const entries = (xml.feed?.entry ?? []).slice(0, options.maxVideos ?? 6);
+
+      store.clear();
+      for (const entry of entries) {
+        const id = entry['yt:videoId'];
+        const data = await parseData({
+          id,
+          data: {
+            id,
+            title: entry.title,
+            published: new Date(entry.published),
+            thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+            url: `https://www.youtube.com/watch?v=${id}`,
+          },
+        });
+        store.set({ id, data, digest: JSON.stringify(data) });
+      }
+    },
+    schema: z.object({
+      id: z.string(),
+      title: z.string(),
+      published: z.date(),
+      thumbnail: z.string(),
+      url: z.url(),
+    }),
+  } satisfies Loader;
+}
+```
+
+<Notice type="info" title="Why a Content Layer loader?">
+
+A Content Layer loader gives you type safety (Zod schema), data-store caching (prior data survives a failed fetch), and `astro sync` generates collection types. The component that renders the videos stays dumb, it just calls `getCollection()`. This is the pattern Astro recommends for external data at build time.
+
+</Notice>
+
+### Step 2: Register the loader in `content.config.ts`
+
+```ts
+// src/content.config.ts
+import { defineCollection } from 'astro:content';
+import { youtubeVideosLoader } from './loaders/youtube';
+
+export const collections = {
+  youtube: defineCollection({
+    loader: youtubeVideosLoader({
+      channelId: import.meta.env.YOUTUBE_CHANNEL_ID,
+      maxVideos: 6,
+    }),
+  }),
+};
+```
+
+Add your channel ID to `.env`:
+
+```bash
+YOUTUBE_CHANNEL_ID=UCGsUtKhXsRrMvYAWm8q0bCg
+```
+
+Then generate the collection types:
+
+```bash
+npx astro sync
+```
+
+<Notice type="info" title="Run astro sync after wiring the loader">
+
+`npx astro sync` generates TypeScript types for your collections. Run it after any change to `content.config.ts`. The types give you autocomplete and catch errors at build time.
+
+</Notice>
+
+### Step 3: Render the videos with `<Image>`
+
+The component now just calls `getCollection('youtubeVideos')` and renders. No fetching, no parsing, that's the loader's job.
 
 ```astro
 ---
 // src/components/YouTubeVideosSSG.astro
 import { Icon } from "astro-icon/components";
 import { Image } from "astro:assets";
+import { getCollection } from "astro:content";
 
-// Your YouTube Channel ID
-const CHANNEL_ID = "UCGsUtKhXsRrMvYAWm8q0bCg"; // Replace with your channel ID
-const MAX_VIDEOS = 6; // Number of videos to display
-
-// Fetch YouTube RSS feed at build time
-let videos = [];
-let error = null;
-
-try {
-  const response = await fetch(
-    `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`
-  );
-
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-
-  const xmlText = await response.text();
-
-  // Parse XML to extract video data
-  const videoRegex =
-    /<entry>.*?<yt:videoId>(.*?)<\/yt:videoId>.*?<title>(.*?)<\/title>.*?<published>(.*?)<\/published>.*?<\/entry>/gs;
-
-  let match;
-  while ((match = videoRegex.exec(xmlText)) !== null && videos.length < MAX_VIDEOS) {
-    const [, videoId, title, published] = match;
-    videos.push({
-      id: videoId,
-      title: title
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'"),
-      published: new Date(published),
-      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-      url: `https://www.youtube.com/watch?v=${videoId}`,
-    });
-  }
-} catch (err) {
-  console.error("Error fetching YouTube videos:", err);
-  error = err.message;
-}
+const videos = await getCollection("youtubeVideos");
+const channelId = import.meta.env.YOUTUBE_CHANNEL_ID;
 ---
 
 <section class="py-8 bg-white dark:bg-gray-900 rounded-lg">
@@ -118,13 +237,7 @@ try {
       </p>
     </div>
 
-    {error ? (
-      <div class="text-center py-8">
-        <p class="text-red-600 dark:text-red-400">
-          Unable to load YouTube videos. Please try again later.
-        </p>
-      </div>
-    ) : videos.length === 0 ? (
+    {videos.length === 0 ? (
       <div class="text-center py-8">
         <p class="text-gray-600 dark:text-gray-400">
           No videos found.
@@ -135,10 +248,10 @@ try {
         {videos.map((video) => (
           <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1 border border-gray-200 dark:border-gray-700">
             <div class="relative">
-              <a href={video.url} target="_blank" rel="noopener noreferrer">
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
                 <Image
-                  src={video.thumbnail}
-                  alt={video.title}
+                  src={video.data.thumbnail}
+                  alt={video.data.title}
                   width={320}
                   height={180}
                   class="w-full h-48 object-cover rounded-t-lg"
@@ -146,7 +259,7 @@ try {
                   format="webp"
                 />
               </a>
-              <a href={video.url} target="_blank" rel="noopener noreferrer">
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
                 <Icon
                   name="mdi:play-circle"
                   class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white w-16 h-16 drop-shadow-lg opacity-80 hover:opacity-100 transition-opacity"
@@ -154,13 +267,13 @@ try {
               </a>
             </div>
             <div class="p-4">
-              <a href={video.url} target="_blank" rel="noopener noreferrer">
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
                 <h3 class="text-lg font-semibold text-gray-900 dark:text-white line-clamp-2 mb-2 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-                  {video.title}
+                  {video.data.title}
                 </h3>
               </a>
               <p class="text-sm text-gray-500 dark:text-gray-400">
-                {video.published.toLocaleDateString("en-US", {
+                {video.data.published.toLocaleDateString("en-US", {
                   year: "numeric",
                   month: "short",
                   day: "numeric",
@@ -174,7 +287,7 @@ try {
 
     <div class="text-center mt-8">
       <a
-        href={`https://www.youtube.com/channel/${CHANNEL_ID}`}
+        href={`https://www.youtube.com/channel/${channelId}`}
         target="_blank"
         rel="noopener noreferrer"
         class="inline-flex items-center px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors duration-300"
@@ -196,74 +309,82 @@ try {
 </style>
 ```
 
-### Understanding the SSG Code
-
-Here's what the code does:
-
-1. **Build-Time Execution**: The `---` section runs during build time, not in the browser
-2. **RSS Feed Fetching**: We use YouTube's RSS feed (`/feeds/videos.xml`) which is free and doesn't require API keys
-3. **XML Parsing**: We use regex to extract video data from the XML response
-4. **Error Handling**: Try-catch handles network failures
-5. **HTML Entity Decoding**: Converting `&amp;` back to `&`, etc.
-
-<Notice type="success" title="Why RSS Over API?">
-
-YouTube's RSS feed works well here. It's free, doesn't need authentication, and provides the data we need.
-
-</Notice>
-
-### Step 2: Using the SSG Component
-
-Add the component to any page or layout:
+Add the component to any page:
 
 ```astro
 ---
-// src/pages/index.astro (or wherever you want it)
+// src/pages/index.astro
 import YouTubeVideosSSG from '../components/YouTubeVideosSSG.astro';
 ---
 
 <html>
   <body>
-    <!-- Your other content -->
     <YouTubeVideosSSG />
   </body>
 </html>
 ```
 
-## 🚀 Method 2: SSR Approach with server:defer
+This works with the [free Astro blog theme](https://www.bitdoze.com/build-astro-blog-free/), drop the component into your layout or index page.
 
-The SSR approach with `server:defer` provides real-time updates with performance. The `server:defer` directive creates a server island that renders on demand.
+## 🚀 Method 2: SSR, server:defer Server Islands
 
-### Step 1: Configure Astro for SSR
+The SSR approach uses `server:defer` to create a **server island**. The page loads instantly with static HTML, and the YouTube component renders on demand on the server. No client-side JavaScript needed.
 
-First, install the Node.js adapter :
+### Step 1: Install an adapter
+
+`server:defer` requires a server adapter. You do **not** need `output: 'server'`, keep the default `'static'` output and only the island renders on demand. This is lighter than server-rendering every page.
+
+<Tabs>
+<Tab name="Node Adapter">
 
 ```bash
 npx astro add node
-
 ```
-This would make the `astro.config.mjs` to look like below:
 
-```javascript
+This configures `astro.config.mjs`:
+
+```js
 // astro.config.mjs
 import { defineConfig } from 'astro/config';
 import node from '@astrojs/node';
 
 export default defineConfig({
-  output: 'server', // Enable SSR
   adapter: node({
-    mode: 'standalone'
+    mode: 'standalone',
   }),
 });
 ```
 
-### Step 2: Create the SSR Component with server:defer
+Build and run:
+
+```bash
+astro build && node dist/server/entry.mjs
+```
+
+For production, [deploy the SSR build to a VPS](https://www.bitdoze.com/deploy-astro-on-vps/), an affordable VPS like [Hetzner](https://go.bitdoze.com/hetzner) or [Hostinger](https://go.bitdoze.com/hostinger-vps) works well for this.
+
+</Tab>
+<Tab name="Cloudflare Adapter">
+
+```bash
+npx astro add cloudflare
+```
+
+<Notice type="warning" title="Cloudflare adapter changes in Astro 6+">
+
+The Cloudflare adapter has breaking changes since Astro 6: the dev server now runs on `workerd` for parity, and you need **Wrangler `^4.125.0`**. Check the generated `compatibility_date` in your `wrangler.toml`. See [deploying your Astro blog to Cloudflare Pages](https://www.bitdoze.com/deploy-astrojs-cloudflare/) for the full setup.
+
+</Notice>
+
+</Tab>
+</Tabs>
+
+### Step 2: Create the SSR component with server:defer
 
 ```astro
 ---
 // src/components/YouTubeVideosSSR.astro
 import { Icon } from "astro-icon/components";
-import { Image } from "astro:assets";
 
 export interface Props {
   channelId: string;
@@ -272,13 +393,19 @@ export interface Props {
 
 const { channelId, maxVideos = 6 } = Astro.props;
 
-// Fetch YouTube videos - this runs on the server when the island is rendered
-let videos = [];
-let error = null;
+let videos: Array<{
+  id: string;
+  title: string;
+  published: Date;
+  thumbnail: string;
+  url: string;
+}> = [];
+let error: string | null = null;
 
 try {
   const response = await fetch(
-    `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`
+    `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`,
+    { signal: AbortSignal.timeout(10_000) }
   );
 
   if (!response.ok) {
@@ -292,7 +419,10 @@ try {
     /<entry>.*?<yt:videoId>(.*?)<\/yt:videoId>.*?<title>(.*?)<\/title>.*?<published>(.*?)<\/published>.*?<\/entry>/gs;
 
   let match;
-  while ((match = videoRegex.exec(xmlText)) !== null && videos.length < maxVideos) {
+  while (
+    (match = videoRegex.exec(xmlText)) !== null &&
+    videos.length < maxVideos
+  ) {
     const [, videoId, title, published] = match;
     videos.push({
       id: videoId,
@@ -301,13 +431,14 @@ try {
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")
         .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'"),
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "'"),
       published: new Date(published),
-      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
       url: `https://www.youtube.com/watch?v=${videoId}`,
     });
   }
-} catch (err) {
+} catch (err: any) {
   console.error("Error fetching YouTube videos:", err);
   error = err.message;
 }
@@ -342,14 +473,13 @@ try {
           <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1 border border-gray-200 dark:border-gray-700">
             <div class="relative">
               <a href={video.url} target="_blank" rel="noopener noreferrer">
-                <Image
+                <img
                   src={video.thumbnail}
                   alt={video.title}
                   width={320}
                   height={180}
                   class="w-full h-48 object-cover rounded-t-lg"
                   loading="lazy"
-                  format="webp"
                 />
               </a>
               <a href={video.url} target="_blank" rel="noopener noreferrer">
@@ -402,7 +532,7 @@ try {
 </style>
 ```
 
-### Step 3: Using the SSR Component with server:defer
+Use it with `server:defer` and a fallback slot:
 
 ```astro
 ---
@@ -412,226 +542,272 @@ import YouTubeVideosSSR from '../components/YouTubeVideosSSR.astro';
 
 <html>
   <body>
-    <!-- Your other content -->
-
     <!-- The server:defer directive makes this a server island -->
     <YouTubeVideosSSR
       server:defer
       channelId="UCGsUtKhXsRrMvYAWm8q0bCg"
       maxVideos={6}
-    />
+    >
+      <!-- Fallback content shown while the island loads -->
+      <div class="text-center py-8">
+        <p class="text-gray-500">Loading videos...</p>
+      </div>
+    </YouTubeVideosSSR>
   </body>
 </html>
 ```
 
-### Understanding server:defer
+<Notice type="info" title="Serializable props">
 
-The `server:defer` directive is the magic that makes this approach so powerful:
-
-1. **Page loads instantly** - The main page renders without waiting for YouTube data
-2. **Component renders on demand** - The YouTube component becomes a "server island" that renders separately
-3. **No client-side JavaScript needed** - Everything is handled server-side
-4. **Automatic error handling** - If the YouTube fetch fails, only this component is affected
-5. **Better user experience** - Users see the page immediately, videos load progressively
-
-<Notice type="success" title="Why server:defer is Amazing">
-
-With `server:defer`, you get the performance benefits of static generation for your main content, while having dynamic, fresh data for specific components. It's the perfect hybrid approach!
+Props passed to a `server:defer` island must be serializable. If the serialized props URL exceeds 2048 bytes, the island switches to POST and loses browser caching. For a `channelId` string and a `maxVideos` number, you're well under the limit.
 
 </Notice>
 
-## 🌟 Enhanced Version for Cloudflare Pages
+### Step 3: Operator notes and caching
 
-If you're using Cloudflare Pages (like in our [free Astro blog guide](https://www.bitdoze.com/build-astro-blog-free/)), you'll need to use the Cloudflare adapter:
+A few production concerns for server islands:
+
+**Rolling deploys need `ASTRO_KEY`.** If you deploy to multiple regions or do rolling restarts, the encrypted props and slot content (encrypted since Astro 6) need a stable key:
 
 ```bash
-npx astro add cloudflare
-
+npx astro create-key
 ```
 
+Set the output as the `ASTRO_KEY` environment variable in your CI or hosting platform.
 
-## 🎯 When to Use Each Approach
+**Inside an island, `Astro.url` points at `/_server-islands/...`**, not the real page URL. If you need the actual page URL, read it from the `Referer` header.
 
-### Use SSG When:
+**Astro 7 route caching** is now stable. You can cache the island response at the CDN or memory level:
 
-<ListCheck>
+```js
+// astro.config.mjs
+import { defineConfig, memoryCache } from 'astro/config';
 
-- **Performance is critical** - SSG sites load instantly
-
-- **You don't need real-time updates** - Videos update only when you rebuild
-
-- **You have limited server resources** - No server-side processing needed
-
-- **SEO is important** - Static content is easily crawlable
-
-- **You want lower costs** - No server runtime costs
-
-</ListCheck>
-
-### Use SSR When:
-
-<ListCheck>
-
-- **Real-time updates are important** - Videos appear immediately after publishing
-
-- **You have dynamic content needs** - Different videos for different users
-
-- **You want server-side caching** - Better control over cache strategies
-
-- **You need user-specific content** - Personalized video recommendations
-
-- **You have server infrastructure** - Can handle server-side processing
-
-</ListCheck>
-
-## 🔧 Customization Options
-
-### Styling the Components
-
-Both components use Tailwind CSS classes. You can customize the appearance by modifying the classes:
-
-```astro
-<!-- Change the grid layout -->
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-
-<!-- Change the card styling -->
-<div class="bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl shadow-xl">
-
-<!-- Change the hover effects -->
-<div class="transform hover:scale-105 transition-transform duration-300">
-```
-
-### Adding More Video Data
-
-You can extract additional data from the RSS feed:
-
-```javascript
-// Add description extraction
-const descriptionRegex = /<media:description>(.*?)<\/media:description>/s;
-const descMatch = descriptionRegex.exec(entry);
-const description = descMatch ? descMatch[1] : '';
-
-// Add view count (requires YouTube API)
-// Add duration (requires YouTube API)
-```
-
-### Error Handling Improvements
-
-Add retry logic and better error states:
-
-```javascript
-async function fetchWithRetry(url, maxRetries = 3) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) return response;
-    } catch (error) {
-      if (i === maxRetries - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
-}
-```
-
-## 🚀 Performance Optimization Tips
-
-### 1. Image Optimization
-
-Use Astro's Image component for automatic optimization:
-
-```astro
-<Image
-  src={video.thumbnail}
-  alt={video.title}
-  width={320}
-  height={180}
-  format="webp"
-  quality={80}
-  loading="lazy"
-/>
-```
-
-### 2. Caching Strategies
-
-For SSR, implement proper caching:
-
-```javascript
-// Cache in memory for development
-const cache = new Map();
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-
-function getCachedVideos(channelId) {
-  const cacheKey = `videos_${channelId}`;
-  const cached = cache.get(cacheKey);
-
-  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-    return cached.data;
-  }
-
-  return null;
-}
-```
-
-### 3. Lazy Loading
-
-Implement intersection observer for better performance:
-
-```javascript
-// Only load videos when component is visible
-const observer = new IntersectionObserver((entries) => {
-  entries.forEach(entry => {
-    if (entry.isIntersecting) {
-      loadYouTubeVideos();
-      observer.disconnect();
-    }
-  });
+export default defineConfig({
+  cache: { provider: memoryCache() },
+  routeRules: {
+    '/': { maxAge: 300, swr: 60 },
+  },
 });
-
-observer.observe(document.getElementById('youtube-videos-container'));
 ```
+
+This is more idiomatic than a hand-rolled `Map` cache (which silently breaks on serverless/edge because it's per-process only).
+
+## 🔑 YouTube Data API Upgrade Path (Resilient and Still Free)
+
+When RSS isn't enough, you need deeper history, view counts, durations, or just more reliability, the YouTube Data API v3 is the upgrade. At blog scale, it's effectively free.
+
+The call chain:
+
+1. `channels.list` → get the uploads playlist ID (1 unit)
+2. `playlistItems.list` → get video IDs from the uploads playlist (1 unit)
+3. `videos.list` → get titles, thumbnails, durations, view counts (1 unit)
+
+Total: **2-3 units per refresh** out of a 10,000 unit/day default quota. You'd need to refresh thousands of times a day to hit the limit.
+
+<Notice type="success" title="Still free at blog scale">
+
+One channel, a couple API calls per build = 1-3 units out of 10,000/day. You'll never hit the limit. There's no pay-for-quota option, only a manual audit form if you need more.
+
+</Notice>
+
+Manage the API key with `astro:env`:
+
+```js
+// astro.config.mjs
+import { defineConfig, envField } from 'astro/config';
+
+export default defineConfig({
+  env: {
+    schema: {
+      YOUTUBE_API_KEY: envField.string({
+        context: 'server',
+        access: 'secret',
+      }),
+      YOUTUBE_CHANNEL_ID: envField.string({
+        context: 'server',
+        access: 'public',
+      }),
+    },
+  },
+});
+```
+
+Then in your loader or server code:
+
+```ts
+import { YOUTUBE_API_KEY, YOUTUBE_CHANNEL_ID } from 'astro:env/server';
+
+const res = await fetch(
+  `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}`
+);
+const data = await res.json();
+const uploadsPlaylistId =
+  data.items[0].contentDetails.relatedPlaylists.uploads;
+```
+
+<Accordion label="How does YouTube API quota work?" group="faq">
+
+The default quota is 10,000 units per day per Google Cloud project, resetting at midnight Pacific time. Cheap calls: `playlistItems.list`, `videos.list`, and `channels.list` each cost 1 unit. Expensive call: `search.list` costs 100 units per call (or, per newer docs, gets its own bucket of 100 calls/day at 1 unit each, the quota model has some ambiguity). If you get a 403 with `quotaExceeded`, you've hit the daily limit. For this article's use case (one channel, 2-3 calls per build), you'll never come close.
+
+</Accordion>
+
+## 🖼️ Thumbnails and Image Optimization
+
+<Notice type="warning" title="maxresdefault can break your build">
+
+`maxresdefault.jpg` (1280px) is **not available for every video**. Older uploads, low-res originals, and some live/restricted content return a 404. In the SSG path with Astro's `<Image>` component, a missing remote thumbnail can **fail the build** because `<Image>` fetches the remote image at build time.
+
+Use `hqdefault.jpg` (480px) as your safe default, it's always present. Also available: `mqdefault.jpg` (320px) and `default.jpg` (120px).
+
+</Notice>
+
+<Accordion label="Which YouTube thumbnail size should I use?" group="faq">
+
+| Size | Resolution | Always available? | Use case |
+|------|-----------|-------------------|----------|
+| `default.jpg` | 120×90 | Yes | Tiny previews, not recommended |
+| `mqdefault.jpg` | 320×180 | Yes | Small cards, mobile |
+| `hqdefault.jpg` | 480×360 | **Yes** | **Recommended default** |
+| `sddefault.jpg` | 640×480 | Usually | Good balance, rare 404s |
+| `maxresdefault.jpg` | 1280×720 | **No** | Only if you verify availability |
+
+For the SSG path, use `<Image format="webp" loading="lazy">` for automatic optimization at build time. For the SSR island path, a plain `<img loading="lazy">` with `i.ytimg.com` is simpler since remote optimization happens at request time. See [speed up your Astro builds](https://www.bitdoze.com/astro-ssg-build-optimization/) for more on build performance.
+
+</Accordion>
+
+## ⚖️ When to Use SSG vs Server Islands
+
+### Use SSG when:
+
+<ListCheck>
+
+- **Performance is critical**, static HTML loads instantly
+- **You don't need real-time updates**, videos update when you rebuild
+- **You want zero server costs**, no runtime, just static files
+- **SEO matters**, static content is easily crawlable
+- **You prefer simplicity**, no adapter, no server infrastructure
+
+</ListCheck>
+
+### Use server islands when:
+
+<ListCheck>
+
+- **Real-time updates matter**, videos appear right after publishing
+- **You already have server infrastructure**, Node.js server or Cloudflare Workers
+- **You want per-component caching**, `Cache-Control` on the island endpoint
+- **You need the latest data without rebuilding**, no CI/CD trigger needed
+
+</ListCheck>
+
+## 🖼️ Embedding Single Videos in MDX
+
+This guide covers displaying a **channel's video grid**. If you need to embed a **single YouTube video** inside a blog post, use `@astro-community/astro-embed-youtube`, it wraps lite-youtube-embed for privacy-friendly, performance-optimized embeds (iframe loads only after click, ~229K weekly downloads).
+
+```bash
+npm install @astro-community/astro-embed-youtube
+```
+
+```mdx
+import { YouTube } from '@astro-community/astro-embed-youtube';
+
+<YouTube id="x6pjyeQ_6V0" />
+```
+
+For a full walkthrough on responsive single-video embeds in Astro MDX, see [embed individual videos in your Astro MDX with astro-embed](https://www.bitdoze.com/responsive-youtube-astrojs/).
 
 ## 🔍 Troubleshooting Common Issues
 
-### RSS Feed Not Loading
+### RSS feed not loading (404/500)
 
-<Notice type="warning" title="CORS Issues">
+<Notice type="warning" title="This is the #1 production issue">
 
-If you're getting CORS errors in development, YouTube's RSS feed should work fine in production. For local development, you might need to use a CORS proxy or test the production build.
+YouTube's RSS endpoint has documented intermittent outages, not a CORS problem. The real risk is a 404 during your build or island render.
+
+**Mitigation:**
+- Use `AbortSignal.timeout(5000)` to bound fetch time
+- Add a retry with exponential backoff (1s, 2s, 4s)
+- For SSG: keep a last-good JSON snapshot in the repo; fall back to it when the feed fails
+- Verify the feed is live before deploying: `curl "https://www.youtube.com/feeds/videos.xml?channel_id=UC..."`
 
 </Notice>
 
-### Videos Not Displaying
+### Videos not displaying / broken thumbnails
 
-1. **Check Channel ID**: Make sure your channel ID is correct
-2. **Check Network**: Verify the RSS feed URL in your browser
-3. **Check Console**: Look for JavaScript errors in browser dev tools
-4. **Check Build Logs**: For SSG, check build-time errors
+1. **Check your channel ID**, use the page-source method from the [prerequisites](#find-your-youtube-channel-id-from-an-handle). A wrong ID returns an empty feed, not an error.
+2. **Check thumbnail URLs**, grep your built HTML for `hqdefault` or `maxresdefault`. If you see `maxresdefault` 404s, switch to `hqdefault` in your loader.
+3. **Check build logs**, the Content Layer loader logs errors via `logger.error()`. Look for `YouTube feed returned 4xx/5xx`.
+4. **Check the RSS feed directly**, open the URL in a browser. If it 404s, wait and retry (outage windows are typically short).
 
-### Performance Issues
+### Server island not rendering
 
-1. **Reduce Video Count**: Display fewer videos initially
-2. **Implement Pagination**: Load more videos on demand
-3. **Optimize Images**: Use smaller thumbnail sizes
-4. **Add Loading States**: Improve perceived performance
+1. **Adapter not installed**, `server:defer` requires an adapter. Run `npx astro add node` or `npx astro add cloudflare`.
+2. **`ASTRO_KEY` not set**, on rolling deploys or multi-region, encrypted props can't decrypt without a stable key. Run `npx astro create-key` and set the env var.
+3. **Props too large**, if serialized props exceed 2048 bytes, the island switches to POST and loses browser caching. Keep props small (channel ID + max count is fine).
+4. **Check the endpoint directly**, visit `/_server-islands/YouTubeVideosSSR` (or your component name) to see if the island responds.
+
+### YouTube API quotaExceeded
+
+A 403 with `quotaExceeded` means you've hit the daily 10,000-unit limit. At blog scale (1-3 units/build), this shouldn't happen. If it does, check for accidental `search.list` calls (100 units each). There's no pay-for-quota, only a manual audit form for extensions.
+
+## ✅ Verification Checklist
+
+<ListCheck>
+
+1. `curl "https://www.youtube.com/feeds/videos.xml?channel_id=UC..."`, confirm 200 and inspect the XML fields
+2. `npx astro sync` after wiring the loader, confirm types are generated without errors
+3. `astro build`, confirm no build errors, check output for thumbnail 404s
+4. Run the standalone server locally, confirm `/_server-islands/<Component>` returns HTML
+5. Grep built HTML for `hqdefault`/`maxres`, catch any broken thumbnail URLs
+6. Open the deployed page in a browser, videos render, thumbnails load, fallback slot swaps out
+
+</ListCheck>
 
 ## 🎉 Conclusion
 
-You now have two powerful ways to display YouTube videos on your Astro blog! The SSG approach gives you blazing-fast performance with build-time generation, while the SSR approach provides real-time updates with server-side rendering.
+The SSG approach with a Content Layer loader is the recommended path for most blogs, it's fast, type-safe, and the component stays clean. Server islands via `server:defer` are the right call when you need real-time updates without rebuilding.
 
-Choose the method that best fits your needs:
-- **Go with SSG** if you want maximum performance and don't mind rebuilding to show new videos
-- **Choose SSR** if you need real-time updates and have server infrastructure
+Both approaches work with the [free Astro blog theme](https://www.bitdoze.com/build-astro-blog-free/), so you can add YouTube videos to your Astro blog right away.
 
-Both approaches work perfectly with the [free Astro blog theme](https://www.bitdoze.com/build-astro-blog-free/) we covered earlier, so you can enhance your blog with dynamic YouTube content right away!
+<Notice type="success" title="Pro tip">
 
-<Notice type="success" title="Pro Tip">
-
-You can even combine both approaches - use SSG for your main video showcase and SSR for a "Latest Video" widget that updates in real-time!
+Combine both approaches: use the Content Layer loader for your main video showcase page and a `server:defer` island for a "Latest Video" widget in your sidebar that updates in real-time!
 
 </Notice>
 
-Happy coding, and may your YouTube videos get all the views they deserve! 🎬✨
+Want to take it further? Check out [headless CMS options for your Astro blog](https://www.bitdoze.com/best-headless-cms-for-astro/) or [host video without YouTube using Bunny Stream](https://www.bitdoze.com/bunny-stream-guide/). For faster thumbnail delivery at scale, consider a CDN like [Bunny.net](https://go.bitdoze.com/bunny).
 
 ---
 
-*Want to take your Astro blog even further? Check out our other guides on [building a free Astro blog](https://www.bitdoze.com/build-astro-blog-free/) and advanced Astro techniques!*
+## FAQ
+
+<Accordion label="Do I need a YouTube API key?" group="faq">
+
+No, the RSS feed (`/feeds/videos.xml`) works without any authentication. You only need an API key if you upgrade to the YouTube Data API v3 for deeper history, view counts, or better reliability. At blog scale, the Data API is free (1-3 units out of 10,000/day).
+
+</Accordion>
+
+<Accordion label="How many videos does the RSS feed return?" group="faq">
+
+The RSS feed returns the **~15 most recent videos** per channel. If you need more, use the YouTube Data API's `playlistItems.list` endpoint, which can paginate through the full uploads playlist.
+
+</Accordion>
+
+<Accordion label="Can I use this with Cloudflare Pages?" group="faq">
+
+Yes, install the Cloudflare adapter with `npx astro add cloudflare`. Since Astro 6, the dev server runs on `workerd` for parity. You need **Wrangler `^4.125.0`** and should verify the generated `compatibility_date`. See [deploying your Astro blog to Cloudflare Pages](https://www.bitdoze.com/deploy-astrojs-cloudflare/) for the full guide.
+
+</Accordion>
+
+<Accordion label="What Astro version do I need?" group="faq">
+
+Content Layer loaders work since Astro 5.0 (Dec 2024). Server islands also work from Astro 5. This guide targets **Astro 7** (current stable). From Astro 6 onward, **Node 22.12.0+** is required.
+
+</Accordion>
+
+<Accordion label="Will this work with Astro 5?" group="faq">
+
+Content Layer loaders work since Astro 5.0. Server islands are also supported. However, Astro 6+ requires Node 22.12.0+ and introduced breaking changes to the Cloudflare adapter. If you're on Astro 5, the code works but you won't get the build speed improvements from Astro 7's Rust compiler.
+
+</Accordion>
