@@ -1,11 +1,13 @@
 ---
-date: 2025-12-05T00:00:00Z
-title: "Monitor Your Server Like a Pro: Beszel & Uptime Kuma Setup on Dokploy"
-description: "Complete guide to setting up Beszel for resource monitoring (CPU, memory, disk, Docker) and Uptime Kuma for uptime checks on Dokploy with SMTP alerts."
+date: 2026-09-16T00:00:00Z
+title: "Beszel & Uptime Kuma on Dokploy: Server Monitoring Guide"
+meta_title: "Beszel & Uptime Kuma on Dokploy: 2026 Monitoring Setup Guide"
+description: "Set up Beszel and Uptime Kuma on Dokploy for complete Docker server monitoring: resource metrics, uptime checks, SMTP alerts, plus Beszel 0.19 and Kuma v2 tips."
 image: "../../assets/images/25/12/beszel-uptime-kuma.webp"
+imageAlt: "Beszel hub dashboard and Uptime Kuma status page monitoring a Dokploy server, with alerts sent over SMTP"
 categories: ["self-hosting"]
 authors: ["Dragos"]
-tags: ["self-hosted", "docker", "monitoring"]
+tags: ["beszel", "uptime-kuma", "monitoring"]
 canonical: "https://www.bitdoze.com/beszel-uptime-kuma/"
 ---
 
@@ -15,23 +17,22 @@ import { Image } from "astro:assets";
 import Notice from "@components/widgets/Notice.astro";
 import ListCheck from "@components/widgets/ListCheck.astro";
 import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
 
 import beszel1 from "../../assets/images/24/11/beszel1.jpeg";
 import beszel2 from "../../assets/images/24/11/beszel2.jpeg";
+import beszelArchitecture from "../../assets/images/25/12/beszel-uptime-kuma-architecture.svg";
+import heartbeatFlow from "../../assets/images/25/12/beszel-heartbeat-dead-mans-switch.svg";
 
-Monitoring your self-hosted infrastructure matters. Whether you're running a simple VPS or a cluster of servers, knowing when a service goes down or when a disk is full matters. You need visibility into what's happening inside your servers (resources) and confirmation that services are accessible from the outside (uptime).
+Beszel and Uptime Kuma are the two self-hosted tools I put on every Dokploy server. The split is simple: Beszel watches what's happening *inside* the machine (CPU, memory, disk, Docker containers), while Uptime Kuma verifies your services actually work from the *outside*. Internal health and external availability fail in different ways, so you need both.
 
-Server monitoring tracks server performance metrics. This helps maintain system reliability and prevent issues before they impact services. Server monitoring includes:
+This guide walks through deploying both on [Dokploy](https://www.bitdoze.com/dokploy-install/), wiring email alerts through Brevo, and connecting the two tools into a dead man's switch so your monitoring can't fail silently.
 
-- **Resource utilization**: CPU, memory, disk, network
-- **Application performance**: Response times, error rates
-- **Service availability**: Uptime checks, health endpoints
-- **Container health**: Docker container stats and performance
-
-In this guide, we'll set up monitoring using [Dokploy](https://www.bitdoze.com/dokploy-install/). We'll deploy **Beszel** for internal resource monitoring (CPU, memory, disk, Docker stats) and **Uptime Kuma** for external uptime checks (HTTP/DNS).
+**Verified with Beszel 0.19.0 and Uptime Kuma 2.5.4, September 2026.** Both tools moved fast since this guide was first published, so version-specific steps (image tags, agent env vars, backups) are current as of that date.
 
 <Notice type="info" title="More Monitoring Options">
-For a broader look at monitoring options like Netdata or Prometheus + Grafana, check out our comprehensive guide on [Server Monitoring Tools](https://www.bitdoze.com/sever-monitoring/).
+For a broader look at monitoring options like Netdata or Prometheus + Grafana, see our [server monitoring tools guide](https://www.bitdoze.com/sever-monitoring/).
 </Notice>
 
 <YouTubeEmbed
@@ -39,11 +40,13 @@ For a broader look at monitoring options like Netdata or Prometheus + Grafana, c
   label="Monitor Your Server Like a Pro: Beszel & Uptime Kuma Setup on Dokploy"
 />
 
-## Understanding Key Monitoring Metrics
+<Notice type="warning" title="About the Video">
+The video was recorded before Uptime Kuma v2 and Beszel 0.19. The written steps below are the current ones. In particular, the image tags and agent environment variables changed.
+</Notice>
 
-Before setting up monitoring tools, understand what metrics matter:
+## Understanding key monitoring metrics
 
-### Essential Server Metrics
+Good self-hosted server monitoring starts with knowing which numbers matter. Everything else in this guide exists to collect these and to tell you when they go wrong:
 
 | Metric Category | What to Monitor | Why It Matters |
 |-----------------|-----------------|----------------|
@@ -52,193 +55,195 @@ Before setting up monitoring tools, understand what metrics matter:
 | **Disk** | Space usage, inode utilization, I/O wait times | Avoids disk-full failures |
 | **Network** | Bandwidth, packet loss, latency, connection states | Detects network issues early |
 
-### Monitoring Priorities by Environment
-
-Different environments have different monitoring focus:
-
-| Metric Type | Traditional Server | Container Environment | Cloud Infrastructure |
-|-------------|-------------------|----------------------|---------------------|
-| CPU | Overall usage | Per container usage | Instance utilization |
-| Memory | Physical/Swap | Container limits | Instance limits |
-| Storage | Partition usage | Volume usage | Block storage |
-| Network | Interface stats | Container networks | VPC metrics |
+In a container environment you care about these same metrics at two levels: the host (is the machine healthy?) and the container (is this app eating more RAM than it should?). Beszel handles both levels, and recent versions added more specialized collectors on top (S.M.A.R.T. disk health, systemd services, GPU usage, ZFS pools), which we'll flag where they matter.
 
 ## Why Beszel and Uptime Kuma?
 
-Here's what each tool does:
-
 | Tool | Purpose | What It Monitors |
 |------|---------|------------------|
-| **Beszel** | Internal resource monitoring | CPU, memory, disk, network, Docker containers |
-| **Uptime Kuma** | External availability checks | HTTP/HTTPS endpoints, DNS, TCP ports, SSL certificates |
+| **Beszel** | Internal resource monitoring | CPU, memory, disk, network, Docker containers, systemd, SMART, GPU, ZFS |
+| **Uptime Kuma** | External availability checks | HTTP/HTTPS endpoints, DNS, TCP ports, SSL certificates, push heartbeats |
 
-### Beszel - Lightweight Monitoring Hub
+### Beszel: the lightweight monitoring hub
 
-[Beszel](https://github.com/henrygd/beszel) is a lightweight monitoring solution. Unlike Prometheus + Grafana, Beszel uses a single binary agent and provides:
+[Beszel](https://github.com/henrygd/beszel) is a lightweight monitoring solution built around a hub and a small agent. Unlike Prometheus + Grafana, there's no time-series database to operate and no dashboards to build. Current versions (0.19.x) give you:
 
 <ListCheck>
-- Real-time server metrics monitoring
-- Historical data with graphs
-- Docker container statistics
-- Custom notification channels (email, webhooks)
-- Public key authentication for secure agent communication
-- Multi-server support from a single hub
-- Very low resource footprint
+- Real-time server metrics with historical graphs
+- Docker container statistics, plus a containers page with status, health, and logs (0.14+)
+- Container health alerts that include log excerpts (0.19+)
+- S.M.A.R.T. disk health monitoring with failure alerts (0.15+)
+- systemd service monitoring, including alerts for failed services (0.16+)
+- GPU monitoring (NVIDIA via NVML, Apple Silicon, Intel Arc) (0.16-0.18+)
+- ZFS pool and dataset monitoring (0.19+)
+- Alert quiet hours to stop night-time noise (0.17+)
+- Multi-server support from a single hub, with public key or token auth
+- Update-available notice in the UI (0.18.5+)
+- MIT licensed, fully free self-hosted
 </ListCheck>
 
-Here's what the Beszel interface looks like in action:
+Here's the Beszel interface showing a monitored system:
 
-<Image src={beszel1} alt="Beszel Main Interface showing server metrics dashboard" />
+<Image src={beszel1} alt="Beszel dashboard showing server metrics" />
 
-Beszel provides detailed historical graphs for all your metrics:
+And the historical graphs for CPU, memory, and network:
 
-<Image src={beszel2} alt="Beszel Graphs showing CPU, memory, and network usage over time" />
+<Image src={beszel2} alt="Beszel graphs showing CPU, memory, and network usage over time" />
 
-**Beszel Feature Overview:**
+<Notice type="info" title="Screenshots">
+These screenshots are from an earlier Beszel version. The 0.19 UI looks fresher and has more pages (containers, SMART, services), but the layout concept is the same.
+</Notice>
+
+**Beszel at a glance:**
 
 | Feature | Description | Benefit |
 |---------|-------------|---------|
-| Lightweight | Minimal resource usage (~10-20MB RAM per agent) | Ideal for small servers |
-| Docker Integration | Native container monitoring | Easy container tracking |
-| Public Key Auth | Secure agent communication via SSH keys | Enhanced security |
-| Multi-server Support | Monitor multiple servers from one hub | Centralized monitoring |
-| Historical Data | Stores metrics with graphs over time | Trend analysis |
+| Lightweight | Minimal resource usage (expect ~50-100MB RAM for the hub, ~10-20MB per agent) | Fine for small servers |
+| Docker integration | Per-container CPU, memory, network, plus health and logs | Container tracking without extra tools |
+| Secure agent comms | SSH key auth by default, optional outbound WebSocket with tokens | No open management ports needed |
+| Multi-server | One hub monitors all your agents | Centralized monitoring |
+| Historical data | Metrics stored with graphs over time | Trend analysis |
 
-### Uptime Kuma - Uptime Monitoring
+### Uptime Kuma: uptime monitoring from the outside
 
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) is a self-hosted uptime monitoring solution. It checks if your websites and services are accessible from the outside world and sends notifications if they aren't.
+[Uptime Kuma](https://github.com/louislam/uptime-kuma) checks whether your websites and services are reachable from the outside world and notifies you when they aren't. Version 2 is the current stable line (v2.0 shipped October 2025), and it covers:
 
 <ListCheck>
-- HTTP/HTTPS endpoint monitoring
-- DNS, TCP, Ping, and Docker container checks
+- HTTP(s), keyword, JSON Query, and Websocket-upgrade monitors
+- TCP, Ping, DNS, Steam, and Docker container checks
+- NTP monitors (added in v2.5.0)
+- Push monitors: a URL your apps can ping as a heartbeat
 - SSL certificate expiration monitoring
-- Beautiful status pages you can share
+- Public status pages
 - 90+ notification integrations
 - Maintenance windows
-- Multi-language support
 </ListCheck>
 
-### Why Use Both Together?
+### Why use both together
 
-**Internal health ≠ external availability**:
+Internal health does not equal external availability:
 
-- Your server could show 10% CPU usage, but your website might be down due to a misconfigured nginx
-- A container might be "running" but returning 502 errors
-- Your disk might be 95% full, but Uptime Kuma won't know until the app crashes
+- Your server can show 10% CPU usage while your site serves 502s because a container crashed
+- A container can be "running" but returning errors on every request
+- Your disk can be 95% full and Uptime Kuma won't notice until the app falls over
 
-Beszel tells you what's happening inside. Uptime Kuma tells you what users experience.
+Beszel tells you what's happening inside. Uptime Kuma tells you what users experience. Together, here's the full picture:
 
-### How This Stack Compares to Other Solutions
+<Image src={beszelArchitecture} alt="Architecture: Beszel hub and agent inside the Dokploy server, Uptime Kuma probing public endpoints, both alerting through Brevo SMTP, plus a dashed dead man's switch heartbeat from Beszel to a Kuma push monitor" />
+
+### How this stack compares
 
 | Feature | Beszel + Uptime Kuma | Prometheus/Grafana | Netdata |
 |---------|---------------------|-------------------|---------|
 | **Scalability** | Small-Medium | Enterprise-grade | Medium |
 | **Setup Complexity** | Low | High | Low |
-| **Customization** | Basic-Moderate | Extensive | Moderate |
-| **Resource Usage** | Very Low (~200MB total) | Moderate-High | Low |
+| **Customization** | Moderate | Extensive | Moderate |
+| **Resource Usage** | Very low (expect ~200-400MB total; check with `docker stats`) | Moderate-High | Low |
 | **Learning Curve** | Gentle | Steep | Moderate |
 | **Uptime Monitoring** | Built-in (Kuma) | Requires additional setup | Limited |
 | **Status Pages** | Yes (Kuma) | Manual setup needed | No |
 
-### The Importance of Proactive Notifications
-
-A well-configured alerting system should:
-
-1. **Provide Early Warning**
-   - Detect potential issues before they become critical
-   - Monitor trend changes that might indicate future problems
-   - Alert on unusual patterns or anomalies
-
-2. **Enable Quick Response**
-   - Deliver notifications through multiple channels (email, SMS, Slack)
-   - Include relevant diagnostic information
-   - Provide clear action items
-
-3. **Prevent Alert Fatigue**
-   - Use intelligent thresholds
-   - Implement alert correlation
-   - Configure proper alert priorities
+For 1-10 servers this combination is hard to beat. Past 20 servers or if you need custom recording rules and long retention, Prometheus + Grafana earns its complexity.
 
 ## Prerequisites
 
-Before starting:
-
 <ListCheck>
-- **A VPS or Server**: Minimum 2GB RAM recommended (1GB works for small deployments)
-- **Dokploy Installed**: Follow our [Dokploy Installation Guide](https://www.bitdoze.com/dokploy-install/) if you haven't already
-- **A Domain Name**: For accessing your monitoring dashboards (e.g., `monitor.yourdomain.com`, `status.yourdomain.com`)
-- **Email Service (Optional)**: For alert notifications (we'll use Brevo/Sendinblue which offers 300 free emails/day)
+- **A VPS or server**: 1GB RAM works, 2GB is comfortable for this stack plus your apps
+- **Dokploy installed**: follow the [Dokploy installation guide](https://www.bitdoze.com/dokploy-install/) if you haven't already
+- **Two DNS subdomains**: for example `monitor.yourdomain.com` (Beszel) and `status.yourdomain.com` (Uptime Kuma)
+- **Ports**: 80/443 open for the dashboards; port **45876** also reachable from the hub if you'll monitor remote agents the classic way (explained in Part 2)
+- **SSH access**: for the verification commands in this guide
+- **Email service (optional)**: a [Brevo](https://www.brevo.com/) account for alerts; the free tier gives 300 emails/day
 </ListCheck>
+
+Part 2 assumes you're comfortable deploying a raw compose file; if not, read how to [deploy a Docker Compose app in Dokploy](https://www.bitdoze.com/dokploy-docker-compose-app/) first.
+
+Running this on a home server instead of a VPS? A compact box like the [ASUS DC510 mini PC](https://go.bitdoze.com/asus-dc510) is enough for this monitoring stack plus a handful of containers.
 
 <Button text="Try Hetzner Cloud Now" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
 <Button text="Try Hostinger VPS" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
 
-## Part 1: Deploying Beszel (Resource Monitoring Hub)
+## Part 1: Deploying the Beszel hub
 
 Beszel has two components:
-1. **The Hub**: The main dashboard where you view all metrics
-2. **The Agent**: Installed on every server you want to monitor
 
-### Step 1: Create the Beszel Service in Dokploy
+1. **The Hub**: the web dashboard where you view all metrics and configure alerts
+2. **The Agent**: a tiny container installed on every server you want to monitor
 
-1. Go to your Dokploy dashboard and navigate to your project
-2. Click **Create Service** → **Template**
-3. Search for **Beszel** and select it
-4. Choose the server you want to deploy the Hub on
-5. Select the latest version tag (e.g., `0.9.1` or `latest`)
+### Step 1: Create the service from the Dokploy template, then fix the tag
 
-<Notice type="info" title="Deployment Tip">
-For redundancy, consider deploying the Hub on a separate node from your main production apps. If your production server goes down, you'll still receive alerts.
+1. In your Dokploy dashboard, go to your project and click **Create Services** → **Template**
+2. Search for **Beszel** and select it
+3. **Before deploying, open the compose editor and change the image tag.** At the time of writing, the Dokploy blueprint pins `henrygd/beszel:0.10.2`, which is several minor versions behind. Set it to `henrygd/beszel:0.19` (floats within the 0.19 line) or `henrygd/beszel:0.19.0` (pinned)
+4. Choose the server you want the hub on and deploy
+
+<Notice type="warning" title="Don't Use :latest">
+Avoid the `latest` tag entirely. Beszel has shipped broken `latest` pushes before (a bad push in the 0.18 cycle made agents report as down). Pin to a minor line like `0.19` so updates are deliberate.
 </Notice>
 
-### Step 2: Configure the Domain
+For redundancy, deploy the hub on a different node from your main production apps. If the production server dies, the hub survives to tell you about it.
 
-1. In Dokploy, go to the **Domains** tab for your new Beszel service
-2. Add your domain (e.g., `monitor.yourdomain.com`)
+### Step 2: Configure the domain
+
+1. Go to the **Domains** tab of the Beszel service
+2. Add your domain (for example `monitor.yourdomain.com`)
 3. Set the port to **8090** (Beszel's default UI port)
-4. Enable **HTTPS** (Let's Encrypt)
-5. Click **Create**
+4. Enable **HTTPS** (Let's Encrypt) and create the domain
 
-If using Cloudflare:
-- Create an **A Record** pointing `monitor` to your server IP
-- Set SSL/TLS mode to **Full** (not Flexible)
+If you use Cloudflare, create an **A record** pointing `monitor` to your server IP and set SSL/TLS mode to **Full**, not Flexible.
 
-### Step 3: Set Essential Environment Variables
+### Step 3: Set essential environment variables
 
-To ensure email alerts contain the correct links (instead of `localhost`), you must set the application URL.
-
-1. Go to the **Environment** tab in Dokploy
-2. Add the following variable:
+Two environment variables are worth setting on the hub:
 
 ```sh
 APP_URL=https://monitor.yourdomain.com
+CHECK_UPDATES=true
 ```
 
-3. Click **Save** and **Redeploy**
+- `APP_URL` makes alert emails contain real links instead of `localhost`
+- `CHECK_UPDATES` (Beszel 0.18.5+) shows an update-available notice in the UI when a new version exists
 
-### Step 4: Initial Beszel Setup
+Add them in the **Environment** tab, save, and redeploy. We'll add a third variable later, `HEARTBEAT_URL`, in the dead man's switch section.
 
-1. Visit your new URL (`https://monitor.yourdomain.com`)
-2. Create your admin account with a strong password
-3. You'll land on the main dashboard (empty for now)
+### Step 4: Initial setup and verify
 
-**Best Practices for Beszel Deployment:**
-- Use secure networking between server and agents
-- Implement proper backup for Beszel data
-- Regular updates of both server and agent containers
-- Monitor agent connectivity from the Hub
+1. Visit `https://monitor.yourdomain.com` and create your admin account with a strong password
+2. You'll land on an empty dashboard
 
-## Part 2: Installing the Beszel Agent
+**Verify** from your server:
 
-Now that the Hub is running, we need to install the Agent on every server we want to monitor.
+```sh
+docker exec beszel /beszel health --url http://localhost:8090
+```
 
-### Step 1: Get the Agent Configuration from the Hub
+Exit code 0 means the hub is healthy. From outside:
 
-1. In the Beszel Hub, click **Add System**
-2. Name your system (e.g., `main-dokploy-node` or `production-1`)
-3. Copy the Docker Compose snippet provided - it contains your unique public **KEY** for authentication
+```sh
+curl -fsSIL https://monitor.yourdomain.com | head -1
+```
 
-The snippet will look something like this:
+Expect `HTTP/2 200` or a redirect to `/login`. Anything else (timeouts, 5xx) means the domain or Traefik config is wrong.
+
+**Failure mode to know about:** if the dashboard looks nothing like the current Beszel docs, the blueprint tag won. Check what actually deployed:
+
+```sh
+docker ps --format '{{.Names}}\t{{.Image}}' | grep beszel
+```
+
+If it says `0.10.2` or older, fix the tag in Dokploy and redeploy.
+
+## Part 2: Installing the Beszel agent
+
+Now install the agent on every server you want to monitor, starting with the hub's own machine.
+
+### Step 1: Get the agent config from the hub
+
+1. In the Beszel hub, click **Add System**
+2. Name it (for example `main-dokploy-node`)
+3. Copy the Docker Compose snippet the dialog generates. It contains the unique public **KEY** for this system
+
+Depending on your hub version, the snippet may also include `HUB_URL` and `TOKEN` for outbound WebSocket mode (more on that below). The classic shape looks like this:
 
 ```yaml
 services:
@@ -248,384 +253,479 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
+      - ./beszel_agent_data:/var/lib/beszel-agent
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      PORT: 45876
-      KEY: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHiPxG...'
+      LISTEN: 45876
+      KEY: "<public key from the Add System dialog>"
 ```
 
-### Step 2: Deploy the Agent via Dokploy
+Three details matter here:
 
-1. Go back to Dokploy on the server you want to monitor
-2. Create a new **Compose** service (not a template)
-3. Name it `beszel-agent`
-4. Paste the Docker Compose configuration you copied from the Hub
-5. Click **Deploy**
+- **`LISTEN` is the current variable name.** Older guides (and old copies of this article) used `PORT`, which stopped being the correct name around v0.12. If your agent ignores its port config, this is why.
+- **`network_mode: host` is required** so the agent can read the host's real network interface stats.
+- **The Docker socket is mounted read-only** (`:ro`) so the agent can list containers and pull per-container stats without being able to mutate Docker.
 
-<Notice type="warning" title="Important">
-Ensure the port mapping matches what the Hub expects. The default is **45876**. If you change it, update it in both the agent and the Hub.
+### Step 2: Deploy the agent via Dokploy
+
+1. In Dokploy, create a new service of type **Compose** (not Template)
+2. Name it `beszel-agent`
+3. Paste the compose config you copied from the hub
+4. Deploy
+
+<Notice type="warning" title="Port Must Match">
+The default agent port is **45876**. If you change `LISTEN`, the hub needs to know. Keep the default and there is nothing extra to configure.
 </Notice>
 
-### Step 3: Verify the Connection
+### Step 3: Verify the connection
 
-Once deployed:
-- The icon in your Beszel Hub should turn **green**
-- You'll start seeing real-time CPU, Memory, Disk, and Docker container stats
-- Historical graphs will begin populating
+- The system icon in the hub turns **green** within about a minute
+- CPU, memory, disk, and Docker stats start populating graphs
+- The agent ships a health check too:
 
-**What Metrics You'll See:**
+```sh
+docker exec beszel-agent /agent health
+```
 
-| Metric | Description | Alert Threshold Suggestion |
-|--------|-------------|---------------------------|
-| CPU Load | 1, 5, 15 minute load averages | > 90% for 5 minutes |
-| Memory | Used, available, cached, swap | > 85% used |
-| Disk | Usage per mount point, I/O stats | > 85% capacity |
-| Network | Bandwidth in/out, packet stats | Unusual spikes |
-| Docker | Per-container CPU, memory, network | Container-specific |
+Exit code 0 means the agent process is healthy. If the icon stays red, jump to the troubleshooting checklist below.
 
-### Monitoring Additional Servers
+### Two ways to connect agents
 
-Repeat the agent installation process for each server you want to monitor:
+Beszel supports two connection models. Pick based on how many servers you have and how your firewall is set up.
 
-1. In the Hub, click **Add System** for each new server
-2. Give it a unique name
-3. Copy the Docker Compose snippet (each will have a unique KEY)
-4. Deploy the agent on that server
+<Tabs>
+<Tab name="Per-system key (classic)">
+The flow from the steps above: each system you add in the hub gets its own SSH public key, and the agent listens on port 45876 for the hub to dial in.
 
-## Part 3: Setting Up Uptime Kuma
+- Best for 1-3 servers
+- The hub must be able to reach **every agent on port 45876** (inbound rule on each server's firewall)
+- Each `Add System` dialog gives you a fresh compose snippet with a unique KEY, so there are no shared secrets
+</Tab>
+<Tab name="Universal token + outbound WebSocket">
+Since Beszel v0.12.0, agents can instead dial *out* to the hub over WebSocket and self-register with a token. Tokens can be made permanent since v0.18.0.
 
-Beszel watches internal resources, Uptime Kuma watches external availability.
+1. In the hub, go to **Settings → Tokens** and create a universal token
+2. Deploy this on every server:
 
-### Step 1: Deploy via Dokploy Template
+```yaml
+services:
+  beszel-agent:
+    image: henrygd/beszel-agent
+    container_name: beszel-agent
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./beszel_agent_data:/var/lib/beszel-agent
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      KEY: "<any placeholder or real key>"
+      HUB_URL: "https://monitor.yourdomain.com"
+      TOKEN: "<token from /settings/tokens>"
+      SYSTEM_NAME: "worker-01"
+```
 
-1. In Dokploy, create a new service from **Template**
-2. Search for **Uptime Kuma** and select it
-3. Check the image tag - change to the latest stable version if needed (e.g., `1` or specific version like `1.23.15`)
-4. Click **Deploy**
+- One token works for N servers. Set `SYSTEM_NAME` per server so they don't collide
+- **No inbound port 45876 needed anywhere**; the agent makes outbound HTTPS to the hub. Great for firewall-tight environments
+- Recommended for fleets of 4+ servers
+</Tab>
+</Tabs>
 
-### Step 2: Configure the Domain
+<Notice type="error" title="Breaking Change in Beszel 0.19">
+Agents now verify HTTPS certificates when connecting to the hub. With a normal Let's Encrypt cert from Dokploy/Traefik, nothing changes. But if your hub runs on a self-signed cert, a private CA, or an IP-based URL, the connection is rejected until you point the agent at your CA with the `CA_CERT_FILE` environment variable.
+</Notice>
 
-1. Go to the **Domains** tab
-2. Set up a domain (e.g., `status.yourdomain.com`)
-3. The internal port should be **3001**
-4. Enable **HTTPS**
-5. Click **Create**
+### Troubleshooting: agent shows red
+
+Work through this checklist in order:
+
+1. **Port reachability** (classic mode only): from the hub's server, `nc -zv <agent-ip> 45876`. If it fails, open 45876 in the agent server's firewall/security list, limited to the hub's IP, not the world
+2. **KEY mismatch**: the `KEY` in the agent's env must match what the hub generated for *that* system. Copy-paste errors are the usual cause
+3. **Wrong `HUB_URL`/`TOKEN`** (WebSocket mode): the URL must be exactly the hub's public URL, and the token must not be expired
+4. **Certificate rejection** (0.19+): if the agent logs mention certificate errors, you're on a non-public CA, so set `CA_CERT_FILE` as described above
+5. Check agent logs: `docker logs beszel-agent`; connection errors are explicit
+
+Beszel also maintains a [common issues page](https://beszel.dev/guide/common-issues) in its docs that covers the rarer cases.
+
+### Monitoring additional servers
+
+With a universal token this is now the cheap part of the whole setup:
+
+1. Copy the same compose snippet to every server
+2. Change `SYSTEM_NAME` (for example `worker-02`, `backup-01`)
+3. Deploy. Each agent self-registers in the hub
+
+No hub-side dialog needed per server. If you're on the classic key flow instead, repeat `Add System` for each server and deploy its unique snippet.
+
+## Part 3: Setting up Uptime Kuma (v2)
+
+Beszel watches internal resources; Uptime Kuma watches what the outside world sees.
+
+<Notice type="warning" title="The latest Tag Still Points to v1">
+Uptime Kuma's `latest` Docker tag is deprecated and still serves version **1**. If your compose says `louislam/uptime-kuma:1` or `:latest`, you are running the old major, including on fresh Dokploy template deployments if you don't check. Use `louislam/uptime-kuma:2`. This is the single most important fix in this article.
+</Notice>
+
+If you want a quicker path than manual tag surgery, we have a separate one-click [Uptime Kuma deployment guide for Dokploy](https://www.bitdoze.com/deploy-uptime-kuma/), and a general guide to [install Uptime Kuma self-hosted on any server](https://www.bitdoze.com/install-uptime-kuma/) if you're not using Dokploy here.
+
+### Step 1: Deploy via template, change the tag to 2
+
+1. In Dokploy, create a service from **Template**, search for **Uptime Kuma**, select it
+2. In the compose editor, set the image to `louislam/uptime-kuma:2` (the Dokploy blueprint ships `2.1.0` at the time of writing, the right major version but behind current stable; `:2` floats the whole v2 line). Current stable is 2.5.4
+3. Deploy
+
+Two optional tweaks:
+
+- `louislam/uptime-kuma:2-slim` if you want a smaller image
+- Add `UPTIME_KUMA_SQLITE_SINGLE_CONNECTION=true` to the environment if you run this on a Raspberry Pi-class device and hit SQLite locking errors (available since 2.3.0)
+
+### Migrating from Uptime Kuma v1 to v2
+
+Many existing setups are silently stuck on 1.23.x precisely because `latest` never left v1. The upgrade is safe if you do it in this order:
+
+1. **Stop the container** (in Dokploy: stop the service)
+2. **Back up the data directory.** This is the only supported backup method in v2; the old "export to JSON" feature was removed. See the backup commands in the Backups section below
+3. **Change the image tag to `:2`** and start the service. Changing the image tag is exactly a [Docker Compose stack update in Dokploy](https://www.bitdoze.com/dokploy-update-docker-compose/), so the same flow applies
+4. **Watch the deploy logs.** v2 migrates the heartbeat database on first start, and that "could take some time". The maintainer's reference point is around 7 minutes for 20 monitors with 90 days of history, and it can take longer on slow disks or big instances
+5. Verify your monitors and notifications came through
+
+<Notice type="warning" title="Do Not Interrupt the Migration">
+If the migration is interrupted mid-run, restore your backup and retry from a stopped state. Don't restart the container because it "looks stuck"; check the logs for activity first.
+</Notice>
+
+Other v2 changes that matter once you're migrated:
+
+- **New monitors default to 0 retries** (was 1). A single failed probe can now page you. Set retries deliberately: 2-3 for flaky endpoints, 1 for things that should never blip
+- **SMTP notification templates use LiquidJS**; variable names are case-sensitive, and unsupported variables are ignored. Only matters if you customized templates in v1
+- Badge `:duration` values are restricted to fixed formats like `24h` or `30d`
+
+### Step 2: Configure the domain
+
+1. Go to the **Domains** tab of the Kuma service
+2. Add `status.yourdomain.com`, internal port **3001**, enable **HTTPS**, create
 
 <Notice type="info" title="Volume Persistence">
-Dokploy handles the volume creation automatically to persist your monitoring data across container restarts.
+Dokploy handles the volume creation automatically to persist your monitoring data across container restarts. Check which volume name it generated; you'll need it for backups.
 </Notice>
 
-### Step 3: Initial Uptime Kuma Setup
+### Step 3: Initial setup
 
-1. Visit your new URL (`https://status.yourdomain.com`)
-2. Create your admin account
-3. You'll see an empty dashboard ready for monitors
+1. Visit `https://status.yourdomain.com` and create the admin account
+2. You'll see an empty dashboard
 
-### Step 4: Add Your First Monitor
+### Step 4: Add your first monitors
 
 1. Click **Add New Monitor**
-2. Choose monitor type: **HTTP(s)** for websites
-3. Enter the URL you want to monitor
-4. Set the heartbeat interval (e.g., 60 seconds)
-5. Click **Save**
+2. Pick a type (the table below), enter the target
+3. Set the heartbeat interval (60s is fine) and **set retries explicitly**; remember the v2 default is 0
+4. Save
 
-**Recommended monitors to set up:**
+| Monitor Type | Use Case | Example | Suggested Retries |
+|--------------|----------|---------|-------------------|
+| HTTP(s) | Website availability | `https://yourdomain.com` | 2-3 |
+| HTTP(s) - Keyword | Content verification | Check the page contains "Welcome" | 2-3 |
+| JSON Query | API responses | Assert `$.status` equals `ok` | 2 |
+| TCP Port | Database/queue connectivity | PostgreSQL on 5432 (internal) | 2 |
+| DNS | DNS resolution | Check the A record for your domain | 2 |
+| Docker Container | Container state via the Docker socket | Monitor a specific container | 1-2 |
+| NTP | Time server health (v2.5.0+) | Your internal NTP source | 2 |
+| Push | App heartbeats (dead man's switch) | See the next section | 1 |
 
-| Monitor Type | Use Case | Example |
-|--------------|----------|---------|
-| HTTP(s) | Website availability | `https://yourdomain.com` |
-| HTTP(s) - Keyword | Content verification | Check for "Welcome" text |
-| TCP Port | Database connectivity | PostgreSQL on port 5432 |
-| DNS | DNS resolution | Check A record for domain |
-| Docker Container | Container health | Monitor specific container |
+**Verify:** the monitor shows green heartbeat bars within one interval. Then test detection on purpose: stop one small app container and confirm Kuma flips it to Down and recovers it to Up after you restart it. If a single blip alerts you immediately, that's the retries=0 default; raise it.
 
-## Part 4: Configuring SMTP Alerts with Brevo
+## Monitor your monitoring: a dead man's switch
 
-Monitoring doesn't help if you don't get notified when things break. Here's how to set up email alerts using [Brevo](https://www.brevo.com/) (formerly Sendinblue), which offers 300 free emails per day.
+Both dashboards share one blind spot. If the Beszel hub crashes, the whole VPS dies, or DNS breaks, nothing alerts you, because every internal check dies with the machine.
 
-### Step 1: Get SMTP Details from Brevo
+The old advice was to point a free UptimeRobot account at your Uptime Kuma instance. You don't need a third party anymore. Since Beszel v0.18.4, the hub can send a heartbeat to any push endpoint, and Uptime Kuma has native Push monitors:
+
+<Image src={heartbeatFlow} alt="Dead man's switch flow: Beszel hub posts to a Kuma push monitor every 60 seconds, and silence past the interval and retry window triggers a Brevo email alert" />
+
+1. In Uptime Kuma, add a monitor of type **Push**
+2. Copy the push URL it generates (shape: `https://status.yourdomain.com/api/push/<token>`)
+3. Add to the Beszel hub environment in Dokploy:
+
+```sh
+APP_URL=https://monitor.yourdomain.com
+CHECK_UPDATES=true
+HEARTBEAT_URL=https://status.yourdomain.com/api/push/<token>
+```
+
+4. Redeploy the hub
+
+Beszel now POSTs a JSON status summary (systems up/down, triggered alerts, hub version) every `HEARTBEAT_INTERVAL` seconds (60 by default). As long as pings arrive, the Kuma monitor shows green heartbeats. The moment they stop, Kuma declares it Down and fires your notification.
+
+<Notice type="success" title="Why This Beats a Third-Party Watcher">
+It's free, it stays inside your stack, and it catches the same failure class: hub dead, VPS dead, Traefik broken, DNS not resolving. The same trick works in reverse: give each critical app its own Kuma push monitor so a crashed app can't take its own watchdog down with it.
+</Notice>
+
+**Verify:** once the push monitor shows green, stop the Beszel hub container and wait. Kuma should flip the monitor to Down after roughly interval × retries (about 1-2 minutes with defaults), then recover when you start the hub again. For more heartbeat and push-monitor patterns across different stacks, see the broader [server monitoring guide](https://www.bitdoze.com/sever-monitoring/).
+
+## Part 4: Configuring SMTP alerts with Brevo
+
+Monitoring without notifications is just a pretty dashboard. Here's how to wire email alerts through [Brevo](https://www.brevo.com/) (formerly Sendinblue), which offers 300 free emails per day, plenty for alerts.
+
+### Step 1: Get SMTP details from Brevo
 
 1. Create a free Brevo account if you don't have one
 2. Go to **Settings** → **SMTP & API**
-3. Generate a new **SMTP Key**
-4. Note down your credentials:
+3. Generate a new **SMTP key**
+4. Note the credentials:
 
 | Setting | Value |
 |---------|-------|
 | Server | `smtp-relay.brevo.com` |
 | Port | `587` |
 | Login | Your Brevo email |
-| Password | The SMTP Key you generated |
+| Password | The SMTP key you generated |
 
 <Notice type="warning" title="Sender Authentication">
-Ensure your sender address (e.g., `alerts@yourdomain.com`) is authenticated in Brevo. Go to **Settings** → **Senders & IP** → **Senders** and add/verify your domain.
+Ensure your sender address (e.g., `alerts@yourdomain.com`) is authenticated in Brevo. Go to **Settings** → **Senders & IP** → **Senders** and add/verify your domain, or every test email will bounce.
 </Notice>
 
-### Step 2: Configure Beszel Alerts
+### Step 2: Configure Beszel alerts
 
-1. In Beszel, go to **Settings** → **SMTP** (or General settings depending on version)
-2. Enter the SMTP details:
-   - **Host**: `smtp-relay.brevo.com`
-   - **Port**: `587`
-   - **Username**: Your Brevo email
-   - **Password**: Your SMTP Key
-   - **Sender Address**: `alerts@yourdomain.com`
-3. Save the settings
+1. In Beszel, open the admin **Settings** and find the **SMTP** section (exact tab names vary a bit between versions, but it lives under admin settings)
+2. Enter the Brevo details: host `smtp-relay.brevo.com`, port `587`, your Brevo login, the SMTP key as password, and `alerts@yourdomain.com` as sender
+3. Save, then use the built-in test email button to confirm delivery
 
 **Set up alert thresholds:**
 
-1. Go to **Systems** → click your server → **Alerts**
-2. Enable alerts for specific thresholds:
+1. Go to **Systems**, click your server, open **Alerts**
+2. Enable alerts per metric; the recommended values are in the thresholds table in the Best Practices section
 
-| Metric | Recommended Threshold |
-|--------|----------------------|
-| CPU Usage | > 90% for 5 minutes |
-| Memory Usage | > 85% |
-| Disk Usage | > 85% |
-| System Status | Down |
+Beyond email, Beszel notifications are configured as [Shoutrrr](https://beszel.dev/guide/notifications) URLs under **Settings → Notifications**. That gives you native Discord, Telegram, Slack, Microsoft Teams, Gotify, Ntfy, Pushover, Matrix, Mattermost, OpsGenie, Signal, and Twilio, with no webhook glue required.
 
-### Step 3: Configure Uptime Kuma Alerts
+### Step 3: Configure Uptime Kuma alerts
 
 1. In Uptime Kuma, go to **Settings** → **Notifications**
-2. Click **Setup Notification**
-3. Choose **Email (SMTP)**
-4. Fill in the same Brevo details:
-   - **Hostname**: `smtp-relay.brevo.com`
-   - **Port**: `587`
-   - **Security**: STARTTLS
-   - **Username**: Your Brevo email
-   - **Password**: Your SMTP Key
-   - **From Email**: `alerts@yourdomain.com`
-   - **To Email**: Your notification email
-5. Click **Test** to verify it works
-6. Save the notification
+2. Click **Setup Notification**, choose **Email (SMTP)**
+3. Fill in the same Brevo details: hostname `smtp-relay.brevo.com`, port `587`, security **STARTTLS**, your Brevo login, the SMTP key as password, `alerts@yourdomain.com` as From
+4. Click **Test** and check the inbox, then save
+5. Attach the notification to each monitor (or use the "apply to all monitors" option when saving it)
 
-**Attach notifications to monitors:**
+One footnote if you customize email templates in v2: Kuma switched template rendering to LiquidJS, and variable names are case-sensitive.
 
-When creating or editing a monitor, scroll down to **Notifications** and select your email notification to receive alerts for that specific monitor.
+**Verify both paths:** send a test email from each tool, then check the Brevo dashboard's delivery logs. If tests arrive but real alerts don't, the usual cause is notifications not attached to the monitors.
 
-## Part 5: Testing Your Monitoring Stack
+## Part 5: Testing your monitoring stack
 
-Verify everything works before assuming you're covered.
+Untested alerting is a guess, not a system. Run all three tests after setup, and re-run them every month or after major changes.
 
-### Test Beszel Alerts
+### Test 1: Beszel detects a dead agent
 
-1. SSH into your monitored server
-2. Stop the Beszel Agent container:
-   ```sh
-   docker stop beszel-agent
-   ```
-3. Wait 1-2 minutes
-4. You should receive an email saying "System is Down"
-5. Restart the agent:
-   ```sh
-   docker start beszel-agent
-   ```
-6. You should receive a "System is Up" email
+1. On a monitored server: `docker stop beszel-agent`
+2. Wait 1-2 minutes
+3. Expect a "System is Down" email (assuming you enabled the status alert in Part 4)
+4. `docker start beszel-agent` and confirm the "System is Up" recovery email
 
-### Test Uptime Kuma Alerts
+### Test 2: Uptime Kuma detects a dead app
 
-1. Stop one of your monitored web applications:
-   ```sh
-   docker stop your-web-app
-   ```
-2. Uptime Kuma should detect the error (502/Timeout) within your heartbeat interval
-3. You should receive a notification email
-4. Restart your app and verify you get an "Up" notification
+1. Stop one of your monitored apps: `docker stop your-web-app`
+2. Kuma should detect the failure (timeout or 502) within heartbeat interval × retries
+3. Expect the notification, then restart the app and confirm the Up notification
 
-## Advanced Configuration
+### Test 3: The dead man's switch catches a dead hub
 
-### Creating Status Pages with Uptime Kuma
+1. Stop the Beszel hub container on your Dokploy node
+2. Watch the Kuma push monitor flip to Down after about interval × retries (1-2 minutes with defaults)
+3. Expect your notification, then start the hub again
 
-Uptime Kuma can generate public status pages to share with your users:
+If any test fails silently, fix it now. This is exactly the failure class you built the stack to catch.
 
-1. Go to **Status Pages** in the menu
-2. Click **New Status Page**
-3. Give it a name and slug (e.g., `status`)
-4. Add monitors to display
-5. Customize the look and feel
-6. Share the public URL with users
+## Backups, updates, and costs
 
-### Monitoring Docker Containers Directly
+The stack is only done when it survives a server rebuild. Here's the operator floor.
 
-Uptime Kuma can monitor Docker containers without going through HTTP:
+### Backing up Uptime Kuma
 
-1. Create a new monitor with type **Docker Container**
-2. Enter the container name or ID
-3. The monitor checks if the container is running (not just the port)
+In v2, backing up the `data` directory is the **only** supported backup method; the old JSON export was removed. First find the real volume name (Dokploy's naming won't match generic examples):
 
-<Notice type="info" title="Docker Socket Access">
-For Docker container monitoring in Uptime Kuma, you need to mount the Docker socket. The Dokploy template should handle this, but verify the volume mount exists:
-```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
+```sh
+docker volume ls | grep -i kuma
 ```
-</Notice>
 
-### Monitoring Multiple Servers
+Then back it up:
 
-For a multi-server setup:
+```sh
+docker run --rm -v <kuma_volume>:/data -v $(pwd):/backup alpine \
+  tar czf /backup/kuma-backup.tar.gz -C /data .
+```
 
-1. Deploy **one Beszel Hub** (central dashboard)
-2. Deploy **Beszel Agents on each server** (using unique keys)
-3. Deploy **one Uptime Kuma instance** (can monitor all external endpoints)
-4. Configure alerts to go to the same email/Slack/Discord channel
+Schedule it: a weekly cron is fine since the data changes slowly, or use Dokploy's built-in backups. For offsite copies, see how to set up [automated Dokploy backups to Cloudflare R2](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/). A backup you've never restored is a hope, not a backup: do one test restore.
 
-## Best Practices
+### Backing up Beszel
+
+The hub stores everything in its data volume (`beszel_data` in the default compose). Admin settings include a Backups section. Check what your version offers there and back the volume up the same way as Kuma's if you want full control. If you lose admin access, recover it directly:
+
+```sh
+docker exec beszel /beszel superuser upsert you@example.com newpassword
+```
+
+### Updating safely
+
+- **Beszel**: keep `CHECK_UPDATES=true` so the hub tells you when a release exists. Pin to the minor line (`0.19`) and read the release notes before jumping. 0.19's agent certificate verification is a good example of a change that bites unprepared setups
+- **Uptime Kuma**: pin the major (`:2`), and **back up the data directory before every upgrade**. Then redeploy via Dokploy and watch the logs
+
+### What this costs
+
+Both tools are MIT-licensed and free; no paid tier is required for any feature in this guide. Brevo's free tier covers 300 alert emails/day. The real cost is zero extra infra: the whole stack fits comfortably on the VPS you already run. Expect roughly 50-100MB RAM for the hub, 10-20MB per agent, and 100-200MB for Kuma. Get real numbers on your node with `docker stats`.
+
+Your monthly operating checklist:
 
 <ListCheck>
-- **Set meaningful alert thresholds**: Avoid alert fatigue by not alerting on every 80% CPU spike
-- **Use multiple notification channels**: Email + Slack/Discord for critical alerts
-- **Monitor your monitoring**: Set up an external service (like UptimeRobot free tier) to monitor your Uptime Kuma instance
-- **Regular testing**: Test your alerts monthly to ensure they still work
-- **Document your setup**: Keep notes on what each monitor checks and why
-- **Backup configurations**: Export your Uptime Kuma configuration periodically
+- Backup the Kuma data directory and the Beszel volume (weekly is fine)
+- Test-restore a backup once, so you know the procedure works
+- Re-run the three alert tests monthly
+- Review thresholds after adding new services
+- Apply updates at least monthly, reading release notes first
 </ListCheck>
 
-### Recommended Alert Thresholds
+## Best practices and security hardening
 
-Based on real-world experience, here are suggested thresholds for common metrics:
+<ListCheck>
+- **Set meaningful thresholds**: alert on sustained problems, not every CPU spike. Use Beszel's quiet hours (0.17+) to mute non-urgent alerts at night
+- **Use multiple channels**: email for everything, Discord/Telegram/Pushover for critical alerts
+- **Test alerts monthly**: the three tests in Part 5 take five minutes
+- **Document your monitors**: a one-line comment per monitor saying what it checks and why it exists
+- **Monitor your monitoring**: the dead man's switch from the previous section is not optional if this stack matters
+</ListCheck>
 
-| Metric | Warning Level | Critical Level | Notes |
-|--------|---------------|----------------|-------|
-| CPU Usage | 70% for 5 min | 90% for 5 min | Sustained high CPU indicates bottleneck |
-| Memory Usage | 75% | 85% | Leave headroom for spikes |
-| Disk Usage | 80% | 90% | Plan expansion before hitting critical |
-| Disk I/O Wait | 20% | 40% | High I/O wait slows everything |
-| Network Errors | Any increase | Sustained errors | Usually indicates hardware issues |
-| Container Restarts | 2 in 10 min | 5 in 10 min | Crash loops need investigation |
+### Recommended alert thresholds
 
-### When to Scale Up Your Monitoring
+Starting points that avoid alert fatigue. Tune to your workload:
 
-Consider moving to more robust solutions when:
+| Metric | Warning | Critical | Notes |
+|--------|---------|----------|-------|
+| CPU usage | 70% for 5 min | 90% for 5 min | Sustained high CPU indicates a bottleneck |
+| Memory usage | 75% | 85% | Leave headroom for spikes |
+| Disk usage | 80% | 90% | Plan expansion before critical |
+| Disk I/O wait | 20% | 40% | High I/O wait slows everything |
+| Container restarts | 2 in 10 min | 5 in 10 min | Crash loops need investigation |
+| System status | n/a | Down | Immediate alert |
 
-1. **Small deployments (1-5 servers)**: Beszel + Uptime Kuma is perfect
-2. **Medium deployments (5-20 servers)**: Consider adding Netdata for deeper insights
-3. **Large deployments (20+ servers)**: Evaluate Prometheus/Grafana for enterprise features
+Beszel 0.19 can also alert natively on things the older versions couldn't: container health (with log excerpts in the notification), failed systemd services, CPU I/O wait and steal time, GPU usage, temperature, S.M.A.R.T. failure, low battery, bandwidth, and load average. If you came from a cron-and-email setup, like the classic approach to [monitoring CPU usage and sending email alerts on Linux](https://www.bitdoze.com/monitor-cpu-usage-and-send-email-alerts-in-linux/), this replaces all of that scripting.
+
+### Security hardening
+
+A monitoring tool is, by definition, a map of your entire infrastructure. Treat it as sensitive:
+
+- **Docker socket**: read-only mount is the baseline. For tighter setups, run a socket proxy like `linuxserver/docker-socket-proxy` with `CONTAINERS=1` and point the agent's `DOCKER_HOST` at it; the agent gets container stats and nothing else. (Setting `DOCKER_HOST=""` disables Docker monitoring entirely if you want metrics-only.)
+- **Agent port**: in classic mode, firewall 45876 to the hub's IP only. Or skip the inbound port altogether with the WebSocket token mode from Part 2
+- **Beszel auth**: beyond password auth you get OAuth/OIDC (with `DISABLE_PASSWORD_AUTH` to turn passwords off entirely), `MFA_OTP` email one-time passwords (requires SMTP configured first), and `TRUSTED_AUTH_HEADER` for Cloudflare Access-style fronting. Use the Admin/User/Read-only roles if you share the dashboard
+- **Uptime Kuma**: strong admin password, keep the admin UI private, and let only the status pages be public if you need public ones
+
+These overlap heavily with the checklist in our guide on [how to secure a Docker server](https://www.bitdoze.com/bsi-security-report-docker-ufw/). Apply that checklist to the whole node, not just the monitoring stack.
+
+### When to scale up
+
+1. **1-5 servers**: this Beszel + Uptime Kuma stack is all you need
+2. **5-20 servers**: same stack works; consider adding Netdata on the noisy nodes for deeper per-metric drilldowns
+3. **20+ servers or compliance needs**: time to move to Prometheus + Grafana
 
 ## Conclusion
 
-By combining **Beszel** for internal resource metrics and **Uptime Kuma** for external uptime checks, you have a self-hosted monitoring stack running on Dokploy. This setup is:
+Beszel for internal resource metrics, Uptime Kuma for external availability, both self-hosted on Dokploy, both wired into Brevo alerts, and both watching each other through a push heartbeat. That's a complete monitoring stack that adds nothing to the monthly bill.
 
-- **Lightweight**: Minimal resource usage compared to Prometheus/Grafana
-- **Cost-effective**: Free to self-host
-- **Comprehensive**: Covers internal health and external availability
-- **Alert-ready**: You'll be first to know when something breaks
-
-Your monitoring stack provides visibility into:
-- Server resources (CPU, memory, disk, network)
-- Docker container health and statistics
-- Website and API availability
-- SSL certificate expiration
-- And more
-
-### Choosing the Right Tool for Your Needs
+Both tools grew real capabilities since this guide was first written. Beszel 0.19 now covers ZFS pools, SMART disk health, GPU usage, systemd services, and container health alerts with logs. Uptime Kuma v2 added JSON Query and NTP monitors. Same two containers, far more coverage.
 
 | Your Situation | Recommended Approach |
 |----------------|---------------------|
 | **Beginner with 1-2 servers** | Start with this Beszel + Uptime Kuma stack |
 | **Need log monitoring too** | Add Dozzle for Docker logs |
 | **Want cloud-managed option** | Consider Netdata Cloud (free for 5 nodes) |
+| **Not on Dokploy yet** | Compare the [best self-hosted server panels](https://www.bitdoze.com/best-self-hosted-panels/) first |
 | **Enterprise with complex needs** | Prometheus + Grafana stack |
 
-**Summary of Best Practices:**
-- Start with basic monitoring and expand as needed
-- Implement proper alerting with meaningful thresholds
-- Regular backup of monitoring data
-- Keep monitoring tools updated
-- Document monitoring setup and procedures
-
-For more advanced monitoring scenarios or to explore other tools like Netdata or Prometheus, check out our [Server Monitoring Guide](https://www.bitdoze.com/sever-monitoring/).
+For the full menu of options, including Netdata and Prometheus, see our [server monitoring tools guide](https://www.bitdoze.com/sever-monitoring/).
 
 <Button link="https://github.com/henrygd/beszel" text="Beszel on GitHub" />
 <Button link="https://github.com/louislam/uptime-kuma" text="Uptime Kuma on GitHub" />
 
-## Frequently Asked Questions
+## Frequently asked questions
 
 <Accordion label="What's the difference between Beszel and Uptime Kuma?" group="faq" expanded="true">
-**Beszel** monitors internal server resources - CPU usage, memory consumption, disk space, network bandwidth, and Docker container stats. It tells you what's happening inside your server.
+**Beszel** monitors internal server resources: CPU usage, memory, disk space, network bandwidth, Docker container stats, and (in recent versions) SMART disk health, systemd services, GPU usage, and ZFS pools. It tells you what's happening inside your server.
 
-**Uptime Kuma** monitors external availability - whether your websites are accessible, APIs are responding, and services are reachable from outside. It tells you what users experience.
+**Uptime Kuma** monitors external availability: whether your websites respond, APIs return valid data, and services are reachable from outside. It tells you what users experience.
 
-You need both because a server can have healthy internal metrics but still serve errors to users (misconfig, full queue, etc.), and vice versa.
+You need both because a server can have healthy internal metrics but still serve errors to users, and an app can be down while the server itself looks perfectly fine.
 </Accordion>
 
-<Accordion label="How much resources do Beszel and Uptime Kuma use?" group="faq">
-Both tools are lightweight:
+<Accordion label="Are Beszel and Uptime Kuma free?" group="faq">
+Yes, both. Both projects are MIT-licensed and fully free to self-host. There's no paid tier gating features, no per-monitor limits, no license keys.
+
+Your only potential costs are the infrastructure they run on (any small VPS handles the whole stack) and an email service for alerts if you exceed free tiers; Brevo's free 300 emails/day covers alert volume for almost any homelab or small production setup.
+</Accordion>
+
+<Accordion label="How much RAM and CPU do they use?" group="faq">
+Expect roughly:
 
 - **Beszel Hub**: ~50-100MB RAM
 - **Beszel Agent**: ~10-20MB RAM per monitored server
-- **Uptime Kuma**: ~100-200MB RAM depending on number of monitors
+- **Uptime Kuma**: ~100-200MB RAM depending on monitor count and history
 
-Combined, expect under 500MB RAM for a complete monitoring stack, which is less than Prometheus + Grafana.
+Combined, plan for a few hundred megabytes, an order of magnitude less than a Prometheus + Grafana stack. CPU is negligible at idle on all three. For real numbers on your own node, run `docker stats` and read the actual usage; the numbers above are planning figures, not guarantees.
 </Accordion>
 
 <Accordion label="Can I use other notification services besides email?" group="faq">
-Both tools support multiple notification channels:
+Yes, both tools go well beyond email.
 
-**Beszel** supports:
-- Email (SMTP)
-- Webhooks (for Slack, Discord, etc.)
-- Custom integrations
+**Beszel** configures notifications as Shoutrrr URLs under Settings → Notifications, with native support for Discord, Telegram, Slack, Microsoft Teams, Gotify, Ntfy, Pushover, Matrix, Mattermost, OpsGenie, Signal, and Twilio, among others.
 
-**Uptime Kuma** has 90+ integrations including:
-- Slack, Discord, Microsoft Teams
-- Telegram, Pushover, Gotify
-- PagerDuty, Opsgenie
-- SMS services
-- Custom webhooks
-</Accordion>
-
-<Accordion label="Can I monitor servers that aren't running Dokploy?" group="faq">
-The Beszel Agent is a Docker container (or binary) that runs anywhere:
-
-1. Install it via Docker on any Linux server
-2. Run the binary directly without Docker
-3. Deploy it on Kubernetes
-
-As long as the agent can reach the Hub over the network (port 45876 by default), it works.
-</Accordion>
-
-<Accordion label="Is there a way to create public status pages?" group="faq">
-Uptime Kuma has built-in status page functionality:
-
-1. Go to **Status Pages** in the menu
-2. Create a new status page with your monitors
-3. Customize the appearance
-4. Share the public URL with your users
-
-You can have multiple status pages for different audiences (internal team vs. public users).
+**Uptime Kuma** has 90+ built-in notification integrations, including Slack, Discord, Teams, Telegram, Pushover, Gotify, PagerDuty, Opsgenie, SMS services, and generic webhooks.
 </Accordion>
 
 <Accordion label="How do I backup my monitoring data?" group="faq">
-For **Dokploy deployments**, data is stored in Docker volumes:
+**Uptime Kuma (v2)**: backing up the `data` directory is the only supported backup method; the JSON export feature was removed in v2. First check your actual volume name with `docker volume ls` (Dokploy's naming differs from generic docs), then:
 
-- **Beszel**: Data in `/beszel_data` inside the container
-- **Uptime Kuma**: Data in the Kuma data volume
-
-To backup:
-1. Use Dokploy's backup features if available
-2. Or manually backup the Docker volumes:
 ```sh
-docker run --rm -v uptime-kuma_data:/data -v $(pwd):/backup alpine tar cvf /backup/kuma-backup.tar /data
+docker run --rm -v <kuma_volume>:/data -v $(pwd):/backup alpine \
+  tar czf /backup/kuma-backup.tar.gz -C /data .
 ```
 
-For Beszel, export system configurations from the UI when possible.
+**Beszel**: the hub keeps everything in its data volume; admin settings also expose a backups section. If you're locked out, recover admin access with:
+
+```sh
+docker exec beszel /beszel superuser upsert you@example.com newpassword
+```
+
+For offsite, scheduled copies of both, follow the guide to [set up automated Dokploy backups to Cloudflare R2](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/).
 </Accordion>
 
-<Accordion label="What are the recommended alert thresholds?" group="faq">
-Based on production experience, here are suggested thresholds:
+<Accordion label="My Beszel agent shows red and won't connect. What do I check?" group="faq">
+In order:
 
-- **CPU**: Alert at 90% sustained for 5+ minutes
-- **Memory**: Alert at 85% usage
-- **Disk**: Warning at 80%, critical at 90%
-- **System Status**: Immediate alert when down
+1. **Firewall**: in classic key mode, the hub must reach the agent on port 45876. Allow it for the hub's IP only. Not needed on the same host, and not needed at all in WebSocket token mode
+2. **KEY mismatch**: the agent's `KEY` must be the one generated for that specific system
+3. **HUB_URL/TOKEN** (WebSocket mode): must be the hub's exact public URL and a valid, non-expired token
+4. **Certificate verification (Beszel 0.19+)**: agents now verify the hub's HTTPS certificate. Self-signed or private-CA hubs need `CA_CERT_FILE` configured on the agent; public Let's Encrypt certs need nothing
+5. Read `docker logs beszel-agent`; connection failures are logged explicitly
 
-These can be adjusted based on your workload patterns. Some applications have natural CPU spikes that shouldn't trigger alerts.
+Beszel's docs also keep a common issues page that covers rarer cases.
 </Accordion>
 
-<Accordion label="Can I monitor additional disk partitions with Beszel?" group="faq">
-Yes! Beszel supports monitoring additional disks by mounting folders in the `/extra-filesystems` directory. In your agent's Docker Compose, add:
+<Accordion label="Can I monitor servers that aren't running Dokploy?" group="faq">
+Yes. The Beszel agent is a single container (or static binary) that runs anywhere:
+
+1. Docker/Podman on any Linux server
+2. The binary directly, without Docker
+3. Windows and FreeBSD hub builds exist too (0.17+)
+
+As long as the agent can reach the hub (port 45876 inbound, or outbound WebSocket with a universal token), it shows up in the same dashboard. The universal token flow makes this trivial for mixed fleets: one snippet, one token, every server.
+</Accordion>
+
+<Accordion label="Can I create public status pages?" group="faq">
+Uptime Kuma has built-in status pages:
+
+1. Go to **Status Pages** in the menu
+2. Create a new status page and pick a slug
+3. Add the monitors to display and customize the look
+4. Share the public URL
+
+You can run multiple status pages, one public for users and one internal for the team. Keep the Kuma admin UI private and only expose the status page domain publicly.
+</Accordion>
+
+<Accordion label="Can I monitor extra disks or ZFS pools with Beszel?" group="faq">
+Yes. For extra filesystems, mount them under `/extra-filesystems` in the agent's compose:
 
 ```yaml
 volumes:
@@ -633,15 +733,19 @@ volumes:
   - /mnt/disk/.beszel:/extra-filesystems/sda1:ro
 ```
 
-This allows you to monitor external drives, NAS mounts, or additional partitions beyond the root filesystem.
+Since 0.19, Beszel also monitors **ZFS pools and datasets** natively, and S.M.A.R.T. disk health (with failure alerts) has been built in since 0.15, so NAS drives and pools no longer need external tooling for basic health tracking.
+</Accordion>
+
+<Accordion label="Why did my new Uptime Kuma monitor alert after a single failed check?" group="faq">
+That's a v2 behavior change: new monitors default to **0 retries** (v1 defaulted to 1). With zero retries, one missed probe flips the monitor Down and pages you immediately.
+
+Fix it per monitor: set retries to 2-3 for endpoints behind flaky networks or cron-driven backends, and keep 0-1 only for things that should never blip. Retrying trades detection speed for noise resistance, so decide deliberately per monitor instead of living with the default.
 </Accordion>
 
 <Accordion label="How does Beszel compare to Netdata or Prometheus?" group="faq">
-Each tool has its strengths:
+- **Beszel**: lightest footprint, simplest setup, and no longer "basic": containers with health and logs, SMART, systemd, GPU, and ZFS monitoring are all built in now
+- **Netdata**: more metrics per node out of the box, ML anomaly detection, a cloud option free for 5 nodes
+- **Prometheus/Grafana**: the most customizable and enterprise-grade, at the cost of operating a time-series database and building dashboards yourself
 
-- **Beszel**: Lightest weight (~20MB RAM), perfect for small deployments, simple setup
-- **Netdata**: More metrics out of the box, ML anomaly detection, cloud option for 5 free nodes
-- **Prometheus/Grafana**: Most customizable, enterprise-grade, but steeper learning curve and higher resource usage
-
-For most self-hosted scenarios with 1-10 servers, Beszel + Uptime Kuma provides the best balance of features and resource efficiency.
+For 1-10 servers, Beszel + Uptime Kuma gives you the best coverage-to-effort ratio. Move to Prometheus + Grafana when you need custom recording rules, very long retention, or a large fleet.
 </Accordion>
