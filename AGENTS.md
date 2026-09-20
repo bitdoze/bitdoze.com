@@ -53,6 +53,18 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
   - After creating the `.svg`, run `node scripts/svg-to-webp.mjs` (or convert just that file) to render it to `.webp` via resvg + sharp, update the frontmatter to point at the `.webp`, and remove the source `.svg` once it is no longer referenced.
 - **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from amazon and the link should be with "https://amazon.com/dp/ASIN"
 
+## Affiliate Links (`/go/` redirects)
+
+Affiliate outbound links go through first-party redirect pages, never raw affiliate URLs in articles.
+
+- **Product map**: `src/data/affiliate-links.json` — `"slug": { "name": "Display Name", "url": "https://amzn.to/..." }`. To add/update a product, edit the JSON only; slugs are kebab-case.
+- **Pages**: `src/pages/go/[product].astro` emits `dist/go/<slug>/index.html` per JSON entry at build time. Unknown slugs 404. `/go/` (`src/pages/go/index.astro`) lists all slugs for verification.
+- **Link in articles** as `/go/<slug>/` (e.g. `<Button text="Check Price" link="/go/anker-prime-tb5/" />` or markdown `[Check price](/go/anker-prime-tb5/)`).
+- **Tracking**: each page fires a Plausible `affiliate_click` custom event (`props: {product: "<slug>"}`), then redirects via `location.replace` (~400ms); meta refresh + visible link are fallbacks. Redirect pages are `noindex,nofollow` and `data-pagefind-ignore` (excluded from search index automatically).
+- **Compliance**: the redirect page shows the real retailer name ("Continue to Amazon") — do not mask the destination. Keep the `Affiliate Disclosure` Notice above the first affiliate link in every article that has one.
+- **Not** `public/_redirects`: that file is for Cloudflare edge 301s (legacy URL moves). `/go/` must stay a page so the Plausible event can fire — an edge redirect would lose tracking.
+- Existing legacy `amzn.to` links in articles can be migrated to `/go/` slugs over time; the JSON was seeded with all of them.
+
 ## Categories & Tags Taxonomy
 
 Posts use a fixed taxonomy enforced in `src/content.config.ts`. Do not invent new categories. Prefer topic intent over deploy surface (e.g. n8n install → `self-hosting`, fish shell → `linux`, Hetzner review → `hosting`, Astro i18n → `web-development`).
