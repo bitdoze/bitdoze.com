@@ -37,12 +37,12 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ### Tier 1 (proven demand / wide-open SERPs)
 
-- [ ] **3.1 Black Friday Home Server & Homelab Deals 2026** ⏰ **MUST publish by Oct 5** (needs 6–8 wks to rank; BF = Nov 27, CM = Nov 30; cover Prime Big Deal Days Oct 6–7 as first update). Aggregates mini PCs, NAS, TB5 docks, UPS. All existing articles feed it; it feeds them back. Weekly updates through Cyber Monday.
-- [ ] **3.2 CalDigit TS5 vs Anker Prime TB5 comparison** — queries already hitting the site, no page. Verified specs:
+- [x] **3.1 Black Friday Home Server & Homelab Deals 2026** ⏰ **MUST publish by Oct 5** (needs 6–8 wks to rank; BF = Nov 27, CM = Nov 30; cover Prime Big Deal Days Oct 6–7 as first update). Aggregates mini PCs, NAS, TB5 docks, UPS. All existing articles feed it; it feeds them back. Weekly updates through Cyber Monday.
+- [x] **3.2 CalDigit TS5 vs Anker Prime TB5 comparison** — queries already hitting the site, no page. Verified specs:
   - **TS5**: $399.99, 15 ports, 4× TB5 (1 host + 3 downstream @80Gbps), 140W host PD, 2.5GbE, SD/microSD UHS-II, 240W PSU. TS5 Plus exists ($?): 20 ports, 36W downstream charging — mention.
   - **Anker Prime TB5 (A83B5)**: $399.99, 14-in-1, 2 downstream TB5, 140W host, 2.5GbE, HDMI 2.1 *or* DP 2.1 (not both), active cooling, cube 116×116×75mm / 1,086g. **Not compatible with Linux/ChromeOS/TB3-Windows** — good differentiator line.
-- [ ] **3.3 Best TB5/USB4 NVMe SSD enclosure** — SERP verified wide open (Reddit/forums only). Bench list: **OWC Express 1M2 80G** (~6,000 MB/s real w/ Gen4 SSD), **Acasis TB501Pro / Acasis 80Gbps** (Intel JHL9480 "Barlow Ridge"), **UGREEN 80Gbps** (fan, ~$259, 208g), **TerraMaster D1 SSD Pro**, **RayCue** (M4-mini-matching form factor), LaCie Pro5. Angle: sustained-write thermal throttle, "can it run my VM/Photos lib", dock vs direct-attach.
-- [ ] **3.4 Best NAS for Docker/Proxmox homelab** (narrowed angle per SERP check — don't fight PCMag on generic "best NAS"). Verified picks:
+- [x] **3.3 Best TB5/USB4 NVMe SSD enclosure** — SERP verified wide open (Reddit/forums only). Bench list: **OWC Express 1M2 80G** (~6,000 MB/s real w/ Gen4 SSD), **Acasis TB501Pro / Acasis 80Gbps** (Intel JHL9480 "Barlow Ridge"), **UGREEN 80Gbps** (fan, ~$259, 208g), **TerraMaster D1 SSD Pro**, **RayCue** (M4-mini-matching form factor), LaCie Pro5. Angle: sustained-write thermal throttle, "can it run my VM/Photos lib", dock vs direct-attach.
+- [x] **3.4 Best NAS for Docker/Proxmox homelab** (narrowed angle per SERP check — don't fight PCMag on generic "best NAS"). Verified picks:
   - **UGREEN NASync DXP4800 Plus** (~$620): Pentium Gold 8505, **10GbE + 2.5GbE**, 4 SATA + 2 NVMe, HW transcoding (AV1), DDR5 to 64GB. Best hardware/$.
   - **TerraMaster F4-424 Pro** (~$499): i3-N305 8-core, DDR5 to 32GB, dual 2.5GbE. Compute/$ king; many install TrueNAS/Unraid.
   - **Synology DS925+** (~$600): software king (DSM, Active Backup free) but Ryzen V1500B, 2× 2.5GbE only, **no transcoding**. The "safe" pick.
