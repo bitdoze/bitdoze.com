@@ -25,13 +25,13 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 2. Immediate fixes (this week, no new articles)
 
-- [ ] **Retitle `best-thunderbolt-5-docks-guide`** → "Best Thunderbolt 5 Docks (2026): CalDigit TS5 vs Anker Prime vs Budget" style. Target: 415 impr @ pos 5.3, CTR 0.48% → 2%.
-- [ ] **Retitle `best-mini-pc-home-server`** to include "best home server" phrasing (143 impr @ pos 5.4, 0% CTR).
-- [ ] **Retitle `best-32-inch-oled-monitors-guide`** (2,862 impr @ 0.07% CTR — broken title, not demand).
-- [ ] **Add Proxmox section to `best-mini-pc-home-server`**: "2× 2.5GbE NICs, VT-d/IOMMU" block → captures `best mini pc for proxmox` (pos 13) immediately.
-- [ ] **Fix iVANKY review monetization**: swap `AmazonProduct.productLink` to the Amazon listing (or add amzn.to button) + verify ES version gets links too. Resubmit both to GSC for indexing.
-- [ ] **Retrofit hardware blocks**: `docker-containers-home-server` (2,989 v) gets "what to run it on" block (mini PC + NAS + UPS links). Then every >200-v/30d software page, 20 min each.
-- [ ] **`/go/` redirect check**: `go.bitdoze.com` exists for some partners — audit coverage, add Plausible outbound-click events on affiliate links.
+- [x] **Retitle `best-thunderbolt-5-docks-guide`** → "Best Thunderbolt 5 Docks 2026: CalDigit vs Anker vs Budget" (done 2026-09-21).
+- [x] **Retitle `best-mini-pc-home-server`** → "Best Home Server Mini PCs 2026" (done 2026-09-21).
+- [x] **Retitle `best-32-inch-oled-monitors-guide`** → "Best 32-Inch 4K OLED Monitors 2026: 9 Picks Compared" (done 2026-09-21).
+- [x] **Add Proxmox section to `best-mini-pc-home-server`**: quick-picks table (MS-A2 / AI X1 Pro / N150) added at top of the virtualization section (done 2026-09-21).
+- [x] **Fix iVANKY review monetization**: EN+ES now link to `/go/ivanky-fusiondock-ultra/` → Amazon `B0GBVMHJ3L` ($649.99, 4.3★). Disclosure added both languages. TODO: resubmit both to GSC for indexing (done 2026-09-21).
+- [x] **Retrofit hardware blocks**: `docker-containers-home-server` got "No hardware yet?" block (GMKtec N150 + UGREEN DXP4800 Plus + CyberPower CP1500PFCLCD via /go/) + disclosure. TODO: repeat for other >200-v/30d software pages (done 2026-09-21).
+- [x] **`/go/` redirect check**: all 32 `amzn.to` links migrated to `/go/<slug>/` across 7 posts; Plausible `affiliate_click` fires on every click. Missing disclosures added to 6 posts; 2 misplaced disclosures moved above first link. `go.bitdoze.com` partner redirects (Hetzner/Carrd/etc.) left as-is — different system (done 2026-09-21).
 
 ## 3. New articles — priority order
 
