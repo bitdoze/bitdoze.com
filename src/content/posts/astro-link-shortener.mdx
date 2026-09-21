@@ -19,7 +19,7 @@ import Tab from "@components/widgets/Tab.astro";
 
 I run affiliate links on this site, and raw `amzn.to` URLs scattered across articles were becoming a maintenance problem. When a product gets discontinued or I want to swap a link, I shouldn't have to grep the content folder. And I had no idea which links anyone actually clicked.
 
-So I built a first-party shortener: `bitdoze.com/go/<product>/` URLs that redirect to the affiliate destination, fire a Plausible click event on the way out, and live in one JSON file. The catch — this site is fully static and hosted on Cloudflare Pages, so there is no server to `301` with. This article covers how that works anyway.
+So I built a first-party shortener: `bitdoze.com/go/<product>/` URLs that redirect to the affiliate destination, fire a Plausible click event on the way out, and live in one JSON file. This site is fully static and hosted on Cloudflare Pages, which supports real HTTP redirects through `_redirects`. I use generated HTML pages here so the browser can send a Plausible event before leaving.
 
 ## What we're building
 
@@ -41,9 +41,9 @@ Astro gives you three mechanisms that look similar but behave very differently. 
 |-----------|---------------|-------------|------------|---------|
 | `redirects:` in `astro.config.mjs` | Static HTML stub (meta refresh) | Briefly | Possible but ugly | Internal URL moves, renamed pages |
 | `public/_redirects` | Real HTTP 301/302 at the Cloudflare edge | Never | No — no page ever loads | Legacy URL migrations, domain moves |
-| Generated pages (`getStaticPaths`) | Full HTML page → JS redirect | Yes | Yes — Plausible event fires | **Affiliate links** |
+| Generated pages (`getStaticPaths`) | Full HTML page → JS redirect | Yes | Yes — best-effort Plausible event | **Affiliate links** |
 
-The trade-off is the middle column. An edge `_redirects` rule is fastest but invisible to analytics — the browser never renders anything, so Plausible can't fire an event. A generated page adds ~100–400ms but buys you a measurable click and a visible destination (which affiliate programs want anyway). Since click data is the entire point, `/go/` uses the third option.
+The trade-off is the middle column. An edge `_redirects` rule is fastest but invisible to analytics — the browser never renders anything, so Plausible can't fire an event. A generated page adds a page load and up to roughly 400ms of JavaScript waiting, allowing a best-effort click event and a visible destination (which affiliate programs want anyway). Since click data is the entire point, `/go/` uses the third option.
 
 <Notice type="info" title="Already Using Cloudflare?">
 The `public/_redirects` file is the right tool when you *don't* need tracking — it produces real HTTP 301s at the edge. I use it for retired category URLs. It sits next to this system without conflict. For the deployment side of things, see [deploying Astro on Cloudflare](https://www.bitdoze.com/deploy-astrojs-cloudflare/).
@@ -100,7 +100,6 @@ const host = hostMap[rawHost] ?? rawHost;
     <title>Redirecting to {name}…</title>
     <meta name="robots" content="noindex,nofollow" />
     <meta http-equiv="refresh" content={`3;url=${url}`} />
-    <script is:inline defer src="https://an3.bitdoze.com/js/pa-kQauNXzAlLDQqncIWm6Op.js"></script>
     <script is:inline>
       window.plausible =
         window.plausible ||
@@ -112,8 +111,9 @@ const host = hostMap[rawHost] ?? rawHost;
         function (i) {
           plausible.o = i || {};
         };
-      plausible.init();
+      plausible.init({ autoCapturePageviews: false });
     </script>
+    <script is:inline async src="https://an3.bitdoze.com/js/pa-kQauNXzAlLDQqncIWm6Op.js"></script>
   </head>
   <body data-pagefind-ignore>
     <p>Redirecting to {name} on {host}…</p>
@@ -126,15 +126,25 @@ const host = hostMap[rawHost] ?? rawHost;
           done = true;
           window.location.replace(url);
         }
+        // Only record a same-origin pathname, never query strings or fragments.
+        var props = { product: slug };
+        try {
+          var source = new URLSearchParams(window.location.search).get("article");
+          var article = new URL(source || document.referrer, window.location.origin);
+          if ((source || document.referrer) && article.origin === window.location.origin && !article.pathname.startsWith("/go/")) {
+            props.article = article.pathname;
+          }
+        } catch (e) { /* Direct visits may have no article attribution. */ }
+        // Start the bound before analytics: tracking must never block navigation.
+        setTimeout(go, 400);
         try {
           plausible("affiliate_click", {
-            props: { product: slug },
+            props: props,
             callback: go,
           });
         } catch (e) {
           /* analytics blocked or script missing — still redirect */
         }
-        setTimeout(go, 400);
       })();
     </script>
   </body>
@@ -144,8 +154,8 @@ const host = hostMap[rawHost] ?? rawHost;
 Six details in there are load-bearing:
 
 - **`getStaticPaths` + `Astro.props`** — the standard static-site-generation pair: each JSON entry becomes a `dist/go/<slug>/index.html` file at build time. Slugs not in the JSON produce no page, so typos 404 naturally.
-- **The Plausible queue stub** — same pattern as the site's `Layout.astro`: the `window.plausible` function queues events until the real script loads. Mine is the same custom-domain script (`an3.bitdoze.com`); swap in your own Plausible script URL or the standard `plausible.io/js/script.js`. Setup details are in the [Plausible on Astro with Cloudflare Workers](https://www.bitdoze.com/astro-plausible-cloudflare-workers/) article.
-- **`callback: go` + `setTimeout(go, 400)`** — this is the reliability trick. Plausible calls the callback once the event is sent, so the redirect waits for tracking. But if an ad blocker kills the script, the callback never fires — that's why the 400ms timeout exists as a second trigger. `done` guards against double-firing.
+- **The Plausible queue stub** — same pattern as the site's `Layout.astro`: the `window.plausible` function queues events until the real script loads. Mine is the same custom-domain script (`an3.bitdoze.com`); use the installation snippet and script URL from your own Plausible site settings. The stub is initialized before the async script loads. `autoCapturePageviews: false` keeps these intermediate pages out of ordinary pageview counts while retaining the custom event. Setup details are in the [Plausible on Astro with Cloudflare Workers](https://www.bitdoze.com/astro-plausible-cloudflare-workers/) article.
+- **`callback: go` + `setTimeout(go, 400)`** — this is the reliability trick. Plausible calls the callback once the event is sent, so the redirect waits for tracking. The 400ms timeout starts before the event call and bounds the wait. If the tracker is blocked or takes longer than that to load and send, navigation still proceeds and the click may not be recorded. `done` guards against double-firing.
 - **`location.replace` instead of `location.href`** — the redirect page never enters browser history, so Back doesn't bounce users through `/go/` again.
 - **`noindex,nofollow` + `data-pagefind-ignore`** — keeps redirect stubs out of Google and out of the site's own search index (Pagefind only indexes pages carrying `data-pagefind-body`, and the attribute blocks them regardless).
 - **Meta refresh at 3s** — the no-JS fallback. Slower than the JS path but guarantees everyone ends up at the destination.
@@ -196,15 +206,38 @@ Anywhere a product link goes, point at the `/go/` URL instead of the raw affilia
 [Check current price](/go/anker-prime-tb5/)
 ```
 
-Swapping the product later — say the dock gets replaced by a newer model — is a one-line JSON edit, and every article that links to it updates on the next build.
+Updating a destination URL for the same product is a one-line JSON edit, applied everywhere on the next build. Give a different product its own slug so existing article recommendations stay accurate.
 
 <Notice type="info" title="Compliance Reminder">
 Affiliate programs (Amazon Associates especially) require a disclosure near the links and don't want the destination disguised. The redirect page handles the second part by showing the retailer name; the first is on you — keep an `Affiliate Disclosure` notice above the first affiliate link in every article that has one.
 </Notice>
 
+## Article attribution and build checks
+
+The event always includes `product`. On this site, the shared layout also adds an `article` query parameter to same-origin `/go/<slug>/` links before interaction, using only the current pathname. This works for ordinary clicks, new tabs, and widgets using `rel="noreferrer"`. The redirect page accepts a same-origin source, strips any query string or fragment, and sends only the pathname as the optional `article` property. Without the parameter, it tries `document.referrer`; direct visits can have no article property. The parameter is never forwarded to the retailer.
+
+For the same behavior, add this script to your shared Astro layout:
+
+```astro
+<script>
+  function annotateAffiliateLinks() {
+    document.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((link) => {
+      const target = new URL(link.href, window.location.href);
+      if (target.origin !== window.location.origin || !/^\/go\/[^/]+\/$/.test(target.pathname)) return;
+      target.searchParams.set("article", window.location.pathname);
+      link.href = target.pathname + target.search + target.hash;
+    });
+  }
+  annotateAffiliateLinks();
+  document.addEventListener("astro:page-load", annotateAffiliateLinks);
+</script>
+```
+
+Our build runs `scripts/validate-affiliate-links.mjs` before Astro to check kebab-case slugs, nonempty product names, and HTTPS destinations without embedded credentials. After Astro emits the pages, the same script with `--dist` checks rendered anchors against the map. Checking the output covers both Markdown links and MDX widgets without treating tutorial code samples as real links. Unknown slugs fail the build before deployment. These checks validate configuration and references; they do not check retailer availability.
+
 ## Verifying it works
 
-Three quick checks after `astro build`:
+Run `bun run build:ci` for the build and affiliate checks. Then verify the redirects:
 
 ```sh
 # Pages were emitted
@@ -229,14 +262,14 @@ What you give up versus a real shortener:
 - No per-click log with timestamps/referrers — you get aggregate counts per product, not individual click records
 - Links only change on deploy — there's no dashboard to edit live
 - No query-string passthrough, no A/B destinations, no geo-routing out of the box
-- ~400ms of redirect latency versus an instant edge 301
+- A page load plus up to roughly 400ms of JavaScript waiting, versus an edge redirect
 </ListCheck>
 
-If any of those become real requirements — especially geo-routing for Amazon OneLink-style international links, or hundreds of links where generating pages gets silly — move the same URL scheme to a Cloudflare Worker or [Sink](https://www.bitdoze.com/sink-install/) and keep `/go/` as the path so no article ever changes.
+If any of those become real requirements — especially geographic routing, live editing, or server-side analytics — move the same URL scheme to a Cloudflare Worker or [Sink](https://www.bitdoze.com/sink-install/) and keep `/go/` as the path so no article ever changes.
 
 ## Conclusion
 
-A link shortener on a static host isn't an HTTP redirect — it's a generated page that redirects. Once you accept that, the implementation is small: one JSON file, one `[product].astro` route, and an event call with a timeout-guarded callback. What you get back is a single place to manage every affiliate URL on the site and click data that tells you which products your readers actually care about.
+This implementation uses generated pages rather than the HTTP redirects also available on Cloudflare Pages. Once you accept that, the implementation is small: one JSON file, one `[product].astro` route, and an event call with a timeout-guarded callback. What you get back is a single place to manage every affiliate URL on the site and click data that tells you which products your readers actually care about.
 
 ## Frequently Asked Questions
 
@@ -249,7 +282,7 @@ You can, and it's faster (a real HTTP 301 at the edge, no page load at all). The
 </Accordion>
 
 <Accordion label="Does the Plausible event fire reliably before the redirect?" group="faq">
-Two mechanisms cover it: Plausible's custom-event API accepts a `callback` that runs after the event is sent, and a 400ms `setTimeout` redirects anyway if analytics is blocked by an ad blocker. The `done` flag prevents double-redirecting when both fire. You lose the event for ad-blocked visitors — unavoidable — but nobody is ever stranded on the redirect page.
+Two mechanisms cover it: Plausible's custom-event API accepts a `callback` that runs after the event is sent, and a 400ms `setTimeout` redirects anyway if analytics is blocked by an ad blocker. The `done` flag prevents double-redirecting when both fire. Tracking is best-effort: blocked analytics and a slow tracker load or request can both cause missed events. Test with network throttling and a blocked tracker; navigation should still proceed without waiting for analytics.
 </Accordion>
 
 <Accordion label="How do I keep these pages out of Google and site search?" group="faq">
@@ -261,5 +294,5 @@ The `<meta http-equiv="refresh">` tag redirects after 3 seconds with no JavaScri
 </Accordion>
 
 <Accordion label="When should I move to a real shortener service?" group="faq">
-When you need per-click logs, live link editing without a deploy, query passthrough, geo-targeting (Amazon.es vs .com), or more than a few hundred links. At that point run something like Sink on Cloudflare Workers — you can keep the same `/go/` paths so existing article links keep working.
+When you need per-click logs, live link editing without a deploy, query passthrough, geographic routing, or server-side analytics. A few hundred small static pages alone is not a reason to migrate. At that point run something like Sink on Cloudflare Workers — you can keep the same `/go/` paths so existing article links keep working.
 </Accordion>
