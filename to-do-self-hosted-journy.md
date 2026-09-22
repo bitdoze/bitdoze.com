@@ -69,7 +69,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
   - _Cover:_ AIO vs manual compose trade-off, postgres + redis, `trusted_domains`, reverse-proxy headers + `overwriteprotocol`, cron container, onlyoffice/collabora pointer.
   - _Frontmatter:_ `categories: ["self-hosting"]`, tags `nextcloud`, `docker`, `cloud-storage`.
 
-- [ ] **11. `jellyfin-media-server-setup`** — "Self-Host Jellyfin: Your Own Netflix"
+- [x] **11. `jellyfin-media-server-setup`** — "Self-Host Jellyfin: Your Own Netflix" (shipped as `self-host-jellyfin`)
   - _Why:_ `why-need-home-server` argues with Plex's price hikes — the guide that cashes that argument doesn't exist.
   - _Cover:_ Docker install, Intel QSV/N100 hardware transcoding (`/dev/dri` passthrough), library layout, clients (TV/phone/web), remote access done safely (VPN-first, link headscale/netbird comparison), quick vs-Plex framing.
   - _Frontmatter:_ `categories: ["self-hosting"]`, tags `jellyfin`, `media-server`, `docker`.
