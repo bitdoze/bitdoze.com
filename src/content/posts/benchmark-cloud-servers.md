@@ -20,6 +20,8 @@ This guide covers what to test, which tools to use, and how to read the results.
 <Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 Free" />
 <Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
 
+_VPS prices jumped across the board in 2026 — if you're rethinking a rented box, see [what changed and when a mini PC wins](/vps-price-increases/)._
+
 ## What to benchmark
 
 Three things matter most on a VPS:

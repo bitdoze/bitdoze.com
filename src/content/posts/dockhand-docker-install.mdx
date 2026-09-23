@@ -1,20 +1,33 @@
 ---
-date: 2026-02-09T00:00:00Z
+date: 2026-09-23T10:00:00Z
 title: "Dockhand Docker Install: Security-Focused Container Manager"
 description: "Step-by-step guide to install Dockhand with Docker Compose. Covers SQLite and PostgreSQL setups, OIDC/SSO, vulnerability scanning, auto-updates, and remote host management with Hawser."
 image: "../../assets/images/26/02/dockerhand-install.webp"
-categories: ["linux"]
+categories: ["self-hosting"]
 authors: ["Dragos"]
 tags: ["docker", "self-hosted"]
 canonical: "https://www.bitdoze.com/dockhand-docker-install/"
 ---
 
 import { Picture } from "astro:assets";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
 import dockhandUi from "../../assets/images/26/02/dockerhand-ui.webp";
 
-[Dockhand](https://dockhand.pro/) shipped its first release in December 2025 and has been putting out updates at a pace I rarely see from new projects. Sixteen releases in about two months. I installed it alongside [Arcane](/arcane-docker-install/) on the same server to see how they compare, and while Arcane has the maturity edge, Dockhand's security features caught my attention.
+[Dockhand](https://dockhand.pro/) shipped its first release in December 2025 and has been putting out updates at a pace I rarely see from any project, new or old. Thirty-five releases in nine months, v1.0.14 through v1.0.48, roughly one a week. I installed it alongside [Arcane](/arcane-docker-install/) on the same server to see how they compare, and while Arcane has the maturity edge, Dockhand's security features caught my attention.
 
 If you're trying to decide between the two, read my [Arcane vs Dockhand comparison](/arcane-vs-dockhand/) first. This guide is for people who've already decided on Dockhand and want it running properly.
+
+This guide was updated on 2026-09-23 for Dockhand v1.0.48. The Hawser agent section in particular changed: env vars instead of CLI flags, and the image lives at `ghcr.io/finsys/hawser` now.
+
+<Notice type="warning" title="Affiliate Disclosure">
+Some links in this guide are affiliate links. If you buy through them, we may earn a small commission at no extra cost to you. This helps us keep testing and updating these recommendations.
+</Notice>
 
 ## What Dockhand brings to the table
 
@@ -29,14 +42,17 @@ Here's what stood out to me:
 
 <ListCheck>
 <ul>
-<li>Vulnerability scanning with Grype and Trivy built into the UI</li>
+<li>Vulnerability scanning with Grype and Trivy built into the UI, with SARIF export</li>
 <li>Safe-pull protection: scans new images before replacing running containers</li>
 <li>OIDC/SSO included in the free tier (Portainer charges for this)</li>
 <li>MFA/TOTP support for local accounts</li>
 <li>Container file browser and web terminal</li>
 <li>Scheduled auto-updates with automatic rollback if something breaks</li>
-<li>Activity logging for every action</li>
-<li>Notifications via SMTP and Apprise</li>
+<li>restic-based encrypted backups for volumes, bind mounts, and stack files (beta)</li>
+<li>External secrets from 1Password, Vault, Infisical, Doppler, Bitwarden, Proton Pass, KeePassXC, Azure Key Vault</li>
+<li>Compose Validate linter that preflights your stack before deploy</li>
+<li>Activity logging for every action, Prometheus /metrics endpoint</li>
+<li>Notifications via SMTP, Apprise, MQTT, Zabbix, Pushover, and Teams</li>
 <li>Zero telemetry. Nothing phones home</li>
 </ul>
 </ListCheck>
@@ -57,6 +73,8 @@ You need:
 - A Linux server (VPS or local). I use [Hetzner](https://go.bitdoze.com/hetzner), [Hostinger](https://go.bitdoze.com/hostinger-vps) for VPS hosting
 - Docker and Docker Compose installed
 - Works on both amd64 and arm64 (Raspberry Pi 4 included)
+
+_VPS prices jumped across the board in 2026 — if you're rethinking a rented box, see [what changed and when a mini PC wins](/vps-price-increases/)._
 
 <Button link="https://go.bitdoze.com/hetzner" text="Hetzner VPS" />
 <Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
@@ -117,7 +135,7 @@ Create `compose.yaml`:
 ```yaml
 services:
   dockhand:
-    image: fnsys/dockhand:latest
+    image: fnsys/dockhand:v1.0.48
     container_name: dockhand
     restart: unless-stopped
     ports:
@@ -128,6 +146,8 @@ services:
 volumes:
   dockhand_data:
 ```
+
+Pin the version tag like I did here rather than running `:latest`. Weekly releases are great until one lands while you're not watching.
 
 Start it:
 
@@ -155,7 +175,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   dockhand:
-    image: fnsys/dockhand:latest
+    image: fnsys/dockhand:v1.0.48
     container_name: dockhand
     restart: unless-stopped
     ports:
@@ -214,7 +234,7 @@ In the Dockhand UI, go to Settings and configure your OIDC provider with:
 Users are auto-provisioned on first login. Once OIDC is working, you can hide the local password login by setting the `DISABLE_LOCAL_LOGIN` environment variable. That way users can only authenticate through your identity provider.
 
 <Notice type="info" title="MFA is separate from OIDC">
-If you're using local accounts instead of OIDC, Dockhand supports TOTP-based MFA. Each user can enable it from their profile settings. If you're using OIDC, MFA is handled by your identity provider instead.
+If you're using local accounts instead of OIDC, Dockhand supports TOTP-based MFA. Each user can enable it from their profile settings. If you're using OIDC, MFA is handled by your identity provider instead. Note that LDAP/AD and RBAC sit on the Enterprise tier; OIDC and MFA are what's free.
 </Notice>
 
 ## Reverse proxy setup
@@ -269,26 +289,28 @@ server {
 
 ## Managing remote hosts with Hawser
 
-Dockhand can manage Docker on remote machines through the Hawser agent. What makes Hawser interesting is NAT traversal. The agent makes outbound-only connections, so you don't need to open any ports on the remote machine. It works behind firewalls and NAT without any special network configuration.
+Dockhand can manage Docker on remote machines through the Hawser agent. [Hawser](https://github.com/Finsys/hawser) is open source (Go, MIT), separate from Dockhand itself, and it has two modes:
 
-[Hawser](https://github.com/Finsys/hawser) is open source (Go), separate from Dockhand itself.
+- **Standard**: the agent listens on port 2376 and Dockhand connects to it. Good for LAN and homelab machines with static IPs. A `TOKEN` is required on any non-loopback bind, because a listening agent without one would expose an unauthenticated Docker API to the network.
+- **Edge**: the agent makes an outbound WebSocket connection to Dockhand. Nothing inbound, so it works behind NAT, firewalls, and dynamic IPs. This is the mode most people want.
 
-To set it up:
-
-1. In Dockhand, go to Environments and create a new remote host. This generates a token
-2. On the remote machine, deploy Hawser:
+Create the remote host inside Dockhand first (Environments, then add) so it generates the agent token. Then on the remote machine, Edge mode looks like this:
 
 ```bash
 docker run -d \
   --name hawser \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  fnsys/hawser:latest \
-  --token YOUR_TOKEN \
-  --server https://dockhand.yourdomain.com
+  -e DOCKHAND_SERVER_URL=wss://dockhand.yourdomain.com/api/hawser/connect \
+  -e TOKEN=your-agent-token \
+  ghcr.io/finsys/hawser:latest
 ```
 
-The agent connects to your Dockhand instance and the remote host shows up in your dashboard. Token-based auth, auto-reconnect on network issues. There are Standard and Edge modes depending on whether the remote machine has consistent connectivity.
+The agent connects to your Dockhand instance and the remote host shows up in your dashboard, with auto-reconnect on network drops. Both modes expose a small health endpoint at `/_hawser/health` on port 2376; in Edge mode bind it to localhost (`BIND_ADDRESS=127.0.0.1`) so the host keeps zero reachable surface.
+
+<Notice type="info" title="Same 1:1 path rule as Arcane">
+If your compose stacks use relative bind mounts (`./config.conf:/app/config.conf`), Hawser's `STACKS_DIR` must be a host path mounted at the same path inside the container: `-v /opt/stacks:/opt/stacks -e STACKS_DIR=/opt/stacks`. Docker resolves bind sources on the host filesystem, so a named volume or a mismatched path breaks relative mounts.
+</Notice>
 
 ## Environment variables reference
 
@@ -299,6 +321,7 @@ The agent connects to your Dockhand instance and the remote host shows up in you
 | `DISABLE_LOCAL_LOGIN` | `false` | Hide password login when SSO is active |
 | `SKIP_DF_COLLECTION` | `false` | Skip disk usage collection (useful on NAS devices) |
 | `DATA_DIR` | `/app/data` | Custom data directory path |
+| `FEAT_API_DOCS` | `false` | Serve the interactive OpenAPI docs at `/api/docs` |
 
 ## Troubleshooting
 
@@ -328,7 +351,7 @@ Set `SKIP_DF_COLLECTION=true` in your environment variables. Disk usage collecti
 
 <Accordion label="Hawser agent won't connect" group="troubleshoot">
 
-Verify the token is correct and the Dockhand URL is reachable from the remote machine. Hawser makes outbound HTTPS connections, so the remote machine needs to be able to reach your Dockhand instance on port 443. Check firewall rules on the remote machine's outbound traffic.
+Verify the token is correct and the `DOCKHAND_SERVER_URL` is reachable from the remote machine. Edge mode is a WebSocket, so the URL starts with `wss://` and ends in `/api/hawser/connect`, not just the plain domain. If Dockhand sits behind a reverse proxy, make sure it forwards WebSocket upgrades. In Standard mode, Hawser refuses to start without a `TOKEN` on a non-loopback bind; check the container logs for that error first.
 
 </Accordion>
 
@@ -342,24 +365,23 @@ Worth being clear about this. Dockhand has a tiered pricing model:
 | SMB | $499/host/year | Commercial support, priority updates |
 | Enterprise | $1,499/host/year | RBAC, LDAP/AD, audit logging, dedicated support |
 
-The free tier is legitimately full-featured. OIDC, vulnerability scanning, auto-updates, multi-host, all included. You only need to pay if you need RBAC, LDAP, or commercial support. That's a better deal than what Portainer offers at the free level.
+The free tier is legitimately full-featured. OIDC, MFA, vulnerability scanning, auto-updates, restic backups, the secrets-manager integrations, multi-host, all included. You only pay if you need RBAC, LDAP, or commercial support. That's a better deal than what Portainer offers at the free level.
 
-## My take after three weeks
+## My take, nine months later
 
-Dockhand is a v1 product that doesn't feel like one. The UI is polished, the security features work well, and the update pace shows the team is actively shipping.
+Dockhand is a v1 product that doesn't feel like one. The UI is polished, the security features work well, and the update pace has held: a release a week, plus an ecosystem forming around it (a community MCP server, a Home Assistant integration, an iOS client).
 
-The safe-pull feature is my favorite thing about it. I set auto-updates on all my non-critical containers and let it run. It caught two bad image updates by scanning them before deploying. Both times, my running containers were left untouched while the new images got flagged.
+The safe-pull feature is still my favorite thing about it. I set auto-updates on all my non-critical containers and let it run. It caught two bad image updates by scanning them before deploying. Both times, my running containers were left untouched while the new images got flagged.
 
-What gives me pause is the project's age. Seventy-four commits, seven contributors, first release two months ago. Arcane has been around since 2022 with 1,800+ commits and 35 contributors. That kind of maturity takes time to build, and there will be edge cases Dockhand hasn't hit yet.
+What gave me pause in February was the project's age: 74 commits and 7 contributors at the time. It's now ~470 commits and ~35 contributors, and the v1.0.45 "important security upgrade" release showed the maintainer treats its own attack surface seriously. The caveat that remains is the license: BSL 1.1 is fine for self-hosting, but it isn't OSI open source, and RBAC/LDAP sit behind Enterprise pricing.
 
-If security features are your priority and you can tolerate a newer project, Dockhand is worth installing. If you want something more battle-tested, check out [how to install Arcane](/arcane-docker-install/) instead. And if you want an all-in-one platform that bundles container management with backups, reverse proxy config, and monitoring, take a look at [UsulNet](/usulnet-docker-install/).
+If security features are your priority, Dockhand is worth installing. If you want something more battle-tested or fully open source, check out [how to install Arcane](/arcane-docker-install/) instead. For the rest of the field, my [Portainer alternatives comparison](/portainer-alternatives/) covers Sencho, Dockge, Komodo, and more.
 
 ## Related articles
 
-- [Best Portainer alternatives in 2026](/portainer-alternatives/) - five Docker management UIs compared
+- [Best Portainer alternatives in 2026](/portainer-alternatives/) - the full Docker management UI comparison
 - [Arcane vs Dockhand](/arcane-vs-dockhand/) - side-by-side comparison of both tools
 - [Install Arcane](/arcane-docker-install/) - the other Docker manager covered in this series
-- [Install UsulNet](/usulnet-docker-install/) - all-in-one Docker management platform with scanning, backups, and multi-node
 - [Install Dockge](/dockge-install/) - another Docker management UI
 - [Best Docker containers for home server](/docker-containers-home-server/) - what to run once your manager is set up
 - [Best self-hosted panels](/best-self-hosted-panels/) - server management panels compared
