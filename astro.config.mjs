@@ -1,22 +1,22 @@
 // @ts-check
-import { EventEmitter } from "node:events";
-import { defineConfig } from "astro/config";
+import { defineConfig, fontProviders, svgoOptimizer } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import { satteri } from "@astrojs/markdown-satteri";
 import icon from "astro-icon";
-import { codeBlockHeader, imageCaptions } from "./src/utils/markdown-plugins.mjs";
+import { codeBlockHeader, imageCaptions, trimTokenStyles } from "./src/utils/markdown-plugins.mjs";
+import { redirects } from "./src/config/redirects.mjs";
+import { siteConfig } from "./src/config/site.ts";
 // Sitemap handled by custom sitemap-en.xml.ts and sitemap-es.xml.ts
 import path from "path";
 
-// Large SSG builds attach many concurrent socket "close" listeners (OG images,
-// remote YouTube thumbs, sharp/vite). Default of 10 only produces noise.
-EventEmitter.defaultMaxListeners = 50;
+// EventEmitter.defaultMaxListeners is raised in scripts/node-bootstrap.mjs,
+// loaded via NODE_OPTIONS in the build scripts so it propagates to workers.
 
 // https://astro.build/config
 export default defineConfig({
-  // Set the site URL for production
-  site: "https://www.bitdoze.com",
+  // Site URL — single source is src/config/site.ts (from config.json base_url)
+  site: siteConfig.url,
   // Match generated paths (dist/.../index.html) and avoid /foo vs /foo/ redirect collisions.
   trailingSlash: "always",
   i18n: {
@@ -26,44 +26,10 @@ export default defineConfig({
       prefixDefaultLocale: false,
     },
   },
-  // Only trailing-slash keys here. Defining both "/path" and "/path/" collides in Astro 7
-  // and becomes a hard error later. Non-slash legacy URLs are covered in public/_redirects.
-  redirects: {
-    "/tools/": "https://bit-tools.com/tools",
-    "/tools/thumbnail-ideas/":
-      "https://bit-tools.com/tools/youtube-thumbnail-ideas-generator",
-    "/tools/titles-generator/":
-      "https://bit-tools.com/tools/ai-title-generator",
-    "/tools/youtube-script-generator/":
-      "https://bit-tools.com/tools/youtube-script-generator",
-
-    // Retired category archives → new taxonomy
-    "/categories/cms/": "/categories/web-development/",
-    "/categories/vps/": "/categories/self-hosting/",
-    "/categories/dev-tools/": "/categories/tools/",
-    "/categories/tips/": "/categories/tools/",
-    "/categories/node/": "/categories/tools/",
-    "/categories/python/": "/categories/web-development/",
-    "/categories/astro/": "/categories/web-development/",
-    "/categories/woocommerce/": "/categories/wordpress/",
-    "/categories/security/": "/categories/tools/",
-    "/categories/cloudflare/": "/categories/tools/",
-    "/categories/blog/": "/categories/web-development/",
-    "/categories/personal/": "/categories/web-development/",
-
-    "/es/categories/cms/": "/es/categories/web-development/",
-    "/es/categories/vps/": "/es/categories/self-hosting/",
-    "/es/categories/dev-tools/": "/es/categories/tools/",
-    "/es/categories/tips/": "/es/categories/tools/",
-    "/es/categories/node/": "/es/categories/tools/",
-    "/es/categories/python/": "/es/categories/web-development/",
-    "/es/categories/astro/": "/es/categories/web-development/",
-    "/es/categories/woocommerce/": "/es/categories/wordpress/",
-    "/es/categories/security/": "/es/categories/tools/",
-    "/es/categories/cloudflare/": "/es/categories/tools/",
-    "/es/categories/blog/": "/es/categories/web-development/",
-    "/es/categories/personal/": "/es/categories/web-development/",
-  },
+  // Single source: src/config/redirects.mjs (also generates public/_redirects
+  // via scripts/sync-redirects.mjs). Only trailing-slash keys — defining both
+  // "/path" and "/path/" collides in Astro 7 and becomes a hard error.
+  redirects,
   // Base path (set to '/' for most sites)
   base: "/",
 
@@ -71,11 +37,54 @@ export default defineConfig({
   markdown: {
     processor: satteri({ hastPlugins: [imageCaptions] }),
     shikiConfig: {
-      transformers: [codeBlockHeader()],
+      transformers: [trimTokenStyles(), codeBlockHeader()],
     },
   },
 
-  // Enable experimental SVG components
+  experimental: {
+    // Skip re-rendering pages whose cacheKey + dependency graph are unchanged.
+    // Post routes return cacheKey from getStaticPaths (lastmod ?? date).
+    incrementalBuild: true,
+    // Optimize imported SVGs at build time (~165 SVGs ship under _astro).
+    svgOptimizer: svgoOptimizer(),
+  },
+
+  // Font pipeline: subsets, optimized metric-matched fallbacks (size-adjust —
+  // prevents CLS on swap), and preload hints. The CSS vars hold the generated
+  // family stacks; @theme in global.css maps them to Tailwind's --font-*.
+  fonts: [
+    {
+      provider: fontProviders.fontsource(),
+      name: "Bricolage Grotesque",
+      cssVariable: "--font-stack-display",
+      weights: ["200 800"],
+      styles: ["normal"],
+      subsets: ["latin"],
+      variationSettings: "'opsz' 14 96",
+      fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
+    },
+    {
+      provider: fontProviders.fontsource(),
+      name: "Source Sans 3",
+      cssVariable: "--font-stack-sans",
+      weights: ["200 900"],
+      styles: ["normal"],
+      subsets: ["latin"],
+      fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
+    },
+    {
+      provider: fontProviders.fontsource(),
+      name: "JetBrains Mono",
+      cssVariable: "--font-stack-mono",
+      weights: ["100 800"],
+      styles: ["normal"],
+      subsets: ["latin"],
+      fallbacks: ["ui-monospace", "monospace"],
+    },
+  ],
+
+  // Class-scoped styles drop the ~7 MB of data-astro-cid attributes sitewide.
+  scopedStyleStrategy: "class",
 
   // Configure Vite plugins and server settings
   vite: {
@@ -105,7 +114,11 @@ export default defineConfig({
     service: {
       entrypoint: "astro/assets/services/sharp",
     },
-    dangerouslyProcessSVG: true,
+    // Responsive images: every <Image>/<Picture> without its own layout emits a
+    // srcset on this shared breakpoint ladder (consolidates variant explosion).
+    layout: "constrained",
+    breakpoints: [480, 768, 1024, 1440],
+    responsiveStyles: true,
     remotePatterns: [
       {
         protocol: "https",

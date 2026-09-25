@@ -10,7 +10,8 @@ if (!links || typeof links !== "object" || Array.isArray(links)) {
 }
 for (const [slug, entry] of Object.entries(links)) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) errors.push(`${slug}: invalid kebab-case slug`);
-  if (typeof entry?.name !== "string" || !entry.name.trim()) errors.push(`${slug}: missing product name`);
+  if (typeof entry?.name !== "string" || !entry.name.trim())
+    errors.push(`${slug}: missing product name`);
   try {
     const url = new URL(entry?.url);
     if (url.protocol !== "https:" || url.username || url.password) throw new Error();
@@ -25,17 +26,32 @@ let checked = 0;
 async function inspect(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const file = path.join(directory, entry.name);
-    if (entry.isDirectory()) { await inspect(file); continue; }
+    if (entry.isDirectory()) {
+      await inspect(file);
+      continue;
+    }
     if (!entry.name.endsWith(".html")) continue;
     const html = await readFile(file, "utf8");
     for (const match of html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>/gi)) {
       let url;
-      try { url = new URL(match[1].replace(/&amp;/g, "&"), "https://www.bitdoze.com/" + path.relative(path.join(root, "dist"), file)); }
-      catch { continue; }
-      if (url.origin !== "https://www.bitdoze.com" || !url.pathname.startsWith("/go/") || url.pathname === "/go/") continue;
+      try {
+        url = new URL(
+          match[1].replace(/&amp;/g, "&"),
+          "https://www.bitdoze.com/" + path.relative(path.join(root, "dist"), file)
+        );
+      } catch {
+        continue;
+      }
+      if (
+        url.origin !== "https://www.bitdoze.com" ||
+        !url.pathname.startsWith("/go/") ||
+        url.pathname === "/go/"
+      )
+        continue;
       checked++;
       const slug = url.pathname.slice(4).replace(/\/$/, "");
-      if (!Object.hasOwn(links, slug)) errors.push(`${path.relative(root, file)}: unknown affiliate link ${url.pathname}`);
+      if (!Object.hasOwn(links, slug))
+        errors.push(`${path.relative(root, file)}: unknown affiliate link ${url.pathname}`);
     }
   }
 }
@@ -44,5 +60,7 @@ if (errors.length) {
   console.error("Affiliate link validation failed:\n" + errors.join("\n"));
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${Object.keys(links).length} affiliate products${checked ? ` and ${checked} rendered links` : ""}.`);
+  console.log(
+    `Validated ${Object.keys(links).length} affiliate products${checked ? ` and ${checked} rendered links` : ""}.`
+  );
 }

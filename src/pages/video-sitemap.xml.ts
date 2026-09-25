@@ -1,8 +1,8 @@
 import type { APIContext } from "astro";
-import { getCollection } from "astro:content";
 import { siteConfig } from "@config/site";
 import { getEntryHref } from "@utils/content";
 import { extractYoutubeVideoId, getYoutubeThumbnailSync } from "@utils/youtube";
+import { getAllPublishedPosts } from "@utils/postsCache";
 
 type VideoEntry = {
   title: string;
@@ -15,8 +15,7 @@ type VideoEntry = {
 const isDefined = <T>(value: T | null): value is T => value !== null;
 
 const YOUTUBE_EMBED_REGEX = /<YouTubeEmbed[\s\S]*?\/>/g;
-const ATTRIBUTE_REGEX = (name: string) =>
-  new RegExp(`${name}=("|')(.*?)\\1`);
+const ATTRIBUTE_REGEX = (name: string) => new RegExp(`${name}=("|')(.*?)\\1`);
 
 const escapeXml = (value: string): string =>
   value
@@ -63,7 +62,7 @@ const extractVideosFromBody = (
 };
 
 export async function GET(context: APIContext) {
-  const posts = await getCollection("posts", ({ data }) => !data.draft);
+  const posts = await getAllPublishedPosts();
   const site = context.site || siteConfig.url;
 
   const urlEntries = posts

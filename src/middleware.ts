@@ -22,10 +22,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
   // Add Link headers for agent discovery on the homepage (dev only)
   if (url.pathname === "/") {
     const existing = response.headers.get("Link");
-    response.headers.set(
-      "Link",
-      existing ? `${existing}, ${LINK_HEADERS}` : LINK_HEADERS
-    );
+    response.headers.set("Link", existing ? `${existing}, ${LINK_HEADERS}` : LINK_HEADERS);
   }
 
   return response;

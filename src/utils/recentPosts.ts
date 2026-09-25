@@ -5,9 +5,7 @@ import { getAllPublishedPosts, type Post } from "@utils/postsCache";
 let recentPromise: Promise<Record<SupportedLocale, Post[]>> | null = null;
 
 function sortByDateDesc(a: Post, b: Post): number {
-  return (
-    new Date(b.data.date || 0).getTime() - new Date(a.data.date || 0).getTime()
-  );
+  return new Date(b.data.date || 0).getTime() - new Date(a.data.date || 0).getTime();
 }
 
 async function buildRecentByLocale(): Promise<Record<SupportedLocale, Post[]>> {
@@ -32,10 +30,7 @@ export function getRecentPostsByLocale() {
 }
 
 /** Latest N non-draft posts for a locale (default 3 for footer). */
-export async function getRecentPosts(
-  locale: SupportedLocale,
-  limit = 3,
-): Promise<Post[]> {
+export async function getRecentPosts(locale: SupportedLocale, limit = 3): Promise<Post[]> {
   const byLocale = await getRecentPostsByLocale();
   return byLocale[locale].slice(0, limit);
 }

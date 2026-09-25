@@ -22,12 +22,12 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 
 ## Architecture
 
-- **Astro v5** blog site with MDX, RSS, sitemap generation
+- **Astro 7** blog site with MDX, RSS, sitemap generation
 - **Content Collections**: posts/, authors/, pages/, about/ in src/content/
 - **Config**: site.ts, menu.json, social.json in src/config/
 - **Layouts**: Layout.astro (main), PostLayout.astro (blog posts)
 - **Styling**: Tailwind CSS v4 with @tailwindcss/typography
-- **Search**: Client-side with Fuse.js
+- **Search**: Client-side with Pagefind
 - **Assets**: Images in src/assets/, public/ for static files
 
 ## Code Style
@@ -38,7 +38,7 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 - **Naming**: kebab-case for files, camelCase for variables, PascalCase for components
 - **Imports**: Use path aliases, group by external/internal
 - **Types**: Define schema with Zod for content collections
-- **Frontmatter**: Required title, optional meta_title, description, image, authors[], **exactly one** `categories` value from the allowed list, 1–3 `tags`
+- **Frontmatter**: Required title, description, image, authors[]; optional meta_title; **exactly one** `categories` value from the allowed list, 1–3 `tags`
 
 ## Content Guidelines for Bitdoze Articles
 
@@ -51,7 +51,7 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 - **Widgets**: Include in article the widgets created under widget section, don't use to much to not make the article not readable.
 - **Image**: Create an SVG cover image for the mdx article following the **SVG Creation Guidelines** below, then **convert it to WebP** (see the WebP conversion step at the end of that section) and reference the `.webp` file in the frontmatter `image:` field. Store it under `src/assets/images/`. Keep it simple and nice with a short, large text (max 5 words) readable on any device, on a light 16:9 background.
   - After creating the `.svg`, run `node scripts/svg-to-webp.mjs` (or convert just that file) to render it to `.webp` via resvg + sharp, update the frontmatter to point at the `.webp`, and remove the source `.svg` once it is no longer referenced.
-- **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from amazon and the link should be with "https://amazon.com/dp/ASIN"
+- **Amazon Products**: You add the amazon products with the needed details for the box: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="/go/<slug>/" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` the image is the one from Amazon; the link must be a `/go/` affiliate redirect (see "Affiliate Links" above), not a raw amazon.com URL
 
 ## Affiliate Links (`/go/` redirects)
 
@@ -163,22 +163,17 @@ Individual digest pages are intentionally `noindex` (set in `NewsLayout.astro`) 
 
 ## SVG Creation Guidelines
 
-To maintain a consistent, premium, and polished brand aesthetic across the site, all article SVG covers must follow these guidelines:
+Covers follow DESIGN.md's Terminal Blue palette — flat, editorial, one accent color. No glassmorphism, no glow blobs, no off-palette gradients (that is the generic AI-blog look PRODUCT.md rules out). All article SVG covers must follow these guidelines:
 
 - **Dimensions & Ratio**: Use exactly 16:9 aspect ratio, defined via `viewBox="0 0 1200 675"`.
-- **Background**:
-  - Use a soft, modern light gradient (e.g., `#F8FAFC` to `#E2E8F0`).
-  - Add 2-3 large, soft ambient glowing blobs using radial gradients (e.g., `#6366F1` indigo, `#06B6D4` cyan, `#EC4899` pink) with a low opacity (`0.12` to `0.18`) to simulate a modern glassmorphic/aurora glow.
-- **Grid Pattern**: Overlay a subtle background grid using a `<pattern>` of width/height `60` with a light stroke (`#CBD5E1`, `stroke-width="1"`, `opacity="0.25"`).
+- **Background**: Flat light fill (`#F8FAFC` or `#F1F5F9`). Optionally overlay a hairline grid `<pattern>` (width/height `60`, stroke `#CBD5E1`, `stroke-width="1"`, `opacity="0.25"`). No radial-gradient blobs or ambient glow.
 - **Typography**:
   - Keep the total word count on the image to **5 words or fewer**.
   - Use modern, clean system fonts: `font-family="system-ui, -apple-system, sans-serif"`.
-  - Use a high-contrast dark color (`#0F172A`) for the main title, with key words highlighted using a colorful gradient fill (e.g., `#4F46E5` to `#06B6D4`).
-  - Add an uppercase category badge (e.g., "AI VOICE", "COMPARE", "AI CLONING") inside a rounded capsule above the main title.
-- **Central Icon/Graphic**:
-  - Include a simple, stylized vector icon at the center top (around `y = 180`).
-  - Align elements symmetrically. Use clean paths, rounded shapes, or themed soundwave pills to represent the article's topic.
-- **Decorative Elements**: Add a few tiny decorative circles/dots at low opacity (`0.12` to `0.2`) around the corners to fill empty spaces elegantly.
+  - Title in solid ink (`#0F172A`); at most **one** accent word in solid `#2563EB` (blue-600). No gradient text fills.
+  - Add an uppercase category badge in a blue capsule (`#2563EB` fill, white text, or `#DBEAFE` fill with `#1D4ED8` text) above the main title.
+- **Central Icon/Graphic**: A simple, single-color icon in `#2563EB` (or `#0F172A`), centered near `y = 180`. Clean paths, rounded shapes — no multi-color illustrations.
+- **Decorative Elements**: Optional small dots or a hairline divider in `#CBD5E1`/`#93C5FD`. Keep it restrained — nothing glowing.
 
 ### WebP conversion (required after authoring the SVG)
 
@@ -199,7 +194,7 @@ Text in the SVG must render correctly in the rasterized WebP — keep using `fon
 - **ListCheck**: `<ListCheck><ul><li>Checkmark item 1</li><li>Item 2</li></ul></ListCheck>`
 - **YouTubeEmbed**: `<YouTubeEmbed url="https://youtube.com/embed/VIDEO_ID" label="Video Title" />` (lazy-loading facade - shows thumbnail, loads iframe on click. Supports all YouTube URL formats: youtube.com/watch?v=, youtu.be/, /embed/, /shorts/, /live/)
 - **Tabs/Tab**: `<Tabs><Tab name="Tab 1">content</Tab><Tab name="Tab 2">content</Tab></Tabs>`
-- **AmazonProduct**: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="https://amazon.com/dp/ASIN" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />`
+- **AmazonProduct**: `<AmazonProduct productName="Blender Name" productDescription="Description" productFeatures={["Feature 1", "Feature 2"]} productLink="/go/<slug>/" productImage="https://example.com/image.jpg" productRating={4.5} importantConsiderations={["Note 1", "Note 2"]} pros={["Pro 1", "Pro 2"]} cons={["Con 1", "Con 2"]} />` — link must be a `/go/` slug from `src/data/affiliate-links.json`
 
 # Tailwind CSS v4
 

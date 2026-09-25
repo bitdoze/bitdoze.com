@@ -17,14 +17,14 @@ Practical DevOps, programming, and self-hosting guides — built with [Astro](ht
 Requires Node.js 22+.
 
 ```bash
-npm install
-npm run dev          # http://localhost:4321
-npm run build        # production build + Pagefind index
-npm run build:ci     # build with larger Node heap
-npm run preview      # preview dist/
-npm run check        # astro check (types)
-npm run lint         # eslint
-npm run format       # prettier
+bun install
+bun run dev          # http://localhost:4321
+bun run build        # production build + Pagefind index
+bun run build:ci     # build with larger Node heap
+bun run preview      # preview dist/
+bun run check        # astro check (types)
+bun run lint         # eslint
+bun run format       # prettier
 ```
 
 ## Project layout

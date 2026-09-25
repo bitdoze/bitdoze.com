@@ -77,7 +77,7 @@ const OVERRIDES = {
   "python-video-intro-editor": "ai",
   "uv-text-to-speech-script": "ai",
   "groq-api-mistral-streamlit": "ai",
-  "perplexity": "ai",
+  perplexity: "ai",
   "mastra-image-agent-kie-ai": "ai",
   "windsurd-build-astro-blog": "ai",
 
@@ -181,7 +181,7 @@ const OVERRIDES = {
   "starship-ghostty-terminal": "linux",
   "ghostty-terminal": "linux",
   "tmux-basics": "linux",
-  "zoxide": "linux",
+  zoxide: "linux",
   "compare-folders-content-differences": "linux",
   "exclude-directories-files-copy-remote-machine": "linux",
   "pdf-extract-text-linux-cmd": "linux",
@@ -269,7 +269,12 @@ function getList(fm, key) {
     return block[1]
       .trim()
       .split(/\n/)
-      .map((line) => line.replace(/^\s*-\s*/, "").trim().replace(/^["']|["']$/g, ""))
+      .map((line) =>
+        line
+          .replace(/^\s*-\s*/, "")
+          .trim()
+          .replace(/^["']|["']$/g, "")
+      )
       .filter(Boolean);
   }
   return [];
@@ -363,14 +368,7 @@ function inferCategory(stem, title, oldCats, tags) {
   }
 
   if (
-    matchesAny(text, [
-      "woocommerce",
-      "wordpress",
-      "gutenberg",
-      "breakdance",
-      "surecart",
-      "fluent",
-    ])
+    matchesAny(text, ["woocommerce", "wordpress", "gutenberg", "breakdance", "surecart", "fluent"])
   ) {
     return "wordpress";
   }
@@ -653,11 +651,9 @@ function main() {
     const tags = normalizeTags(oldTags, category);
     const newCats = [category];
 
-    const catsSame =
-      oldCats.length === 1 && oldCats[0] === category;
+    const catsSame = oldCats.length === 1 && oldCats[0] === category;
     const tagsSame =
-      oldTags.length === tags.length &&
-      oldTags.every((t, i) => toKebab(t) === tags[i]);
+      oldTags.length === tags.length && oldTags.every((t, i) => toKebab(t) === tags[i]);
 
     if (!catsSame || !tagsSame || oldTags.length !== tags.length) {
       fm = replaceListField(fm, "categories", newCats);
@@ -704,7 +700,7 @@ function main() {
     console.log("\nSample changes (first 40):");
     for (const c of changes.slice(0, 40)) {
       console.log(
-        `  ${c.file}\n    cats: ${JSON.stringify(c.from.categories)} → ${JSON.stringify(c.to.categories)}\n    tags: ${JSON.stringify(c.from.tags)} → ${JSON.stringify(c.to.tags)}`,
+        `  ${c.file}\n    cats: ${JSON.stringify(c.from.categories)} → ${JSON.stringify(c.to.categories)}\n    tags: ${JSON.stringify(c.from.tags)} → ${JSON.stringify(c.to.tags)}`
       );
     }
   }

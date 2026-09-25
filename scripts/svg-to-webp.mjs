@@ -65,8 +65,7 @@ const IMAGE_SVG_RE = /^(\s*image:\s+["']?)([^"'\s]+\.svg)(["']?\s*)$/;
 function resolveAsset(p, fromPost) {
   if (p.startsWith("@images/"))
     return join(ROOT, "src", "assets", "images", p.slice("@images/".length));
-  if (p.startsWith("@assets/"))
-    return join(ROOT, "src", "assets", p.slice("@assets/".length));
+  if (p.startsWith("@assets/")) return join(ROOT, "src", "assets", p.slice("@assets/".length));
   return resolve(dirname(fromPost), p);
 }
 
@@ -96,7 +95,7 @@ function isStillReferenced(svgPath) {
     // May over-match substrings (e.g. foo.svg inside best-foo.svg) -> keeps SVGs
     // that could be deleted, but NEVER wrongfully deletes a referenced file.
     const out = execSync(
-      `grep -rlF --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git -- '${safe}' "${SRC_DIR}" 2>/dev/null || true`,
+      `grep -rlF --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git -- '${safe}' "${SRC_DIR}" 2>/dev/null || true`
     ).toString();
     return out.trim().length > 0;
   } catch {
@@ -106,7 +105,9 @@ function isStillReferenced(svgPath) {
 
 async function main() {
   const posts = walk(POSTS_DIR);
-  const converted = []; // {svg, webp, post}
+  // Candidates are found first; frontmatter is only rewritten for SVGs that
+  // rendered successfully, and an SVG is only deleted once its .webp exists.
+  const candidates = []; // {svg, webp, post, lineIndex, newLine, ok}
   const missing = [];
   const rewritten = [];
   let skippedNonSvg = 0;
@@ -116,13 +117,12 @@ async function main() {
     const fm = getFrontmatter(text);
     if (!fm) continue;
 
-    let changed = false;
-    let svgRel = null;
-    const newLines = [...fm.lines];
+    let foundSvg = false;
     for (let i = fm.startLine; i <= fm.endLine; i++) {
-      const m = newLines[i].match(IMAGE_SVG_RE);
+      const m = fm.lines[i].match(IMAGE_SVG_RE);
       if (!m) continue;
-      svgRel = m[2];
+      foundSvg = true;
+      const svgRel = m[2];
       const svgAbs = resolveAsset(svgRel, post);
       if (!existsSync(svgAbs)) {
         missing.push({ post, svgRel });
@@ -130,51 +130,65 @@ async function main() {
       }
       const webpAbs = svgAbs.replace(/\.svg$/i, ".webp");
       const webpRel = svgRel.replace(/\.svg$/i, ".webp");
-      newLines[i] = `${m[1]}${webpRel}${m[3]}`;
-      changed = true;
-      converted.push({ svg: svgAbs, webp: webpAbs, post });
+      candidates.push({
+        svg: svgAbs,
+        webp: webpAbs,
+        post,
+        lineIndex: i,
+        newLine: `${m[1]}${webpRel}${m[3]}`,
+        ok: false,
+      });
     }
 
-    if (changed) {
-      const after = text.split("\n");
-      // splice the frontmatter lines back
-      for (let i = fm.startLine; i <= fm.endLine; i++) after[i] = newLines[i];
-      const newText = after.join("\n");
-      if (DRY_RUN) {
-        rewritten.push(post);
-      } else {
-        writeFileSync(post, newText, "utf8");
-        rewritten.push(post);
-      }
-    } else if (svgRel === null) {
-      skippedNonSvg++;
-    }
+    if (!foundSvg) skippedNonSvg++;
   }
 
-  // --- render + write WebP files ---
+  // --- render + write WebP files (BEFORE touching frontmatter) ---
   let rendered = 0;
   const renderErrors = [];
   if (!DRY_RUN) {
-    for (const { svg, webp } of converted) {
+    for (const candidate of candidates) {
       try {
-        if (existsSync(webp)) {
-          // still re-render to keep deterministic output
-        }
-        const buf = await convertSvgToWebp(svg);
-        await buf.toFile(webp);
+        const buf = await convertSvgToWebp(candidate.svg);
+        await buf.toFile(candidate.webp);
+        candidate.ok = true;
         rendered++;
       } catch (e) {
-        renderErrors.push({ svg, err: String(e) });
+        renderErrors.push({ svg: candidate.svg, err: String(e) });
       }
     }
+  } else {
+    candidates.forEach((c) => (c.ok = true));
+  }
+
+  // --- rewrite frontmatter, only for posts whose render succeeded ---
+  const byPost = new Map();
+  for (const candidate of candidates) {
+    if (!candidate.ok) continue;
+    if (!byPost.has(candidate.post)) byPost.set(candidate.post, []);
+    byPost.get(candidate.post).push(candidate);
+  }
+  for (const [post, changes] of byPost) {
+    if (DRY_RUN) {
+      rewritten.push(post);
+      continue;
+    }
+    const lines = readFileSync(post, "utf8").split("\n");
+    for (const { lineIndex, newLine } of changes) lines[lineIndex] = newLine;
+    writeFileSync(post, lines.join("\n"), "utf8");
+    rewritten.push(post);
   }
 
   // --- delete SVGs no longer referenced ---
+  // Only when the fresh .webp exists on disk AND the frontmatter rewrite above
+  // removed the last reference. Failed renders keep their SVG (and the post
+  // still points at it).
   let deleted = 0;
   const keptReferenced = [];
-  const uniqueSvgs = [...new Set(converted.map((c) => c.svg))];
+  const renderedSvgs = new Set(candidates.filter((c) => c.ok).map((c) => c.svg));
   if (!DRY_RUN && !KEEP_SVGS) {
-    for (const svg of uniqueSvgs) {
+    for (const svg of renderedSvgs) {
+      if (!existsSync(svg.replace(/\.svg$/i, ".webp"))) continue;
       if (isStillReferenced(svg)) {
         keptReferenced.push(svg);
         continue;
@@ -191,14 +205,18 @@ async function main() {
   // --- summary ---
   console.log("--- svg-to-webp summary ---");
   console.log(`posts scanned         : ${posts.length}`);
-  console.log(`frontmatter rewritten : ${rewritten.length}${DRY_RUN ? " (dry-run, not written)" : ""}`);
-  console.log(`svg covers found      : ${converted.length}`);
+  console.log(
+    `frontmatter rewritten : ${rewritten.length}${DRY_RUN ? " (dry-run, not written)" : ""}`
+  );
+  console.log(`svg covers found      : ${candidates.length}`);
   console.log(`webp rendered         : ${rendered}`);
   if (!DRY_RUN && !KEEP_SVGS) {
     console.log(`svg deleted           : ${deleted}`);
     console.log(`svg kept (still ref)  : ${keptReferenced.length}`);
   } else {
-    console.log(`svg deletion          : ${KEEP_SVGS ? "skipped (--no-delete)" : "skipped (dry-run)"}`);
+    console.log(
+      `svg deletion          : ${KEEP_SVGS ? "skipped (--no-delete)" : "skipped (dry-run)"}`
+    );
   }
   console.log(`posts without svg img : ${skippedNonSvg}`);
   if (missing.length) {

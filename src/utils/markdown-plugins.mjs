@@ -51,6 +51,91 @@ export function codeBlockHeader() {
   };
 }
 
+const COLOR_STYLE = /color\s*:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|[\w-]+)/;
+
+/**
+ * Shiki transformer: shrink per-token inline styles.
+ * - Drops `style="color:<fg>"` spans whose color is the theme's default
+ *   foreground — they add bytes but no styling.
+ * - Merges adjacent <span> siblings that share an identical style string.
+ * Cuts ~30–50% of code-block HTML on code-heavy posts.
+ */
+export function trimTokenStyles() {
+  const getText = (node) =>
+    node.type === "text" ? node.value : (node.children ?? []).map(getText).join("");
+
+  const styleOf = (node) =>
+    node.type === "element" && typeof node.properties?.style === "string"
+      ? node.properties.style.trim()
+      : null;
+
+  const visit = (node, defaultFg) => {
+    if (node.type !== "element" || !Array.isArray(node.children)) return;
+    for (const child of node.children) visit(child, defaultFg);
+
+    // Strip default-foreground color styles on spans
+    for (const child of node.children) {
+      if (child.type !== "element" || child.tagName !== "span") continue;
+      const style = child.properties?.style;
+      if (typeof style !== "string") continue;
+      const m = style.match(COLOR_STYLE);
+      if (!m) continue;
+      const color = m[1].toLowerCase();
+      if (defaultFg && color === defaultFg) {
+        const rest = style.replace(m[0], "").replace(/^[;\s]+|[;\s]+$/g, "");
+        if (rest) child.properties.style = rest;
+        else delete child.properties.style;
+      }
+    }
+
+    // Merge adjacent spans with identical style attributes
+    const merged = [];
+    for (const child of node.children) {
+      const prev = merged[merged.length - 1];
+      if (
+        prev &&
+        prev.type === "element" &&
+        child.type === "element" &&
+        prev.tagName === "span" &&
+        child.tagName === "span" &&
+        styleOf(prev) === styleOf(child) &&
+        Object.keys(prev.properties ?? {}).every((k) => k === "style") &&
+        Object.keys(child.properties ?? {}).every((k) => k === "style")
+      ) {
+        const style = styleOf(prev);
+        prev.children = [{ type: "text", value: getText(prev) + getText(child) }];
+        if (style) prev.properties = { style };
+        else prev.properties = {};
+        continue;
+      }
+      merged.push(child);
+    }
+    node.children = merged;
+  };
+
+  return {
+    name: "bitdoze:trim-token-styles",
+    root(root) {
+      // Resolve the theme's default foreground color
+      const themes = this.options?.themes;
+      const theme =
+        themes && typeof themes === "object" ? Object.values(themes)[0] : this.options?.theme;
+      const defaultFg =
+        typeof theme === "object" && theme
+          ? (
+              theme.fg ??
+              theme.settings?.find?.(
+                (s) => !s.scope || (Array.isArray(s.scope) && s.scope.length === 0)
+              )?.settings?.foreground
+            )?.toLowerCase?.()
+          : typeof theme === "string"
+            ? undefined
+            : undefined;
+      visit(root, defaultFg ?? null);
+    },
+  };
+}
+
 const FILENAME_LIKE = /\.(png|jpe?g|webp|gif|svg|avif)$/i;
 
 /**

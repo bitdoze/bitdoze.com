@@ -8,10 +8,7 @@ const YOUTUBE_EMBED_BASE = "https://www.youtube.com/embed/";
 const VALID_ID_PATTERN = /^[\w-]{11}$/;
 const KNOWN_PREFIXES = ["www.", "m.", "music.", "gaming."];
 const YOUTUBE_THUMB_BASE = "https://i3.ytimg.com/vi/";
-const MAXRES_THUMBNAIL = "maxresdefault.jpg";
 const DEFAULT_THUMBNAIL = "hqdefault.jpg";
-
-const thumbnailAvailabilityCache = new Map<string, boolean>();
 
 /**
  * Normalize YouTube hostname by removing common prefixes
@@ -78,54 +75,6 @@ export function extractYoutubeVideoId(rawUrl: string): string | null {
   }
 
   return null;
-}
-
-/**
- * Check if a thumbnail URL is available via HEAD request
- * Results are cached to avoid repeated requests
- */
-async function isThumbnailAvailable(url: string): Promise<boolean> {
-  if (thumbnailAvailabilityCache.has(url)) {
-    return thumbnailAvailabilityCache.get(url)!;
-  }
-
-  if (typeof fetch !== "function") {
-    return false;
-  }
-
-  try {
-    const response = await fetch(url, { method: "HEAD" });
-    let available = response.ok;
-
-    // Some servers don't support HEAD, try GET as fallback
-    if (!available && response.status === 405) {
-      const getResponse = await fetch(url, { method: "GET" });
-      available = getResponse.ok;
-    }
-
-    thumbnailAvailabilityCache.set(url, available);
-    return available;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Get the best available thumbnail URL for a YouTube video
- * Tries maxresdefault first, falls back to hqdefault
- */
-export async function getYoutubeThumbnail(rawUrl: string): Promise<string> {
-  const id = extractYoutubeVideoId(rawUrl);
-  if (!id) return PLACEHOLDER_THUMBNAIL;
-
-  const baseUrl = `${YOUTUBE_THUMB_BASE}${id}`;
-  const maxResUrl = `${baseUrl}/${MAXRES_THUMBNAIL}`;
-
-  if (await isThumbnailAvailable(maxResUrl)) {
-    return maxResUrl;
-  }
-
-  return `${baseUrl}/${DEFAULT_THUMBNAIL}`;
 }
 
 /**

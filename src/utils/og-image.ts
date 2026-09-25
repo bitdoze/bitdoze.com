@@ -78,7 +78,7 @@ export async function generateOgImage({ title, subtitle }: OgImageOptions): Prom
         { name: "Go", data: BOLD_FONT, weight: 700, style: "normal" },
         { name: "Go", data: REGULAR_FONT, weight: 400, style: "normal" },
       ],
-    },
+    }
   );
 
   const resvg = new Resvg(svg, {

@@ -25,7 +25,10 @@ function extractCanonical(entry: SluggableEntry): string | undefined {
 export function getEntrySlug(entry: SluggableEntry): string {
   const canonical = extractCanonical(entry);
   const raw = canonical || entry?.slug || entry?.id || "";
-  return raw.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(EXTENSION_REGEX, "");
+  return raw
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(EXTENSION_REGEX, "");
 }
 
 export function getEntryHref(entry: SluggableEntry): string {

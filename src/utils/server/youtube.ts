@@ -43,13 +43,11 @@ async function loadChannelFeed(channelId: string): Promise<RawVideo[]> {
   try {
     const response = await fetch(
       `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`,
-      { cache: "force-cache" },
+      { cache: "force-cache" }
     );
 
     if (!response.ok) {
-      throw new Error(
-        `YouTube feed request failed with status ${response.status}`,
-      );
+      throw new Error(`YouTube feed request failed with status ${response.status}`);
     }
 
     const xmlText = await response.text();
@@ -81,10 +79,7 @@ async function loadChannelFeed(channelId: string): Promise<RawVideo[]> {
   }
 }
 
-export async function fetchYouTubeVideos(
-  channelId: string,
-  limit = 6,
-): Promise<RawVideo[]> {
+export async function fetchYouTubeVideos(channelId: string, limit = 6): Promise<RawVideo[]> {
   if (!feedCache.has(channelId)) {
     feedCache.set(channelId, loadChannelFeed(channelId));
   }
@@ -93,6 +88,4 @@ export async function fetchYouTubeVideos(
   return videos.slice(0, limit);
 }
 
-export type YouTubeVideo = Awaited<
-  ReturnType<typeof fetchYouTubeVideos>
->[number];
+export type YouTubeVideo = Awaited<ReturnType<typeof fetchYouTubeVideos>>[number];

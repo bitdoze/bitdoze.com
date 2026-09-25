@@ -24,7 +24,7 @@ const EN_TO_ES_EXACT: Record<string, string> = {
 };
 
 const ES_TO_EN_EXACT = Object.fromEntries(
-  Object.entries(EN_TO_ES_EXACT).map(([enPath, esPath]) => [esPath, enPath]),
+  Object.entries(EN_TO_ES_EXACT).map(([enPath, esPath]) => [esPath, enPath])
 ) as Record<string, string>;
 
 export function isExternalUrl(url: string): boolean {
@@ -49,7 +49,7 @@ function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string |
   const normalized = normalizePath(path);
 
   const paginatedMatch = normalized.match(
-    /^\/(?:(es)\/)?(blog|tags|categories|authors)(?:\/([^/]+))?\/page\/(\d+)\/$/,
+    /^\/(?:(es)\/)?(blog|tags|categories|authors)(?:\/([^/]+))?\/page\/(\d+)\/$/
   );
 
   if (!paginatedMatch) {
@@ -82,9 +82,7 @@ function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string |
 
 function mapArchivePath(path: string, targetLocale: SupportedLocale): string | null {
   const normalized = normalizePath(path);
-  const archiveMatch = normalized.match(
-    /^\/(?:(es)\/)?(tags|categories|authors)\/([^/]+)\/$/,
-  );
+  const archiveMatch = normalized.match(/^\/(?:(es)\/)?(tags|categories|authors)\/([^/]+)\/$/);
 
   if (!archiveMatch) {
     return null;

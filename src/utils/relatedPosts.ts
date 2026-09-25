@@ -9,7 +9,7 @@ function getMatchCount(source: string[] = [], target: string[] = []): number {
 export function getRelatedPosts(
   currentPost: CollectionEntry<"posts">,
   otherPosts: CollectionEntry<"posts">[],
-  limit: number,
+  limit: number
 ): CollectionEntry<"posts">[] {
   const currentTags = currentPost.data.tags || [];
   const currentCategories = currentPost.data.categories || [];

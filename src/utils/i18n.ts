@@ -25,12 +25,8 @@ export function isPostIdInLocale(id: string, locale: SupportedLocale): boolean {
 }
 
 export function getPostLocale(post: CollectionEntry<"posts">): SupportedLocale {
-  if (post?.data?.locale === "es") {
-    return "es";
-  }
-
-  const slug = getEntrySlug(post);
-  return getLocaleFromSlug(slug);
+  // Path is the single source of truth: es/ prefix → Spanish.
+  return getLocaleFromSlug(getEntrySlug(post));
 }
 
 export function getPostTranslationKey(post: CollectionEntry<"posts">): string {

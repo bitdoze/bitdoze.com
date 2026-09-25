@@ -36,7 +36,7 @@ export function absoluteUrl(path: string, base: string | URL | undefined): strin
 export function buildArchivePath(
   type: "tags" | "categories" | "authors",
   slug: string,
-  locale: SupportedLocale,
+  locale: SupportedLocale
 ): string {
   const localePrefix = locale === "es" ? "/es" : "";
   return `${localePrefix}/${type}/${slug}/`;
@@ -46,7 +46,7 @@ export function buildArchivePagePath(
   type: "blog" | "tags" | "categories" | "authors",
   locale: SupportedLocale,
   page: number | string,
-  slug?: string,
+  slug?: string
 ): string {
   const localePrefix = locale === "es" ? "/es" : "";
   const pageSegment = `page/${page}/`;
@@ -60,4 +60,12 @@ export function buildArchivePagePath(
   }
 
   return `${localePrefix}/${type}/${slug}/${pageSegment}`;
+}
+
+/**
+ * Serialize JSON-LD safely for inline <script> embedding — escapes `</` so a
+ * literal "</script>" inside a string can't break out of the tag.
+ */
+export function serializeJsonLd(data: unknown): string {
+  return JSON.stringify(data).replace(/</g, "\\u003c");
 }

@@ -1,13 +1,13 @@
-import { getCollection } from "astro:content";
 import { getEntrySlug } from "@utils/content";
 import { isPostIdInLocale } from "@utils/i18n";
 import type { APIRoute } from "astro";
 import { siteConfig } from "@config/site";
+import { getAllPublishedPosts } from "@utils/postsCache";
 
 const RECENT_LIMIT = 80;
 
 export const GET: APIRoute = async () => {
-  const posts = await getCollection("posts", ({ data }) => !data.draft);
+  const posts = await getAllPublishedPosts();
 
   const sortFn = (a: (typeof posts)[number], b: (typeof posts)[number]) => {
     const dateA = a.data.date instanceof Date ? a.data.date.getTime() : 0;

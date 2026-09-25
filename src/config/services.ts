@@ -1,4 +1,6 @@
-export type ServiceLocale = "en" | "es";
+import type { SupportedLocale } from "@utils/i18n";
+
+export type ServiceLocale = SupportedLocale;
 
 type LocalizedText = {
   en: string;
@@ -147,7 +149,7 @@ export const services: ServiceConfig[] = [
       es: "desarrollo-astro",
     },
     icon: "mdi:rocket-launch-outline",
-    accent: "from-sky-500 to-cyan-500",
+    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Astro Website Development",
       es: "Desarrollo de sitios con Astro",
@@ -267,7 +269,7 @@ export const services: ServiceConfig[] = [
       es: "desarrollo-agentes-ia",
     },
     icon: "mdi:robot-outline",
-    accent: "from-emerald-500 to-teal-500",
+    accent: "from-blue-600 to-blue-700",
     title: {
       en: "AI Agent Development",
       es: "Desarrollo de agentes IA",
@@ -388,7 +390,7 @@ export const services: ServiceConfig[] = [
       es: "configuracion-vps-servidores",
     },
     icon: "mdi:server-network",
-    accent: "from-indigo-500 to-blue-500",
+    accent: "from-blue-600 to-blue-700",
     title: {
       en: "VPS Setup and Hardening",
       es: "Configuracion y hardening de VPS",
@@ -508,7 +510,7 @@ export const services: ServiceConfig[] = [
       es: "despliegue-dokploy",
     },
     icon: "mdi:layers-triple-outline",
-    accent: "from-violet-500 to-fuchsia-500",
+    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Dokploy Deployment and Setup",
       es: "Despliegue y setup con Dokploy",
@@ -628,7 +630,7 @@ export const services: ServiceConfig[] = [
       es: "aplicaciones-self-hosted",
     },
     icon: "mdi:docker",
-    accent: "from-orange-500 to-amber-500",
+    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Self-Hosted App Deployment",
       es: "Despliegue de apps self-hosted",
@@ -744,13 +746,9 @@ export const services: ServiceConfig[] = [
 ];
 
 export function getServices(locale: ServiceLocale): ServiceConfig[] {
-  return services.slice().sort((a, b) =>
-    a.title[locale].localeCompare(b.title[locale], locale === "es" ? "es" : "en"),
-  );
-}
-
-export function getServiceBySlug(locale: ServiceLocale, slug: string): ServiceConfig | undefined {
-  return services.find((service) => service.slug[locale] === slug);
+  return services
+    .slice()
+    .sort((a, b) => a.title[locale].localeCompare(b.title[locale], locale === "es" ? "es" : "en"));
 }
 
 export function getServicesContactHref(locale: ServiceLocale): string {
@@ -758,9 +756,7 @@ export function getServicesContactHref(locale: ServiceLocale): string {
 }
 
 export function getServicePath(service: ServiceConfig, locale: ServiceLocale): string {
-  return locale === "es"
-    ? `/es/services/${service.slug.es}/`
-    : `/services/${service.slug.en}/`;
+  return locale === "es" ? `/es/services/${service.slug.es}/` : `/services/${service.slug.en}/`;
 }
 
 export function getServicesIndexPath(locale: ServiceLocale): string {

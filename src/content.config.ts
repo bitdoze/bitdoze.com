@@ -20,7 +20,7 @@ const postsCollection = defineCollection({
       lastmod: z.date().optional(),
       image: image(),
       imageAlt: z.string().optional(),
-      authors: z.array(z.string()).min(1).default(["admin"]),
+      authors: z.array(z.string()).min(1),
       categories: z
         .array(
           z.enum([
@@ -32,29 +32,31 @@ const postsCollection = defineCollection({
             "hosting",
             "tools",
             "gadgets",
-          ]),
+          ])
         )
         .length(1),
-      // Cap at 3 tags; normalize to lowercase kebab-case
+      // 1–3 tags; normalize to lowercase kebab-case with diacritics stripped,
+      // matching toTaxonomySlug() so frontmatter tags always match archive URLs
       tags: z
         .array(z.string())
-        .default(["others"])
+        .min(1)
         .transform((tags) => {
           const cleaned = tags
             .map((t) =>
               t
+                .normalize("NFKD")
+                .replace(/[\u0300-\u036f]/g, "")
                 .trim()
                 .toLowerCase()
                 .replace(/[^a-z0-9]+/g, "-")
-                .replace(/^-+|-+$/g, ""),
+                .replace(/^-+|-+$/g, "")
             )
             .filter(Boolean);
           return [...new Set(cleaned)].slice(0, 3);
         }),
       series: z.tuple([z.string(), z.string()]).optional(),
-      locale: z.enum(["en", "es"]).optional(),
       translationKey: z.string().optional(),
-      canonical: z.string().optional(),
+      canonical: z.url().optional(),
       draft: z.boolean().optional(),
     }),
 });
@@ -119,10 +121,10 @@ const aboutCollection = defineCollection({
         z.object({
           title: z.string(),
           description: z.string(),
-          icon: z.string().optional()
+          icon: z.string().optional(),
         })
-      )
-    })
+      ),
+    }),
   }),
 });
 
@@ -142,7 +144,6 @@ const newsCollection = defineCollection({
     draft: z.boolean().optional(),
   }),
 });
-
 
 // Export collections
 export const collections = {
