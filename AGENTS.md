@@ -4,7 +4,7 @@ Date: 06 October 2025
 
 ## Design Context
 
-Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web platform, audience, positioning, principles) and **DESIGN.md** (visual system: Terminal Blue palette, system-stack typography, lift-on-intent elevation, component specs). Quick summary:
+Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web platform, audience, positioning, principles) and **DESIGN.md** (visual system: Terminal Blue palette, Bricolage Grotesque headings + Source Sans 3 body + JetBrains Mono code, lift-on-intent elevation, component specs). Quick summary:
 
 - **Register/platform:** brand (content publication) on web. Astro 7 SSG blog, EN + ES.
 - **Audience:** developers & DevOps engineers arriving from search, mid-task.

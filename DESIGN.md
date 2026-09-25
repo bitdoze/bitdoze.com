@@ -26,34 +26,34 @@ colors:
   notice-danger: "#ef4444"
 typography:
   display:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "3.5rem"
     fontWeight: 700
     lineHeight: 1.1
     letterSpacing: "-0.02em"
   headline:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.5rem"
     fontWeight: 700
     lineHeight: 1.25
   title:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.25rem"
     fontWeight: 700
     lineHeight: 1.375
   body:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
-    fontSize: "1.125rem"
+    fontFamily: "'Source Sans 3 Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontSize: "1.125rem → 1.25rem (md) → 1.3125rem (2xl)"
     fontWeight: 400
-    lineHeight: 1.75
+    lineHeight: 1.7
   label:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Source Sans 3 Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "0.75rem"
     fontWeight: 500
     lineHeight: 1.5
   code:
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
-    fontSize: "0.875em"
+    fontFamily: "'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+    fontSize: "0.8125rem → 0.875rem (md) in blocks; 0.8em inline"
     fontWeight: 400
 rounded:
   sm: "4px"
@@ -126,7 +126,7 @@ Explicitly rejected (PRODUCT.md anti-references): the ad-cluttered tutorial farm
 - One blue voice; indigo only ever appears next to it, never alone.
 - Flat by default, lift on intent — shadows and scale answer state, not decoration.
 - The code block is the most respected element on the page.
-- No webfonts: the reader's OS renders the page. Speed is a feature.
+- Three self-hosted variable faces, latin subsets only: Bricolage Grotesque for headings, Source Sans 3 for reading, JetBrains Mono for code. Speed is still a feature: ~106 KB preloaded, mono only fetched where code appears.
 
 ## 2. Colors
 
@@ -162,24 +162,28 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 
 ## 3. Typography
 
-**Display Font:** system sans stack (ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif)
-**Body Font:** the same system sans stack — one family carries the whole site.
-**Label/Mono Font:** system mono stack (ui-monospace, SFMono-Regular, Menlo, Consolas, monospace) for code, commands, and technical labels.
+**Display Font:** Bricolage Grotesque Variable, optical-size build (`@fontsource-variable/bricolage-grotesque/opsz.css`, ~77 KB latin, preloaded). Applied to h1–h4 through `--font-display`; `font-optical-sizing: auto` tightens it at large sizes.
+**Body Font:** Source Sans 3 Variable (`@fontsource-variable/source-sans-3`, ~29 KB latin, preloaded) through `--font-sans`, for all body copy and UI.
+**Mono Font:** JetBrains Mono Variable (`@fontsource-variable/jetbrains-mono`, ~40 KB latin, not preloaded, only downloaded on pages that render code) through `--font-mono`. Ligatures are off so commands read exactly as typed.
 
-**Character:** deliberately invisible. The pairing is the reader's own OS typeface, so the page feels native and loads with zero font cost; personality comes from weight and spacing, not from a display face.
+**Character:** headings carry the brand voice through one slightly quirky grotesque; long reading sits on a calm humanist sans built for screens; code gets a face designed for telling 0/O and 1/l/I apart.
 
 ### Hierarchy
 
-- **Display** (700, 3rem → 3.5rem, line-height 1.1, letter-spacing -0.02em): hero headline only, one per page.
-- **Headline** (700, 1.5rem, line-height 1.25): article section headings (h2) and page titles.
+Article sizes are defined on `[data-post-body]` in `global.css`, not through prose-lg.
+
+- **Display** (700, 3rem → 3.5rem, line-height 1.1, letter-spacing -0.02em): homepage hero headline only.
+- **Post title (H1)** (700, `clamp(2rem, …, 3.125rem)` = 32px mobile → 50px, line-height 1.08, letter-spacing -0.02em).
+- **Section (H2)** (700, 24px → 32px, line-height 1.2, -0.02em), with a hairline divider above every H2 after the first.
+- **Subsection (H3)** (650, 20px → 23px, line-height 1.3). **H4** (650, 18px, line-height 1.35).
 - **Title** (700, 1.25rem, line-height 1.375): card titles, clipped to two lines.
-- **Body** (400, 1.125rem, line-height 1.75): article prose; line length held at 65–75ch via the prose measure.
+- **Body** (400, 18px mobile → 20px from md → 21px from 2xl, line-height 1.7). Source Sans 3 has a smaller x-height than OS system faces, so it runs about 1–2px larger for the same optical size. The measure is ~46 characters on phones and ~78 on desktop.
 - **Label** (500, 0.75rem, line-height 1.5): tag chips, dates, metadata.
-- **Code** (400, 0.875em of context): inline code and block commands; mono is a first-class citizen, not an afterthought.
+- **Code** (400, 13px mobile → 14px blocks; 0.8em inline chips at weight 450).
 
 ### Named Rules
 
-**The System Stack Rule.** No webfonts, ever. The reader's OS renders the page; the milliseconds saved are part of the brand promise of respecting the reader's time.
+**The Three Faces Rule.** Exactly three self-hosted variable faces, latin subset only (covers EN + ES): display, body, mono. Preload only the display and body latin files; never preload mono. No fourth webfont, no third-party font CDNs, no static weight files.
 
 **The Wash Link Rule.** Prose links are ink-colored with a translucent blue wash behind the baseline that grows on hover (34% → 54% of the line box). They are never the default browser blue underline.
 
@@ -236,7 +240,10 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 
 - **Prose:** `@tailwindcss/typography` at prose-lg with bold headings, wash-style links, images rounded at 8px.
 - **Tables:** scroll horizontally with a subtle edge shadow hinting more content; header row on Paper Subtle, zebra striping on Paper Muted.
-- **Code:** mono stack in blocks with generous padding; the most visually protected element on the page.
+- **Code:** mono stack in blocks with generous padding; the most visually protected element on the page. Every highlighted block gets a header bar (language label + always-visible Copy button) from the `codeBlockHeader` Shiki transformer in `src/utils/markdown-plugins.mjs`.
+- **Images:** an image alone in a paragraph shows its alt text as a centered muted caption (`imageCaptions` plugin) and opens in a native `<dialog>` lightbox on click or Enter.
+- **Sections:** each H2 after the first gets a hairline divider above it; H2/H3 show a `#` copy-link in the left gutter on hover (desktop only).
+- **Ending:** tags, then the author box with sharing inside it, then services promo, then related posts. No standalone share block.
 
 ## 6. Do's and Don'ts
 
@@ -255,6 +262,6 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 - **Don't** use the generic AI-blog aesthetic: no purple gradients beyond the single blue→indigo CTA gesture, no glassmorphism as decoration, no glow effects.
 - **Don't** drift into the corporate docs-portal look: no dry gray-on-gray pages stripped of the blue voice and the practitioner tone.
 - **Don't** become a Medium/Substack clone: Bitdoze has its own header, its own cards, its own typography rhythm — a reader should know where they are blindfolded.
-- **Don't** add webfonts; the system stack is the brand (The System Stack Rule).
+- **Don't** add webfonts beyond the three self-hosted faces, or preload the mono face (The Three Faces Rule).
 - **Don't** use Indigo Spark alone, on body text, or on large surfaces.
 - **Don't** add side stripes, gradient text, or ambient animation beyond the documented lift-on-intent.

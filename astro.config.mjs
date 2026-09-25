@@ -3,7 +3,9 @@ import { EventEmitter } from "node:events";
 import { defineConfig } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
+import { satteri } from "@astrojs/markdown-satteri";
 import icon from "astro-icon";
+import { codeBlockHeader, imageCaptions } from "./src/utils/markdown-plugins.mjs";
 // Sitemap handled by custom sitemap-en.xml.ts and sitemap-es.xml.ts
 import path from "path";
 
@@ -64,6 +66,14 @@ export default defineConfig({
   },
   // Base path (set to '/' for most sites)
   base: "/",
+
+  // MDX extends this config, so posts get the same code headers and image captions.
+  markdown: {
+    processor: satteri({ hastPlugins: [imageCaptions] }),
+    shikiConfig: {
+      transformers: [codeBlockHeader()],
+    },
+  },
 
   // Enable experimental SVG components
 
