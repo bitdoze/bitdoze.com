@@ -26,23 +26,23 @@ colors:
   notice-danger: "#ef4444"
 typography:
   display:
-    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "3.5rem"
     fontWeight: 700
     lineHeight: 1.1
     letterSpacing: "-0.02em"
   headline:
-    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.5rem"
     fontWeight: 700
     lineHeight: 1.25
   title:
-    fontFamily: "'Bricolage Grotesque Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.25rem"
     fontWeight: 700
     lineHeight: 1.375
   body:
-    fontFamily: "'Source Sans 3 Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "'Aleo Variable', ui-serif, Georgia, serif"
     fontSize: "1.125rem → 1.25rem (md) → 1.3125rem (2xl)"
     fontWeight: 400
     lineHeight: 1.7
@@ -126,7 +126,7 @@ Explicitly rejected (PRODUCT.md anti-references): the ad-cluttered tutorial farm
 - One blue voice; indigo only ever appears next to it, never alone.
 - Flat by default, lift on intent — shadows and scale answer state, not decoration.
 - The code block is the most respected element on the page.
-- Three self-hosted variable faces, latin subsets only: Bricolage Grotesque for headings, Source Sans 3 for reading, JetBrains Mono for code. Speed is still a feature: ~106 KB preloaded, mono only fetched where code appears.
+- Four self-hosted variable faces, latin subsets only: Chivo for headings, Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Speed is still a feature: fonts are preloaded, mono only fetched where code appears.
 
 ## 2. Colors
 
@@ -162,11 +162,11 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 
 ## 3. Typography
 
-**Display Font:** Bricolage Grotesque Variable, optical-size build (`@fontsource-variable/bricolage-grotesque/opsz.css`, ~77 KB latin, preloaded). Applied to h1–h4 through `--font-display`; `font-optical-sizing: auto` tightens it at large sizes.
-**Body Font:** Source Sans 3 Variable (`@fontsource-variable/source-sans-3`, ~29 KB latin, preloaded) through `--font-sans`, for all body copy and UI.
+**Display Font:** Chivo Variable (`@fontsource-variable/chivo`, preloaded). Applied to h1–h4 through `--font-display`.
+**Body Font:** Aleo Variable (`@fontsource-variable/aleo`, normal + italic, preloaded) through `--font-serif`, applied to `.prose` article body. UI chrome (nav, cards, meta) stays on Source Sans 3 Variable through `--font-sans`.
 **Mono Font:** JetBrains Mono Variable (`@fontsource-variable/jetbrains-mono`, ~40 KB latin, not preloaded, only downloaded on pages that render code) through `--font-mono`. Ligatures are off so commands read exactly as typed.
 
-**Character:** headings carry the brand voice through one slightly quirky grotesque; long reading sits on a calm humanist sans built for screens; code gets a face designed for telling 0/O and 1/l/I apart.
+**Character:** headings carry the brand voice through a sharp editorial grotesque (Chivo, in the Smashing Magazine register); long reading sits on a warm slab serif (Aleo); code gets a face designed for telling 0/O and 1/l/I apart.
 
 ### Hierarchy
 

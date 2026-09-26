@@ -55,12 +55,11 @@ export default defineConfig({
   fonts: [
     {
       provider: fontProviders.fontsource(),
-      name: "Bricolage Grotesque",
+      name: "Chivo",
       cssVariable: "--font-stack-display",
-      weights: ["200 800"],
+      weights: ["100 900"],
       styles: ["normal"],
       subsets: ["latin"],
-      variationSettings: "'opsz' 14 96",
       fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
     },
     {
@@ -71,6 +70,15 @@ export default defineConfig({
       styles: ["normal"],
       subsets: ["latin"],
       fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
+    },
+    {
+      provider: fontProviders.fontsource(),
+      name: "Aleo",
+      cssVariable: "--font-stack-serif",
+      weights: ["100 900"],
+      styles: ["normal", "italic"],
+      subsets: ["latin"],
+      fallbacks: ["ui-serif", "Georgia", "serif"],
     },
     {
       provider: fontProviders.fontsource(),
