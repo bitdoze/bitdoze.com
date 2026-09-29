@@ -76,11 +76,11 @@ Each point maps to an article below. Answer these directly and honestly; that is
   - _Internal links:_ best-headless-cms-for-astro, astro-vs-wordpress, self-hosted-apps-cloudflare-workers.
   - _YouTube:_ "I Tested Cloudflare's WordPress Killer for 6 Months" (12–15 min). Admin walkthrough, editing and publishing, plugin permission prompt, MCP demo teaser. Thumbnail: "WordPress Killer?"
 
-- [ ] **2. `emdash-cms-tutorial`**: "EmDash CMS Tutorial: Create Your First Site Step by Step"
+- [x] **2. `emdash-cms-tutorial`**: "EmDash CMS Tutorial: Create Your First Site Step by Step"
   - _Target:_ emdash cms tutorial, emdash install, emdash cms demo.
   - _Why:_ The getting-started docs are good but short. A beginner tutorial with screenshots ranks well and feeds the video.
   - _Cover:_ Node 22.16+ check, `bun create emdash@latest` (show npm too), scaffolder choices, `/_emdash/admin` setup wizard, passkey registration, a tour of Posts/Pages/Media/Menus/Widgets, publish an edit, how `astro.config.mjs` / `src/live.config.ts` / `seed/seed.json` / `.env` (`EMDASH_ENCRYPTION_KEY`) fit together, and the first `getEmDashCollection("posts")` query. End with "next: deploy" (#3 / #4).
-  - _Frontmatter:_ `series: ["EmDash CMS", "2"]`, tags `emdash`, `astro`, `bun`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "2"]`, tags `emdash`, `astro`, `npm`.
   - _YouTube:_ "EmDash CMS Tutorial for Beginners (Zero to Published in 10 Minutes)". Screen-record the whole flow in real time. Thumbnail: "EmDash in 10 Min".
 
 - [ ] **3. `deploy-emdash-cloudflare-workers`**: "Deploy EmDash CMS to Cloudflare Workers (D1 + R2, Free Tier)"
