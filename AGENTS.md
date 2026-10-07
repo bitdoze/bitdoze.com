@@ -165,11 +165,11 @@ Individual digest pages are intentionally `noindex` (set in `NewsLayout.astro`) 
 
 Video courses are driven entirely by **`src/data/courses.json`** — no content collection. To add a video, append to a course's `lessons`; to add a course, append a course object. Routes appear on the next build.
 
-- **Schema**: `slug` (kebab-case, unique), `title`, `description`, optional `badge`/`level`/`playlist` (YouTube playlist URL); each lesson: `title`, `video` (any YouTube watch/share URL — the ID is extracted), optional `slug` (else slugified title), `description`, `duration` (`"12:34"`).
+- **Schema**: `slug` (kebab-case, unique), `title`, `description`, optional `badge`/`level`/`playlist` (YouTube playlist URL), `relatedPosts` (post slugs — linked from the overview's "Matching written guides"); each lesson: `title`, `video` (any YouTube watch/share URL — the ID is extracted), optional `slug` (else slugified title), `description`, `duration` (`"12:34"`), `relatedPosts` (post slugs — "Written guide(s)" links under the player). Unknown slugs throw at build (`resolveRelatedPosts`).
 - **Routes**: `/courses/` (hub) → `/courses/<slug>/` (overview + curriculum) → `/courses/<slug>/<lesson>/` (player: chapter sidebar on desktop, slide-over drawer + Prev/Next on mobile).
-- **Helpers**: `src/utils/courses.ts` (`getCourses`, `courseHref`, `lessonHref`, `getLessonNav`) validates at build time — duplicate slugs or unparseable video URLs throw.
+- **Helpers**: `src/utils/courses.ts` (`getCourses`, `courseHref`, `lessonHref`, `getLessonNav`, `lessonOgImage`, `resolveRelatedPosts`) validates at build time — duplicate slugs or unparseable video URLs throw.
 - **Progress**: `src/utils/course-progress.ts` + `data-*` hooks mark visited lessons in localStorage (checkmarks in the chapter list / "Watched" chips on the overview).
-- Menu/footer entries use `locales: ["en"]` (no ES routes yet — Header + Footer both honor that filter). Lessons are in `sitemap-en.xml` and `video-sitemap.xml`; each player page gets a `VideoObject` via `YouTubeEmbed`.
+- Menu/footer entries use `locales: ["en"]` (no ES routes yet — Header + Footer both honor that filter). Lessons are in `sitemap-en.xml` and `video-sitemap.xml`; each player page gets a `VideoObject` via `YouTubeEmbed`, the overview a `Course` schema (`hasPart` LearningResources), the hub an `ItemList` of `Course` items. og:image is the lesson's `maxresdefault` (1280×720).
 
 ## SVG Creation Guidelines
 

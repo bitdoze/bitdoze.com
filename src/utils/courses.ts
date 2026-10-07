@@ -1,4 +1,5 @@
 import coursesData from "../data/courses.json";
+import { getEntryHref, getEntrySlug } from "@utils/content";
 import { toTaxonomySlug } from "@utils/slugs";
 import { extractYoutubeVideoId } from "@utils/youtube";
 
@@ -18,6 +19,8 @@ export interface CourseLesson {
   description?: string;
   /** e.g. "12:34" — shown in the chapter list when present. */
   duration?: string;
+  /** Post slugs of matching written guides — linked from the lesson page. */
+  relatedPosts?: string[];
 }
 
 export interface Course {
@@ -30,6 +33,8 @@ export interface Course {
   level?: string;
   /** Link to the full YouTube playlist, shown as a fallback link. */
   playlist?: string;
+  /** Post slugs of matching written guides — linked from the overview page. */
+  relatedPosts?: string[];
   lessons: CourseLesson[];
 }
 
@@ -49,6 +54,56 @@ export const lessonThumbnail = (lesson: CourseLesson): string => {
   const id = lessonVideoId(lesson);
   return id ? `https://i.ytimg.com/vi/${id}/mqdefault.jpg` : "/images/youtube-placeholder.jpg";
 };
+
+/** Full-res 1280×720 thumbnail for og:image / social cards. */
+export const lessonOgImage = (lesson: CourseLesson): string => {
+  const id = lessonVideoId(lesson);
+  return id
+    ? `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`
+    : "/images/youtube-placeholder.jpg";
+};
+
+type CoursePostEntry = {
+  slug?: string;
+  id?: string;
+  data?: {
+    title?: string;
+    description?: string;
+    canonical?: string;
+  };
+};
+
+export interface RelatedPost {
+  href: string;
+  title: string;
+  description?: string;
+}
+
+/**
+ * Resolve post slugs from courses.json against the posts collection.
+ * Throws on typos — same fail-loud contract as the self-hosted journey map.
+ */
+export function resolveRelatedPosts(
+  posts: CoursePostEntry[],
+  slugs: string[] | undefined,
+  context: string
+): RelatedPost[] {
+  if (!slugs?.length) return [];
+  const bySlug = new Map<string, CoursePostEntry>(
+    posts.map((post) => [getEntrySlug(post), post])
+  );
+  return slugs.map((slug) => {
+    const post = bySlug.get(slug);
+    if (!post) {
+      throw new Error(`courses: no post found for related slug "${slug}" (${context})`);
+    }
+    return {
+      href: getEntryHref(post),
+      title: post.data?.title ?? slug,
+      description: post.data?.description,
+    };
+  });
+}
 
 export function getCourses(): Course[] {
   return coursesData.courses as Course[];
