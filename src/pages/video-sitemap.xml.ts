@@ -3,6 +3,7 @@ import { siteConfig } from "@config/site";
 import { getEntryHref } from "@utils/content";
 import { extractYoutubeVideoId, getYoutubeThumbnailSync } from "@utils/youtube";
 import { getAllPublishedPosts } from "@utils/postsCache";
+import { getCourses, lessonHref, lessonVideoId } from "@utils/courses";
 
 type VideoEntry = {
   title: string;
@@ -84,9 +85,29 @@ export async function GET(context: APIContext) {
     })
     .filter(Boolean) as Array<{ loc: string; videos: VideoEntry[] }>;
 
+  // Course lesson pages each embed exactly one video — list them all.
+  const courseEntries = getCourses().flatMap((course) =>
+    course.lessons
+      .map((lesson) => {
+        const videoId = lessonVideoId(lesson);
+        if (!videoId) return null;
+        const video: VideoEntry = {
+          title: lesson.title,
+          description: lesson.description || course.description,
+          thumbnail: getYoutubeThumbnailSync(lesson.video),
+          playerUrl: `https://www.youtube.com/embed/${videoId}`,
+        };
+        return {
+          loc: buildAbsoluteUrl(lessonHref(course, lesson), site),
+          videos: [video],
+        };
+      })
+      .filter(isDefined)
+  );
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:video="http://www.google.com/schemas/sitemap-video/1.1">
-${urlEntries
+${[...urlEntries, ...courseEntries]
   .map(({ loc, videos }) => {
     const videoXml = videos
       .map((video) => {

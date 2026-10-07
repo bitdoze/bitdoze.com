@@ -30,6 +30,7 @@ export const translations = {
     authors: "Authors",
     about: "About",
     resources: "Resources",
+    courses: "Courses",
     contact: "Contact",
     services: "Services",
     advertise: "Advertise",
@@ -231,6 +232,7 @@ export const translations = {
     authors: "Autores",
     about: "Acerca de",
     resources: "Recursos",
+    courses: "Cursos",
     contact: "Contacto",
     services: "Servicios",
     advertise: "Publicidad",
@@ -416,6 +418,7 @@ export type TranslationKey = keyof typeof translations.en;
 export const menuLabelKeys: Record<string, TranslationKey> = {
   Home: "home",
   Resources: "resources",
+  Courses: "courses",
   About: "about",
   Series: "series",
   News: "news",

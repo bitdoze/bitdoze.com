@@ -161,6 +161,16 @@ Trailing italic `*Also tracked:...*` / `*Also hot:...*` lines after a section ar
 
 Individual digest pages are intentionally `noindex` (set in `NewsLayout.astro`) and excluded from the sitemap — only the `/news/` hub is indexed. Digest distribution is RSS (`/news/rss.xml`) and social. Do not remove the noindex.
 
+## Video Courses (/courses/, EN only)
+
+Video courses are driven entirely by **`src/data/courses.json`** — no content collection. To add a video, append to a course's `lessons`; to add a course, append a course object. Routes appear on the next build.
+
+- **Schema**: `slug` (kebab-case, unique), `title`, `description`, optional `badge`/`level`/`playlist` (YouTube playlist URL); each lesson: `title`, `video` (any YouTube watch/share URL — the ID is extracted), optional `slug` (else slugified title), `description`, `duration` (`"12:34"`).
+- **Routes**: `/courses/` (hub) → `/courses/<slug>/` (overview + curriculum) → `/courses/<slug>/<lesson>/` (player: chapter sidebar on desktop, slide-over drawer + Prev/Next on mobile).
+- **Helpers**: `src/utils/courses.ts` (`getCourses`, `courseHref`, `lessonHref`, `getLessonNav`) validates at build time — duplicate slugs or unparseable video URLs throw.
+- **Progress**: `src/utils/course-progress.ts` + `data-*` hooks mark visited lessons in localStorage (checkmarks in the chapter list / "Watched" chips on the overview).
+- Menu/footer entries use `locales: ["en"]` (no ES routes yet — Header + Footer both honor that filter). Lessons are in `sitemap-en.xml` and `video-sitemap.xml`; each player page gets a `VideoObject` via `YouTubeEmbed`.
+
 ## SVG Creation Guidelines
 
 Covers follow DESIGN.md's Terminal Blue palette — flat, editorial, one accent color. No glassmorphism, no glow blobs, no off-palette gradients (that is the generic AI-blog look PRODUCT.md rules out). All article SVG covers must follow these guidelines:

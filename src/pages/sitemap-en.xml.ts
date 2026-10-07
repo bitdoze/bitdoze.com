@@ -5,6 +5,7 @@ import { getEntryHref } from "@utils/content";
 
 import { toTaxonomySlug, getUniqueTaxonomyValues } from "@utils/slugs";
 import { getPostsByLocale } from "@utils/postsCache";
+import { courseHref, getCourses, lessonHref } from "@utils/courses";
 
 const escapeXml = (value: string): string =>
   value
@@ -36,8 +37,15 @@ export async function GET(context: APIContext) {
     "/privacy/",
     "/terms/",
     "/news/",
+    "/courses/",
   ];
   const services = getServices("en").map((service) => `/services/${service.slug.en}/`);
+
+  // Course hub + overview + every lesson page (all indexable EN routes)
+  const coursePages = getCourses().flatMap((course) => [
+    courseHref(course),
+    ...course.lessons.map((lesson) => lessonHref(course, lesson)),
+  ]);
 
   // Collect archive pages. Tag pages are excluded: they are noindex
   // (siteConfig.noindex.tags) and noindexed URLs must not sit in the sitemap.
@@ -53,7 +61,7 @@ export async function GET(context: APIContext) {
     return urlEntry(href, lastmod ? lastmod.toISOString().split("T")[0] : undefined);
   });
 
-  const allUrls = [...staticPages, ...services, ...categoryPages, ...authorPages].map((path) =>
+  const allUrls = [...staticPages, ...services, ...coursePages, ...categoryPages, ...authorPages].map((path) =>
     urlEntry(new URL(path, site).toString())
   );
   // Daily news digests stay out of the index (noindex + not listed); only the /news/ hub is indexed
