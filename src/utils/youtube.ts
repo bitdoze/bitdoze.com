@@ -2,6 +2,7 @@
  * YouTube Embed Utilities
  * Lightweight helpers for extracting video IDs and thumbnails
  */
+import youtubeMetaJson from "../data/youtube-meta.json";
 
 const PLACEHOLDER_THUMBNAIL = "/images/youtube-placeholder.jpg";
 const YOUTUBE_EMBED_BASE = "https://www.youtube.com/embed/";
@@ -93,4 +94,36 @@ export function getYoutubeThumbnailSync(rawUrl: string): string {
   const id = extractYoutubeVideoId(rawUrl);
   if (!id) return PLACEHOLDER_THUMBNAIL;
   return `${YOUTUBE_THUMB_BASE}${id}/${DEFAULT_THUMBNAIL}`;
+}
+
+// ---------------------------------------------------------------------------
+// Video metadata (real uploadDate / duration) for VideoObject JSON-LD.
+//
+// Google requires `uploadDate` on VideoObject. Real YouTube publish dates live
+// in src/data/youtube-meta.json — populated by scripts/import-youtube-csv.mjs
+// from a YouTube Studio export (or scripts/fetch-youtube-meta.mjs for
+// third-party videos). It's a static import so it participates in the module
+// graph and incremental builds re-render when it changes. Missing entries
+// fall back to the enclosing post's publish date.
+// ---------------------------------------------------------------------------
+
+export interface YoutubeMeta {
+  /** ISO-8601 date the video was published on YouTube, e.g. "2026-08-19" */
+  uploadDate?: string;
+  /** ISO-8601 duration, e.g. "PT12M34S" */
+  duration?: string;
+}
+
+const metaById = youtubeMetaJson as Record<string, YoutubeMeta>;
+
+/**
+ * Look up the real YouTube upload date + duration for a video (watch URL,
+ * embed URL, or bare 11-char ID) from src/data/youtube-meta.json.
+ * Returns {} for unlisted videos — never throws.
+ */
+export function getYoutubeMeta(videoIdOrUrl: string): YoutubeMeta {
+  const id = VALID_ID_PATTERN.test(videoIdOrUrl)
+    ? videoIdOrUrl
+    : extractYoutubeVideoId(videoIdOrUrl);
+  return id ? (metaById[id] ?? {}) : {};
 }

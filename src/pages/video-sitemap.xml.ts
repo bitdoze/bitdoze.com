@@ -1,7 +1,7 @@
 import type { APIContext } from "astro";
 import { siteConfig } from "@config/site";
 import { getEntryHref } from "@utils/content";
-import { extractYoutubeVideoId, getYoutubeThumbnailSync } from "@utils/youtube";
+import { extractYoutubeVideoId, getYoutubeMeta, getYoutubeThumbnailSync } from "@utils/youtube";
 import { getAllPublishedPosts } from "@utils/postsCache";
 import { getCourses, lessonHref, lessonVideoId } from "@utils/courses";
 
@@ -91,11 +91,13 @@ export async function GET(context: APIContext) {
       .map((lesson) => {
         const videoId = lessonVideoId(lesson);
         if (!videoId) return null;
+        const uploadDate = lesson.date ?? getYoutubeMeta(videoId).uploadDate;
         const video: VideoEntry = {
           title: lesson.title,
           description: lesson.description || course.description,
           thumbnail: getYoutubeThumbnailSync(lesson.video),
           playerUrl: `https://www.youtube.com/embed/${videoId}`,
+          publicationDate: uploadDate ? new Date(uploadDate).toISOString() : undefined,
         };
         return {
           loc: buildAbsoluteUrl(lessonHref(course, lesson), site),

@@ -19,6 +19,11 @@ export interface CourseLesson {
   description?: string;
   /** e.g. "12:34" — shown in the chapter list when present. */
   duration?: string;
+  /**
+   * Video publish date (YYYY-MM-DD) — used as the VideoObject uploadDate.
+   * Lessons have no post to inherit a date from, so set this.
+   */
+  date?: string;
   /** Post slugs of matching written guides — linked from the lesson page. */
   relatedPosts?: string[];
 }
