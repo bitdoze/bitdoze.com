@@ -1,11 +1,12 @@
 import type { APIContext } from "astro";
 import { getServices } from "@config/services";
 import { siteConfig } from "@config/site";
-import { getEntryHref } from "@utils/content";
+import { getEntryHref, getEntrySlug } from "@utils/content";
 
 import { toTaxonomySlug, getUniqueTaxonomyValues } from "@utils/slugs";
 import { getPostsByLocale } from "@utils/postsCache";
 import { courseHref, getCourses, lessonHref } from "@utils/courses";
+import { getLatestDigests } from "@utils/news";
 
 const escapeXml = (value: string): string =>
   value
@@ -61,11 +62,17 @@ export async function GET(context: APIContext) {
     return urlEntry(href, lastmod ? lastmod.toISOString().split("T")[0] : undefined);
   });
 
+  // Daily news digests are index,follow — a rolling window of the newest few,
+  // so only those URLs go in the sitemap
+  const newsEntries = (await getLatestDigests()).map((digest) => {
+    const href = new URL(`/news/${getEntrySlug(digest)}/`, site).toString();
+    return urlEntry(href, digest.data.date?.toISOString().split("T")[0]);
+  });
+
   const allUrls = [...staticPages, ...services, ...coursePages, ...categoryPages, ...authorPages].map((path) =>
     urlEntry(new URL(path, site).toString())
   );
-  // Daily news digests stay out of the index (noindex + not listed); only the /news/ hub is indexed
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${[...allUrls, ...postEntries].join("\n")}</urlset>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${[...allUrls, ...postEntries, ...newsEntries].join("\n")}</urlset>`;
 
   return new Response(xml, {
     headers: { "Content-Type": "application/xml; charset=utf-8" },

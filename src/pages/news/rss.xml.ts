@@ -1,15 +1,11 @@
 import rss from "@astrojs/rss";
 import type { APIContext } from "astro";
-import { getCollection } from "astro:content";
 import { siteConfig } from "@config/site";
 import { getEntrySlug } from "@utils/content";
+import { getLatestDigests } from "@utils/news";
 
 export async function GET(context: APIContext) {
-  const digests = (await getCollection("news", ({ data }) => !data.draft)).sort((a, b) => {
-    const dateA = a.data.date instanceof Date ? a.data.date.getTime() : 0;
-    const dateB = b.data.date instanceof Date ? b.data.date.getTime() : 0;
-    return dateB - dateA;
-  });
+  const digests = await getLatestDigests();
 
   return rss({
     title: `${siteConfig.name} - AI & Tech News`,

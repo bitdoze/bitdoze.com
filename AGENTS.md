@@ -112,6 +112,7 @@ Daily AI & tech news digests live in the `news` content collection. An external 
 ### File rules
 
 - One file per day: `src/content/news/YYYY-MM-DD.mdx` (e.g. `2026-08-20.mdx`) → published at `/news/YYYY-MM-DD/`.
+- **Rolling window of 10**: the site keeps only the newest 10 digests — when adding a new file, delete the oldest so `src/content/news/` holds at most 10 files. All surfaces (hub, digest pages, RSS, sitemap) are capped by `NEWS_DIGEST_LIMIT` in `src/utils/news.ts`; expired URLs 404 by design.
 - English only. Never edit past digests except factual corrections.
 - **No images** — no cover image, no inline images. Ever.
 - Frontmatter (schema-enforced, see `newsCollection` in `src/content.config.ts`):
@@ -159,7 +160,7 @@ Trailing italic `*Also tracked:...*` / `*Also hot:...*` lines after a section ar
 
 ### SEO policy
 
-Individual digest pages are intentionally `noindex` (set in `NewsLayout.astro`) and excluded from the sitemap — only the `/news/` hub is indexed. Digest distribution is RSS (`/news/rss.xml`) and social. Do not remove the noindex.
+Digest pages are `index, follow` and listed in `sitemap-en.xml` — the rolling 10-digest window keeps the indexable surface bounded. Digest distribution is RSS (`/news/rss.xml`) and social. Do not add noindex back.
 
 ## Video Courses (/courses/, EN only)
 
