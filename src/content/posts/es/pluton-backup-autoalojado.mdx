@@ -1,0 +1,185 @@
+---
+date: 2026-08-21T00:00:00Z
+translationKey: "pluton-self-hosted-backup"
+title: "Pluton: copias de seguridad autoalojadas con Restic y Rclone"
+description: "Análisis práctico de Pluton: una plataforma de copias de seguridad autoalojada que integra Restic y Rclone."
+image: "@assets/images/26/08/pluton-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["backup", "restic", "rclone"]
+canonical: "https://www.bitdoze.com/es/pluton-backup-autoalojado/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Pluton es una plataforma de copias de seguridad de código abierto que autoalojas, y es la que ejecuta las copias en mi propio servidor. Bajo el capó, dos herramientas conocidas hacen el trabajo: [Restic](https://restic.net/) gestiona las instantáneas cifradas y deduplicadas, y [Rclone](https://rclone.org/) lo conecta con más de 80 proveedores de almacenamiento. Pluton envuelve ambas en una interfaz web donde defines planes, programaciones, retención y replicación sin tocar una terminal.
+
+Lo tengo desplegado en mi servidor haciendo copias de mis stacks de Docker, carpetas de proyectos y volúmenes de Docker. Abajo van las notas de instalación, además de una comparación con [Zerobyte](https://www.bitdoze.com/zerobyte-restic-gui/), otra interfaz para Restic sobre la que escribí a principios de este año.
+
+## ¿Qué es Pluton?
+
+[Pluton](https://github.com/plutonhq/pluton) es una aplicación TypeScript (con licencia Apache-2.0) que convierte Restic y Rclone en un servicio de copias de seguridad gestionado. El reparto de responsabilidades queda así:
+
+| Capa | Responsabilidad | Qué obtienes |
+| --- | --- | --- |
+| Restic | Instantáneas, cifrado, deduplicación, compresión | Copias incrementales rápidas cifradas en el cliente |
+| Rclone | Conectividad de almacenamiento | S3, B2, Google Drive, OneDrive, SFTP, pCloud y más de 80 |
+| Pluton | Interfaz web, programación, retención, replicación, agentes | Un plano de control para todo ello |
+
+El proyecto es joven. Apareció en noviembre de 2025 y va por la v0.18.3 en agosto de 2026, pero el desarrollo es activo y la lista de funciones ya cubre la mayor parte de lo que la gente remienda con tareas cron y scripts de shell.
+
+### Funciones principales
+
+<ListCheck>
+- Planes de copia con programaciones flexibles, incluidas expresiones cron
+- Políticas de retención que conservan instantáneas diarias, semanales, mensuales y anuales
+- Replicación integrada: refleja cada copia en hasta dos destinos adicionales
+- Pluton Agent para respaldar máquinas remotas en una consola central
+- Seguimiento del progreso en tiempo real y registros detallados por tarea
+- Notificaciones por correo electrónico, Slack, Discord y NTFY
+- Reintentos automáticos para tareas fallidas
+- Scripts previos y posteriores para volcados de bases de datos o tareas de limpieza
+- Exploración de instantáneas como en un gestor de archivos, con restauraciones completas o parciales
+- Descarga de cualquier instantánea como archivo TAR directamente desde la interfaz
+- Autenticación de dos factores para el panel
+</ListCheck>
+
+<Notice type="info" title="Ligero en recursos">
+Pluton consume unos 50 MB de RAM en reposo, así que funciona sin problema en una Raspberry Pi o un VPS pequeño junto a tus otros contenedores.
+</Notice>
+
+## Pluton vs Zerobyte
+
+Ambas herramientas envuelven Restic, así que el formato de instantáneas, el cifrado y la deduplicación son idénticos. La diferencia está en el alcance. [Zerobyte](https://www.bitdoze.com/zerobyte-restic-gui/) es un panel ligero para respaldar un solo servidor. Pluton aspira a ser una pequeña plataforma de copias de seguridad.
+
+| | Pluton | Zerobyte |
+| --- | --- | --- |
+| Motor de copias | Restic | Restic |
+| Destinos en la nube | Más de 80 proveedores gracias a la integración de Rclone | Local, S3, GCS, Azure o remotos de rclone mediante configuración montada |
+| Replicación | Hasta 2 destinos espejo por plan | Un repositorio por tarea |
+| Máquinas remotas | Pluton Agent informa a la consola central | Un solo nodo |
+| Fuentes de red | A través de dispositivos con agente | Montajes NFS, SMB y WebDAV mediante FUSE |
+| Scripts | Hooks antes y después de cada tarea | No incluidos |
+| Autenticación | Usuarios, sesiones, 2FA | Un solo usuario |
+| Puerto del panel | 5173 | 4096 |
+| Privilegios | Ninguno más allá de tus montajes de volúmenes | SYS_ADMIN + dispositivo FUSE si montas recursos compartidos |
+| Madurez | v0.18.x, primera versión en nov. 2025 | serie 0.x |
+
+Mi valoración tras usar ambos: elige **Zerobyte** si respaldas un solo servidor y quieres la configuración más sencilla posible, sobre todo cuando tus fuentes están en recursos NFS o SMB. Elige **Pluton** si quieres replicación integrada para copias 3-2-1 de verdad, o tienes más de una máquina que proteger. La función de replicación por sí sola me decanta la balanza: cada plan puede enviar sus instantáneas a dos destinos adicionales automáticamente, que es exactamente lo que pide la regla 3-2-1.
+
+## Instalar Pluton con Docker Compose
+
+Este es el archivo compose de mi servidor. Se une a la red de Caddy en lugar de publicar puertos, y monta todo lo que quiero respaldar como solo lectura:
+
+```yaml
+services:
+  pluton:
+    image: plutonhq/pluton:latest
+    container_name: pluton
+    restart: unless-stopped
+    volumes:
+      - pluton-data:/data
+      - /home/user/docker-apps:/mnt/docker-apps:ro
+      - /home/user/projects:/mnt/projects:ro
+      - /var/lib/docker/volumes:/mnt/docker-volumes:ro
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      USER_NAME: ${USER_NAME}
+      USER_PASSWORD: ${USER_PASSWORD}
+      APP_TITLE: ${APP_TITLE:-Pluton}
+      APP_URL: ${APP_URL:-http://localhost:5173}
+      SERVER_PORT: ${SERVER_PORT:-5173}
+      NODE_ENV: production
+      IS_DOCKER: "true"
+    networks:
+      - web
+    expose:
+      - "5173"
+
+volumes:
+  pluton-data:
+
+networks:
+  web:
+    external: true
+```
+
+El archivo `.env` necesita tres valores obligatorios:
+
+```env
+ENCRYPTION_KEY=generate-a-long-random-string
+USER_NAME=admin
+USER_PASSWORD=use-a-real-password
+```
+
+Genera la clave con `openssl rand -base64 32`. `ENCRYPTION_KEY` protege tus instantáneas de restic y las configuraciones de rclone, así que guárdala en un lugar seguro. Si la pierdes, las copias de seguridad son decoración.
+
+Algunos detalles que conviene conocer:
+
+- Los montajes de origen pueden ser de solo lectura (`:ro`). Un destino de copia debe permitir escritura, así que nunca añadas `:ro` a la ruta de un repositorio local.
+- `APP_URL` debe coincidir con la forma en que accedes a la interfaz, especialmente detrás de un proxy inverso.
+- Si prefieres exponer el puerto directamente, sustituye `expose` por `ports: ["5173:5173"]`.
+
+Luego arráncalo:
+
+```bash
+docker compose up -d
+```
+
+### Proxy inverso con Caddy
+
+Como el contenedor está en la red compartida `web`, basta un bloque de Caddy:
+
+```caddy
+backup.example.com {
+    reverse_proxy pluton:5173
+}
+```
+
+Una peculiaridad que noté tras el proxy: los registros se llenan de avisos `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` porque la aplicación no configura el ajuste trust-proxy de Express. Las copias funcionan bien; es ruido en los registros, no un fallo. Si expones Pluton directamente sin proxy, los avisos no aparecen.
+
+## Crea tu primer plan de copias de seguridad
+
+El flujo de trabajo son tres pasos: destino, plan y programación.
+
+1. **Añade un destino de almacenamiento.** Para almacenamiento local, apunta Pluton a una ruta del contenedor con permisos de escritura como `/mnt/backups`. Para almacenamiento en la nube, elige un proveedor de la lista basada en Rclone e introduce las credenciales en la interfaz. Sin archivos de configuración que editar.
+2. **Crea un plan de copias.** Elige las rutas de origen, el destino, la programación y una política de retención (conserva N instantáneas diarias, semanales, mensuales y anuales). La compresión y el cifrado AES-256 llegan automáticamente de la mano de Restic.
+3. **Añade replicación (opcional).** Adjunta hasta dos destinos adicionales para que cada ejecución quede reflejada. Es el atajo hacia la regla 3-2-1.
+
+Ejecuta el plan una vez manualmente y observa la vista de progreso en tiempo real. Revisa la pestaña de registros si algo parece ir mal y luego deja que el programador tome el relevo. Antes de confiar en él, configura las notificaciones en los ajustes para que las tareas fallidas te lleguen por Discord, Slack, NTFY o correo electrónico. Un sistema de copias sin notificaciones falla en silencio, y los fallos silenciosos son la forma de enterarte en medio de un desastre.
+
+## Restaurar y descargar
+
+Las restauraciones son donde la mayoría de las interfaces de copia se desmoronan, así que lo probé pronto. Abre un plan, explora una instantánea como en un gestor de archivos normal y luego restaura los archivos seleccionados o la instantánea completa en la ubicación original o en una ruta personalizada. También puedes descargar toda la instantánea como un archivo TAR, muy práctico para llevarte una copia al portátil sin tocar la línea de comandos.
+
+## Notas de mi configuración
+
+Como referencia, mi instancia respalda tres montajes de solo lectura: las configuraciones de mis aplicaciones Docker, mis carpetas de proyectos y `/var/lib/docker/volumes` para las bases de datos y los contenedores con estado. Las instantáneas van a un disco local, con replicación a almacenamiento en la nube para la copia externa. Todo el conjunto sustituyó una pila de comandos restic lanzados por cron que funcionaban pero no ofrecían visibilidad.
+
+Dos hábitos que conviene mantener con cualquier herramienta:
+
+- Prueba una restauración con archivos reales, no en tu cabeza. Hazlo después de la primera semana y luego cada mes.
+- Guarda la `ENCRYPTION_KEY` y una copia del directorio de datos de Pluton fuera de la máquina donde vive.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Pluton sustituye a Restic?" group="faq" expanded="true">
+No, lo que hace es dirigir Restic. Tus repositorios siguen siendo repositorios restic estándar, así que puedes restaurar desde la línea de comandos si Pluton desaparece mañana. Eso también significa que no hay dependencia del proveedor.
+</Accordion>
+
+<Accordion label="¿Puede Pluton respaldar volúmenes de Docker?" group="faq">
+Sí. Monta `/var/lib/docker/volumes` en el contenedor como solo lectura y añádelo como ruta de origen. Para bases de datos, usa un script previo que vuelque los datos primero, para no copiar archivos vivos mientras se escriben.
+</Accordion>
+
+<Accordion label="¿Existe una versión de escritorio?" group="faq">
+Sí. Hay instaladores para escritorios Windows, macOS y Linux, además de una instalación para servidores Linux sin interfaz gráfica. Las versiones de escritorio sirven para respaldar estaciones de trabajo en la misma consola central a través del agente.
+</Accordion>
+
+## Reflexiones finales
+
+Pluton se ha ganado su lugar en mi servidor. Restic mantiene las instantáneas fiables, Rclone pone cualquier destino de almacenamiento a un desplegable de distancia y la interfaz se ocupa de la programación, la retención y la replicación. Es más joven que Zerobyte, así que fija tu versión y lee las notas de lanzamiento antes de actualizar. Pero para copias 3-2-1 de verdad en varias máquinas, es la plataforma más sólida de las dos.
+
+<Button text="Ver Pluton en GitHub" link="https://github.com/plutonhq/pluton" variant="solid" color="blue" size="md" icon="arrow-right" />

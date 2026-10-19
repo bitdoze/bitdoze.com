@@ -1,0 +1,604 @@
+---
+date: 2026-10-12T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "litellm-docker-install"
+title: "Instalación de LiteLLM con Docker Compose: Guía Self-Host 2026"
+description: "Guía de instalación de LiteLLM con Docker Compose para 2026: fija una imagen versionada, añade la salt key requerida, corre Postgres para claves virtuales, y publícalo a través de Traefik."
+image: "@assets/images/24/08/litellm-docker.jpeg"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["self-hosted", "litellm", "docker"]
+canonical: "https://www.bitdoze.com/es/litellm-docker-instalacion/"
+meta_title: "Instala LiteLLM con Docker Compose: Gateway LLM Self-Hosted"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import { Picture } from "astro:assets";
+import imag1 from "@assets/images/24/08/litellm-white.png";
+
+En esta guía instalarás LiteLLM con Docker Compose y lo convertirás en un gateway LLM self-hosted: un único endpoint compatible con OpenAI en el puerto 4000 que da cara a cada API de modelos que usas. Las apps obtienen una única URL base y una clave, LiteLLM maneja el enrutado, reintentos, presupuestos y logging, y tus claves de proveedor nunca salen del servidor.
+
+[LiteLLM](https://www.litellm.ai/) llama a más de 100 APIs de LLM (OpenAI, Anthropic, Bedrock, TogetherAI, Ollama local y más) usando la especificación de API de OpenAI. A octubre de 2026 el repo ronda las 61k estrellas en GitHub, publica releases semanales, y el proxy corre sobre un núcleo Rust con un SDK de Python. Núcleo con licencia MIT, funciones enterprise encima. No hace falta GPU para el propio gateway.
+
+Si quieres un reverse proxy primero, monta Traefik antes de continuar.
+
+<Button text="Monta Traefik como reverse proxy" link="/traefik-proxy-docker/" variant="solid" color="blue" size="md" />
+
+> Si te interesa ver algunas apps self-hosted open source gratuitas y chulas puedes mirar la [sección self-hosted de toolhunt.net](https://toolhunt.net/sh/).
+
+## ¿Qué es LiteLLM? Un gateway LLM self-hosted
+
+LiteLLM es un proxy y SDK que expone cada proveedor LLM que usas a través de una única API en formato OpenAI. Apunta tus apps a `http://litellm:4000/v1` (o tu hostname de Traefik) y cambia de proveedores editando un archivo YAML, no tocando el código de la aplicación.
+
+Ese es el argumento de operador. Sin gateway, cada app guarda claves de proveedor en crudo, cada app necesita su propia lógica de reintentos y fallback, y te enteras del gasto tras la factura. Con LiteLLM en medio, la rotación de claves, el logging de uso, los presupuestos y los alias de modelos viven todos en un solo sitio. Los clientes se autentican contra tu gateway, nunca contra OpenAI o Anthropic directamente.
+
+![Flujo de peticiones del gateway LiteLLM: clientes y agentes llegan a Traefik por TLS, LiteLLM en el puerto 4000 enruta a OpenAI, Anthropic u Ollama local, con un contenedor Postgres opcional para claves virtuales, presupuestos y logs de gasto](@assets/images/24/08/litellm-gateway-flow.svg)
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Diagrama de arquitectura de LiteLLM: un gateway unificado en formato OpenAI enrutando peticiones a OpenAI, Anthropic, Bedrock y otros proveedores LLM" />
+
+Una nota de licencia antes de comprometerte: el núcleo es MIT, y el repo lleva funciones enterprise bajo una licencia separada. La imagen Docker y todo lo de esta guía funciona por el camino abierto. Lee los archivos de licencia del repo si planeas embeberlo en un producto comercial.
+
+## Funciones clave de LiteLLM
+
+Lo que obtienes una vez que está corriendo:
+
+<ListCheck>
+<ul>
+<li>Una interfaz unificada en formato OpenAI cubre más de 100 LLMs. Una entrada `model_list` por modelo, y los clientes los llaman por el alias que elijas.</li>
+<li>Seguimiento de costes, presupuestos y logs de gasto por clave y por modelo, con una UI para inspeccionarlos (necesita Postgres).</li>
+<li>Fallbacks y balanceo de carga entre despliegues. Marca un despliegue como caído y el tráfico se mueve al siguiente.</li>
+<li>Claves virtuales con su propio presupuesto, límite de peticiones y lista de modelos permitidos. Da a las apps una clave virtual, nunca la master key.</li>
+<li>Una Admin UI con un Playground: envía un mensaje de prueba, luego pulsa "Get Code" para snippets de cliente listos para copiar.</li>
+<li>Cualquier cosa que hable el SDK de OpenAI funciona, más soporte de primera clase para Anthropic, Mistral, LlamaIndex y LangChain.</li>
+<li>Los objetivos de enrutado actuales en los docs incluyen `openai/gpt-5.6-terra` y `anthropic/claude-sonnet-5`, modelos locales detrás de [corre modelos locales con Ollama](/es/openclaw-ollama-modelos-locales/), y proveedores API más nuevos como [modelos GLM/Z.ai](https://go.bitdoze.com/glm) o [MiniMax](https://go.bitdoze.com/minimax). Si quieres ideas de qué enrutar por el gateway, mira mi selección de [mejores LLMs open source](/es/mejores-llms-opensource-alternativa-claude/).</li>
+</ul>
+</ListCheck>
+
+Sobre el throughput no voy a citar una cifra de RPS. LiteLLM publica resultados de tests de carga en sus docs, pero lo que obtienes depende de tus modelos y la latencia upstream, no del proxy. Presupuesta que el gateway es barato de correr y las llamadas al proveedor son la parte cara.
+
+## Opciones de despliegue de LiteLLM: sin base de datos vs Postgres
+
+Hay dos formas de correr el stack compose, y la elección importa más que antes.
+
+<Tabs>
+<Tab name="Sin base de datos">
+Modo archivo de config. `litellm_config.yaml` en disco, un contenedor, la master key como única credencial. Rápido de arrancar, bien para evaluar el gateway o para un montaje personal donde eres el único cliente.
+
+Renuncias a la Admin UI, las claves virtuales y el seguimiento de gasto. Los presupuestos no se aplican (mira el aviso de abajo). Reinicia el contenedor y nada persiste excepto tu archivo de config.
+</Tab>
+<Tab name="Con Postgres">
+Modo producción. Postgres guarda modelos, claves virtuales, presupuestos y logs de gasto. `STORE_MODEL_IN_DB: "True"` es requerido para que la Admin UI y la API `/config/update` escriban los ajustes en la tabla `LiteLLM_Config`.
+
+Obtienes claves virtuales con límites por clave, seguimiento de gasto, persistencia de config entre reinicios, y la Admin UI en `/ui`. Este es el default que recomiendo para cualquier cosa compartida.
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="Los presupuestos no se aplican sin base de datos">
+En modo sin BD `max_budget` sigue sirviendo peticiones pasado el límite. Sin error por petición, sin alerta de presupuesto, solo un aviso único en los logs al arrancar. Las claves virtuales también necesitan una base de datos: una petición con clave virtual contra un proxy sin BD falla con `No connected db.` Si te importan los topes de gasto, corre la variante Postgres o limita el gasto upstream en el dashboard del proveedor.
+</Notice>
+
+Una corrección más a la guía vieja que hay por ahí: el gateway no necesita GPU ni una máquina grande. Proxea llamadas API, no corre inferencia. Un VPS de 2 vCPU / 2-4 GB basta de sobra para el proxy en sí; el hardware GPU solo importa si colocas Ollama al lado. Si vas por esa ruta, mira el [mejor mini PC para LLMs locales y Ollama](/best-mini-pc-local-llm/), o un [mini PC compacto](https://go.bitdoze.com/asus-dc510) si quieres algo silencioso bajo el escritorio.
+
+_Los precios de VPS saltaron en bloque en 2026. Si estás replanteándote una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/vps-price-increases/)._
+
+## Instala LiteLLM con Docker Compose (sin base de datos)
+
+Este es el camino para tener un gateway funcionando esta noche. Los prerequisitos de abajo aplican a ambas rutas de instalación, así que léelos una vez y luego vuelve aquí o salta a la sección de Postgres.
+
+<Notice type="info" title="Recorrido en vídeo">
+Grabado antes de los cambios de seguridad de v1.83+. Los archivos compose de abajo están actualizados.
+</Notice>
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/j0IFFoCfihk"
+  label="LiteLLM Docker Install"
+/>
+
+### Prerequisitos
+
+<ListCheck>
+<ul>
+<li>VPS Linux con Docker y el plugin Compose. 2 vCPU / 2-4 GB de RAM bastan para el proxy.</li>
+<li>Un dominio con DNS apuntando al servidor, y [Traefik corriendo en Docker](/traefik-proxy-docker/) (un [certificado wildcard vía Cloudflare](/traefik-wildcard-certificate/) hace aburrida la parte de TLS).</li>
+<li>Herramientas de gestión Docker que te gusten. Yo uso [Dockge](/es/instalar-dockge/) para stacks compose.</li>
+<li>Claves API de los proveedores a los que planees enrutar (OpenAI, Anthropic, o un Ollama local).</li>
+</ul>
+</ListCheck>
+
+Para el propio VPS uso [Hetzner](https://go.bitdoze.com/hetzner) para máquinas UE y [Hostinger](https://go.bitdoze.com/hostinger-vps) cuando quiero NVMe barato en otro sitio. Ambos manejan un proxy LiteLLM sin despeinarse.
+
+> En caso de que te interese monitorizar recursos del servidor como CPU, memoria y espacio en disco puedes mirar: [How To Monitor Server and Docker Resources](/sever-monitoring/).
+
+<Notice type="warning" title="Nota de seguridad (marzo 2026)">
+LiteLLM tuvo un incidente de cadena de suministro en marzo de 2026. Los paquetes comprometidos fueron los releases de PyPI `litellm==1.82.7` y `litellm==1.82.8`, activos unos 40 minutos el 24 de marzo antes de que PyPI los pusiera en cuarentena. El compromiso entró a través de la dependencia Trivy usada en el propio workflow de escaneo CI de LiteLLM.
+
+Los clientes corriendo la imagen Docker oficial de LiteLLM Proxy no se vieron afectados: esa ruta fija dependencias en `requirements.txt`. Si instalaste LiteLLM desde PyPI antes de marzo de 2026, actualiza inmediatamente. El primer release limpio fue v1.83.0 (30 de marzo de 2026) sobre un pipeline CI reconstruido. Detalles e indicadores de compromiso en la [actualización oficial de seguridad](https://docs.litellm.ai/blog/security-update-march-2026). Las imágenes actuales están limpias y firmadas con cosign, que es la siguiente sección.
+</Notice>
+
+### Archivo de config de LiteLLM con modelos actuales
+
+Crea `litellm_config.yaml`. La lista completa de proveedores vive en [docs.litellm.ai/docs/providers](https://docs.litellm.ai/docs/providers) (el viejo enlace `litellm.vercel.app` está obsoleto).
+
+```yaml
+model_list:
+  - model_name: gpt-5.6-terra
+    litellm_params:
+      model: openai/gpt-5.6-terra
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+```
+
+Dos campos, dos trabajos:
+
+- `model_name` es lo que los clientes envían en el campo `"model"` de su petición. Es tu alias, elige cualquier cosa memorable.
+- `litellm_params.model` es lo que LiteLLM envía upstream, y toma un prefijo de proveedor: `openai/...`, `anthropic/...`, `ollama/...`. El prefijo es lo que enruta la petición al proveedor correcto.
+
+`api_key: os.environ/OPENAI_API_KEY` es el patrón de indirección documentado. LiteLLM lee la clave del entorno del contenedor en vez del archivo de config, así que tu YAML no guarda secretos y puede vivir en Git.
+
+<Notice type="info" title="Los IDs de modelos cambian">
+Fija los strings de modelo a los que tu cuenta tiene acceso. Los catálogos de proveedores se mueven rápido, y un alias que funcionaba el mes pasado puede dar 404 upstream hoy. Revisa la lista de modelos de tu proveedor antes de pegar ejemplos.
+</Notice>
+
+### Archivo Docker Compose sin base de datos
+
+```yaml
+services:
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:v1.105.0   # pin! ghcr.io/berriai/litellm:v1.105.0 also fine
+    restart: unless-stopped
+    command:
+      - "--config=/app/config.yaml"
+      - "--detailed_debug"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set in .env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    ports:
+      - "127.0.0.1:4000:4000"
+```
+
+Lo que importa ahí:
+
+- La imagen está fijada a `v1.105.0`, el estable actual (publicado el 11-10-2026). No corras un tag flotante en ningún sitio que te importe. Más sobre tags en la siguiente sección.
+- El comando establece `--config=/app/config.yaml`, que coincide con la convención de montaje de los docs. `--detailed_debug` es logging verboso; quítalo cuando acabes de depurar.
+- El montaje de volumen `./litellm_config.yaml:/app/config.yaml` importa. Si montas en una ruta aleatoria y olvidas actualizar `--config`, el proxy arranca con una lista de modelos vacía.
+- El binding de puerto `127.0.0.1:4000:4000` mantiene el lado del host en localhost. Traefik alcanza el contenedor por la red Docker, así que no hay razón para exponer el 4000 a internet.
+- Las variables de entorno llevan las claves de proveedor vía `os.environ/...` y la master key.
+
+Archivo `.env`, junto al archivo compose:
+
+```sh
+LITELLM_MASTER_KEY=sk-REPLACE_ME
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-...
+```
+
+Genera el archivo completo correctamente, nunca reuses `sk-1234`:
+
+```sh
+echo "LITELLM_MASTER_KEY=sk-$(openssl rand -hex 32)" > .env
+echo "OPENAI_API_KEY=sk-REPLACE_ME" >> .env
+echo "ANTHROPIC_API_KEY=sk-REPLACE_ME" >> .env
+chmod 600 .env
+```
+
+<Notice type="warning" title="La master key debe empezar por sk-">
+El proxy se niega a arrancar sin `LITELLM_MASTER_KEY`, y la clave debe empezar por `sk-`. El prefijo ausente es el fallo de arranque más común en este montaje. Las guardas `:?` en los archivos compose de abajo atraparán una variable ausente directamente.
+</Notice>
+
+Súbelo y revisa el contenedor:
+
+```sh
+docker compose up -d
+docker compose ps
+docker compose logs -f litellm | head -50
+```
+
+Modos de fallo que merece conocer aquí:
+
+- Si el puerto 4000 ya está ocupado, otro contenedor (o un servidor dev local) retiene el puerto. Cambia el lado del host a `127.0.0.1:4001:4000` o para el otro servicio.
+- Si la config está montada en la ruta equivocada, el contenedor arranca pero cada petición da 404 al modelo. Comprueba con `docker compose exec litellm cat /app/config.yaml`.
+- Si falta el prefijo `sk-` en la master key, el arranque falla con un rechazo en los logs. Arregla el `.env` y ejecuta `docker compose up -d` de nuevo.
+
+### Stack combinado Open WebUI + LiteLLM + Ollama
+
+Si quieres una UI de chat y modelos locales detrás del mismo gateway, este es el stack combinado. Cubrí el lado de Open WebUI + Ollama en la [guía de montaje de Ollama con Docker Compose](/ollama-docker-install/) y en [corriendo OpenClaw con Ollama](/es/openclaw-ollama-modelos-locales/); aquí LiteLLM se pone delante para que Open WebUI también vea tus modelos cloud.
+
+```yaml
+services:
+  openWebUI:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    hostname: openwebui
+    networks:
+      - traefik-net
+    restart: unless-stopped
+    volumes:
+      - ./open-webui-local:/app/backend/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.openwebui.rule=Host(`openwebui.domain.com`)
+      - traefik.http.routers.openwebui.entrypoints=https
+      - traefik.http.services.openwebui.loadbalancer.server.port=8080
+    environment:
+      OLLAMA_BASE_URLS: http://ollama:11434
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    hostname: ollama
+    networks:
+      - traefik-net
+    volumes:
+      - ./ollama-local:/root/.ollama
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:v1.105.0
+    container_name: litellm
+    hostname: litellm
+    networks:
+      - traefik-net
+    restart: unless-stopped
+    command:
+      - --config=/app/config.yaml
+      - --detailed_debug
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+networks:
+  traefik-net:
+    external: true
+```
+
+`OPENAI_API_BASE_URL` apunta al contenedor LiteLLM, y `OPENAI_API_KEY` es la master key (o una clave virtual, una vez tengas Postgres). Open WebUI entonces lista cada modelo de tu `litellm_config.yaml` junto a los de Ollama.
+
+Una nota de honestidad: los nombres de variables de entorno de Open WebUI derivan entre versiones. El patrón `OPENAI_API_BASE_URL` de arriba es el de siempre y coincide con la documentación de `open-webui:main` a octubre de 2026, pero si la UI no puede alcanzar el gateway, revisa los docs actuales de Open WebUI por variables renombradas antes de depurar LiteLLM.
+
+## Fija la imagen Docker de LiteLLM y verifica firmas
+
+Esta sección existe porque los tags flotantes mordieron a la gente durante el incidente de marzo de 2026. Haz de fijar un hábito.
+
+El esquema de tags desde v1.84.0 es SemVer a secas. Los viejos sufijos `-stable` y `-nightly` desaparecieron. Los releases semanales suben MINOR, PATCH se reserva para hotfixes, y Docker publica tanto tags bare (`1.84.0`) como con prefijo v (`v1.84.0`) de la misma imagen. Los viejos nombres `v1.83.x-stable` siguen publicados para siempre, así que nada de lo que ya corres se rompe.
+
+- Fija `v1.105.0` (o lo que esté vigente cuando leas esto) para cualquier cosa más allá de evaluación local.
+- `main-stable` flota al último estable. Cómodo para un experimento de homelab, equivocado para producción. Derivará bajo ti, normalmente en el peor momento.
+
+**Registries:** el quickstart oficial publica en `docker.litellm.ai/berriai/litellm`, y la guía de seguridad verifica en `ghcr.io/berriai/litellm`. Ambos aparecen en material oficial. Si quieres la ruta más estricta, haz pull y verifica desde GHCR.
+
+<Tabs>
+<Tab name="docker.litellm.ai">
+```bash
+docker pull docker.litellm.ai/berriai/litellm:v1.105.0
+```
+</Tab>
+<Tab name="ghcr.io (verificado)">
+```bash
+docker pull ghcr.io/berriai/litellm:v1.105.0
+
+cosign verify \
+  --key https://raw.githubusercontent.com/BerriAI/litellm/0112e53046018d726492c814b3644b7d376029d0/cosign.pub \
+  ghcr.io/berriai/litellm:v1.105.0
+```
+</Tab>
+</Tabs>
+
+<Notice type="success" title="Hábito post-incidente: fija y verifica">
+Todas las imágenes publicadas en `ghcr.io/berriai/` están firmadas con cosign desde v1.83.0, una clave por cada release. La clave pública es `cosign.pub` en el repo, y el comando de arriba fija la obtención de la clave al commit exacto que introdujo la firma, así que no estás confiando en una URL mutable. `cosign verify` imprime el payload de la firma en éxito y sale con código no cero en un desajuste.
+</Notice>
+
+Variantes de imagen: `litellm` es el proxy núcleo y ahora empaqueta el toolchain Prisma para Postgres, así que maneja las migraciones por sí solo. `litellm-database` es un alias legado del mismo toolchain, entrypoint y migraciones. Ya no hay razón para elegir entre ellos. `litellm-non_root` está disponible si quieres soltar root.
+
+## Instala LiteLLM con Docker Compose y Postgres
+
+Esta es la ruta de producción. Postgres desbloquea la Admin UI, claves virtuales, seguimiento de gasto y persistencia de config. `STORE_MODEL_IN_DB: "True"` es el interruptor que dice a la Admin UI y a la API `/config/update` que escriban ajustes en la tabla `LiteLLM_Config` en vez de solo leer tu YAML.
+
+### Variables de entorno requeridas: master key y salt key
+
+El modo BD necesita dos claves, no una. El archivo compose de abajo se niega a arrancar sin ambas.
+
+<ListCheck>
+<ul>
+<li>`LITELLM_MASTER_KEY`: credencial raíz. Autoriza cada llamada a la API de gestión y hace doblete como contraseña de la Admin UI.</li>
+<li>`LITELLM_SALT_KEY`: cifra las claves API de proveedores guardadas en la base de datos. Requisito nuevo, fácil de pasar por alto.</li>
+<li>`POSTGRES_PASSWORD`: la contraseña de la base de datos, usada en `DATABASE_URL` y por el contenedor Postgres.</li>
+<li>Login de UI legado opcional: `UI_USERNAME` / `UI_PASSWORD`. Si no se definen, entra como `admin` con la master key.</li>
+</ul>
+</ListCheck>
+
+Genera todo correctamente:
+
+```sh
+printf 'LITELLM_MASTER_KEY=sk-%s\nLITELLM_SALT_KEY=sk-%s\nPOSTGRES_PASSWORD=%s\n' \
+  "$(openssl rand -hex 32)" \
+  "$(openssl rand -hex 32)" \
+  "$(openssl rand -hex 16)" > .env
+chmod 600 .env
+```
+
+<Notice type="error" title="Haz backup de la salt key junto a la base de datos">
+No hay rotación en sitio para `LITELLM_SALT_KEY`. Regenerarla hace ilegible cada credencial de proveedor ya guardada en la base de datos. Un `pg_dump` a solas tampoco puede descifrar esas claves: tu unidad de backup es el volcado de la base de datos **más** el `.env` que contiene la salt key. Guárdalos juntos. Pierde uno y el otro es inútil.
+</Notice>
+
+Para endurecer la UI en instalaciones compartidas, `general_settings.disable_env_credential_login: true` rechaza logins `UI_USERNAME`/`UI_PASSWORD`/master-key en la página de la UI, así que solo usuarios respaldados por base de datos pueden entrar. El flujo por defecto es más simple: usuario `admin`, contraseña = `LITELLM_MASTER_KEY`.
+
+### Archivo Docker Compose con Postgres y Traefik
+
+```yaml
+services:
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:v1.105.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set in .env}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set in .env}
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm
+      STORE_MODEL_IN_DB: "True"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.litellm.rule=Host(`litellm.domain.com`)
+      - traefik.http.routers.litellm.entrypoints=https
+      - traefik.http.services.litellm.loadbalancer.server.port=4000
+    networks:
+      - traefik-net
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: litellm
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - traefik-net
+volumes:
+  postgres_data:
+networks:
+  traefik-net:
+    external: true
+```
+
+Los detalles importantes:
+
+- `depends_on: condition: service_healthy` con un healthcheck `pg_isready`. El `depends_on` a secas hace carrera: LiteLLM puede arrancar antes de que Postgres acepte conexiones y luego hacer crash-loop. Este patrón lo arregla.
+- Las guardas `${VAR:?set in .env}`. Una `LITELLM_MASTER_KEY` o `LITELLM_SALT_KEY` ausente para compose antes de que nada arranque.
+- Las etiquetas Traefik enrutan `litellm.domain.com` al puerto 4000 sobre el entrypoint `https`. Trae tu propio `traefik-net`. Mira [Traefik en Docker](/traefik-proxy-docker/) y el [montaje de certificado wildcard](/traefik-wildcard-certificate/).
+- `postgres:16` con un volumen nombrado. El quickstart oficial usa volúmenes nombrados, y estoy de acuerdo para la mayoría de la gente.
+
+<Notice type="info" title="Volumen nombrado vs bind mount">
+El patrón oficial es el volumen nombrado `postgres_data`. Si prefieres un directorio de datos explorable para rsync o backups casuales, haz bind mount de `./litellm-db` en su lugar. Elige uno en la pestaña de abajo y ajusta el bloque `volumes:` del servicio `db`.
+</Notice>
+
+<Tabs>
+<Tab name="Volumen nombrado (oficial)">
+```yaml
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  postgres_data:
+```
+</Tab>
+<Tab name="Bind mount (variante bitdoze)">
+```yaml
+    volumes:
+      - ./litellm-db:/var/lib/postgresql/data:rw
+```
+Crea el directorio primero: `mkdir -p litellm-db`. Si Postgres se queja de permisos al arrancar, `chown -R 999:999 litellm-db` (el usuario `postgres` dentro de la imagen) y arranca de nuevo.
+</Tab>
+</Tabs>
+
+```sh
+docker compose up -d
+docker compose ps
+```
+
+Esperado: `db` reporta `healthy` y `litellm` reporta `running`. Si `litellm` está reiniciando, el healthcheck de BD o la contraseña de `DATABASE_URL` son el sospechoso habitual. Revisa `docker compose logs litellm`.
+
+## Verifica la instalación y envía una petición de prueba
+
+No confíes en que `docker compose up -d` devuelva 0. Cuatro comprobaciones, en orden.
+
+<ListCheck>
+<ul>
+<li>1. Estado de contenedores: `docker compose ps` muestra ambos servicios arriba, `db` healthy.</li>
+<li>2. Liveness: `curl -s http://localhost:4000/health/liveliness` devuelve HTTP 200. `/health/readiness` es la comprobación más profunda si la quieres.</li>
+<li>3. Una llamada real a un modelo: el curl de abajo devuelve un cuerpo JSON estilo OpenAI con una respuesta.</li>
+<li>4. UI (modo BD): abre `https://litellm.domain.com/ui`, entra como `admin` con la master key, envía un mensaje en el Playground, luego pulsa "Get Code" para snippets de cliente.</li>
+</ul>
+</ListCheck>
+
+```bash
+# 1. container state
+docker compose ps
+
+# 2. liveness (from the host, or inside the container if 4000 is localhost-only)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4000/health/liveliness
+
+# 3. first real call through the gateway
+curl http://localhost:4000/v1/chat/completions \
+  -H 'Authorization: Bearer sk-REPLACE_WITH_MASTER_OR_VIRTUAL_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.6-terra",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+Cómo se ve "funcionando": una respuesta JSON con `choices[0].message.content` y un bloque `usage`. Cómo se ve "roto": `401` significa clave Bearer equivocada o sin el prefijo `sk-`; `400` con model-not-found significa que el campo `"model"` no coincide con un `model_name` de tu config; `500` con errores de proveedor significa clave upstream inválida o el string de modelo no disponible en tu cuenta.
+
+Los nombres de endpoints de salud son rutas LiteLLM de larga tradición, pero si `/health/liveliness` da 404 en tu versión fijada, revisa el schema OpenAPI de esa versión antes de asumir que el proxy está muerto.
+
+## Crea claves virtuales LiteLLM en la Admin UI
+
+Esta es la función que justifica correr Postgres. En la UI: Virtual Keys → Create New Key. La clave se muestra una vez al crearla.
+
+<Notice type="info" title="Copia la clave al crearla">
+LiteLLM muestra una nueva clave virtual exactamente una vez. Si la pierdes, revócala y crea una nueva. No pegues claves virtuales en archivos compose o imágenes; pertenecen al entorno de cada cliente.
+</Notice>
+
+Configura cada clave con:
+
+<ListCheck>
+<ul>
+<li>Presupuesto: un tope duro por clave. Este sí se aplica porque la base de datos está ahí.</li>
+<li>Límite de peticiones: peticiones por minuto, para que un cliente no pueda dejar sin comer al resto.</li>
+<li>Lista de modelos permitidos: restringe la clave a alias `model_name` específicos.</li>
+<li>Caducidad: para clientes temporales y experimentos.</li>
+</ul>
+</ListCheck>
+
+Regla de oro: las apps y agentes obtienen claves virtuales, nunca la master key. La master key puede reescribir la config de tu gateway; una clave virtual solo puede llamar modelos dentro de sus límites. Si corres varias [herramientas y agentes de codificación IA](/ai-coding-tools/), dale a cada una su propia clave virtual para que un agente desbocado se coma su propio presupuesto y no el tuyo. Herramientas como [Agent Router](https://go.bitdoze.com/agentrouter) pueden apuntar múltiples CLIs de codificación al mismo endpoint del gateway.
+
+Incluso con presupuestos por clave, pon topes de gasto upstream en el proveedor. Dos límites son un límite, y el del proveedor es el que golpea tu tarjeta.
+
+## Resolución de problemas: modos de fallo comunes
+
+<Notice type="error" title="Síntoma, causa, solución">
+Cada elemento de abajo es un síntoma que verás en `docker compose logs` o `curl`, no una lista teórica. Expande el que coincida con tu fallo.
+</Notice>
+
+<Accordion label="El proxy se niega a arrancar: master key ausente o sin prefijo sk-" group="faq" expanded="true">
+Esto pasa cuando `LITELLM_MASTER_KEY` está vacía o no empieza por `sk-`. El proxy se niega a arrancar sin ella.
+
+Arréglalo poniendo `LITELLM_MASTER_KEY=sk-$(openssl rand -hex 32)` en `.env`, luego `docker compose up -d`. Comprueba con `docker compose exec litellm printenv LITELLM_MASTER_KEY`.
+</Accordion>
+
+<Accordion label="El modo BD sale inmediatamente: falta LITELLM_SALT_KEY" group="faq">
+O la guarda `${LITELLM_SALT_KEY:?set in .env}` abortó compose porque la variable no está definida, o LiteLLM no puede cifrar las credenciales guardadas sin ella.
+
+Genérala con el one-liner `printf`/`openssl` de arriba y reinicia. Nunca inventes un valor corto: esta clave cifra las claves de proveedor durante la vida de la base de datos.
+</Accordion>
+
+<Accordion label="Petición con clave virtual falla con 'No connected db.'" group="faq">
+Estás corriendo el modo sin BD. Las claves virtuales requieren Postgres.
+
+Se espera que esa petición falle. O usa la master key (bien para evaluación en solitario) o cambia al archivo compose con Postgres.
+</Accordion>
+
+<Accordion label="Presupuesto excedido pero las peticiones siguen sirviéndose" group="faq">
+El modo sin BD no aplica `max_budget`. Las peticiones siguen pasado el límite sin error por petición.
+
+Corre la variante Postgres para presupuestos aplicados, y pon un tope duro en el dashboard del proveedor mientras tanto.
+</Accordion>
+
+<Accordion label="LiteLLM se reinicia en bucle" group="faq">
+Postgres aún no acepta conexiones, o `DATABASE_URL` tiene la contraseña equivocada. El `depends_on` a secas empeora esto con una carrera de arranque.
+
+Usa `depends_on: db: condition: service_healthy`, verifica que `POSTGRES_PASSWORD` coincide en ambos servicios, y revisa `docker compose logs db`.
+</Accordion>
+
+<Accordion label="Cada petición de modelo da 404 / lista de modelos vacía" group="faq">
+El archivo de config está montado en una ruta que el proxy no está leyendo. El proxy arrancó sin `model_list`.
+
+Monta `./litellm_config.yaml:/app/config.yaml` y pasa `--config=/app/config.yaml`. Confirma con `docker compose exec litellm cat /app/config.yaml`.
+</Accordion>
+
+<Accordion label="Puerto 4000 ya en uso" group="faq">
+Algo más en el host ocupa el 4000.
+
+Cambia el puerto del host a `127.0.0.1:4001:4000`, o para el otro servicio con `docker ps | grep 4000` y `docker compose down` en el proyecto infractor.
+</Accordion>
+
+<Accordion label="Traefik devuelve 502 para litellm.domain.com" group="faq">
+El contenedor `litellm` no está en `traefik-net`, la regla de hostname no coincide con tu DNS, o la etiqueta del puerto del loadbalancer está mal.
+
+`traefik-net` debe ser `external: true` y crearse de antemano (`docker network create traefik-net`). La etiqueta `traefik.http.services.litellm.loadbalancer.server.port=4000` debe coincidir con el puerto del proxy. Revisa el dashboard de Traefik para el estado del router.
+</Accordion>
+
+<Accordion label="Login de UI rechazado: admin + master key no funciona" group="faq">
+O la contraseña no es la master key, o `general_settings.disable_env_credential_login: true` está puesto, lo que rechaza los logins con credenciales de entorno por completo.
+
+El login por defecto es usuario `admin`, contraseña = `LITELLM_MASTER_KEY`. Si el login con credenciales de entorno está desactivado, crea un usuario de UI por el flujo respaldado por base de datos. `UI_USERNAME`/`UI_PASSWORD` legados siguen funcionando cuando se definen y no se desactivan.
+</Accordion>
+
+Si el proxy se porta mal bajo carga, vigila CPU y RAM antes de culpar a LiteLLM: [How To Monitor Server and Docker Resources](/sever-monitoring/).
+
+## Backup, actualización y rollback
+
+<Notice type="warning" title="Volcado de BD + salt key juntas = credenciales recuperables">
+Haz backup de la salida de `pg_dump` y tu `.env` (salt key + master key) como una unidad. Programa copias fuera de la máquina, almacenamiento compatible con S3 está bien. Un backup de base de datos sin la salt key restaura una pila de texto cifrado.
+</Notice>
+
+Para backups (modo BD):
+
+```sh
+docker compose exec db pg_dump -U litellm litellm > backup-$(date +%F).sql
+# pair every dump with a copy of .env (the salt key decrypts stored provider keys)
+cp .env .env.backup-$(date +%F)
+```
+
+Para actualizar:
+
+1. Lee las [notas de versión](https://github.com/BerriAI/litellm/releases) de las líneas menores que cruzas. Los releases son semanales, así que "saltar varias menores" es normal y las notas son cortas.
+2. Toma un volcado fresco primero. Desde v1.103.3 (30 de septiembre de 2026) la comprobación de migración de BD se aplica por defecto: las actualizaciones fallan duro ante deriva de schema en vez de avisar. Eso es bueno, siempre que tengas el volcado.
+3. Sube el tag de imagen en compose, luego `docker compose up -d`.
+4. Vuelve a ejecutar los pasos de verificación: `/health/liveliness` y una llamada real a `/v1/chat/completions`.
+
+<Button text="Lee las notas de versión antes de actualizar" link="https://github.com/BerriAI/litellm/releases" variant="outline" color="blue" size="md" />
+
+Para hacer rollback, pon el tag fijado anterior en el archivo compose y `docker compose up -d`. Si las migraciones ya corrieron y la versión vieja se atraganta con el schema nuevo, restaura el volcado en Postgres primero. Los viejos nombres de tag `v1.83.x-stable` aún resuelven si alguna vez los necesitas; los tags bare y con prefijo v son imágenes idénticas.
+
+Resumen de endurecimiento:
+
+- Mantén el puerto 4000 enlazado a `127.0.0.1` y deja que Traefik posea el tráfico público.
+- Secretos solo en `.env`, `chmod 600`, nunca en Git.
+- Usa claves virtuales para clientes; reserva la master key para trabajo de admin.
+- Considera `litellm-non_root` si tu política requiere contenedores sin root.
+
+## Qué hay de nuevo en LiteLLM desde mayo de 2026
+
+El proyecto no se quedó quieto. Lista corta, detalles en el [changelog](https://github.com/BerriAI/litellm/releases):
+
+<ListCheck>
+<ul>
+<li>Núcleo Rust con SDK Python: la afirmación estrella del repo ahora, con páginas de tests de carga en los docs si quieres curvas.</li>
+<li>Decisions API: un endpoint `/v1/decisions` para modelos de decisión, incluido en v1.105.0.</li>
+<li>MCP Gateway: acceso gobernado a herramientas para agentes, con el catálogo MCP expandiéndose.</li>
+<li>Auto Router y LiteLLM Lens: elección de modelo por petición y tooling de trazas/observabilidad apareciendo en la navegación de los docs.</li>
+<li>Comprobación de migración de BD aplicada (v1.103.3): comportamiento de actualización cubierto arriba.</li>
+</ul>
+</ListCheck>
+
+Si quieres trazas y dashboards de gasto más allá de la UI integrada, empareja el gateway con [Langfuse self-hosted para observabilidad LLM](/langfuse-docker-install/). El gateway maneja el enrutado, Langfuse maneja la conversación de "por qué costó $4 esta petición".
+
+## Conclusiones
+
+El camino de operador en una línea: fija y verifica la imagen, evalúa con el compose sin BD, luego pasa a Postgres con una salt key y claves virtuales para cualquier cosa real. Verifica con una llamada real a `/v1/chat/completions` en vez de confiar en un `docker compose ps` en verde, y haz backup del volcado de la base de datos junto a la salt key o no has hecho backup de nada.
+
+LiteLLM se gana su sitio en el stack eliminando claves de proveedor por app y lógica de reintentos por app. No es glamuroso, es un contenedor pequeño y un archivo YAML que mantiene tu gasto en modelos y credenciales en un solo sitio aburrido.
+
+<ListCheck>
+<ul>
+<li>Fija `v1.105.0` (o el vigente) y verifica con cosign las imágenes GHCR.</li>
+<li>La master key y la salt key empiezan ambas por `sk-`, generadas con `openssl rand`.</li>
+<li>Sin BD para evaluar; Postgres para claves virtuales, presupuestos y la Admin UI.</li>
+<li>Las apps obtienen claves virtuales, nunca la master key.</li>
+<li>La unidad de backup es `pg_dump` + `.env`, siempre juntas.</li>
+</ul>
+</ListCheck>
+
+<Button text="Explora los mejores 125+ contenedores Docker para home server" link="/es/contenedores-docker-servidor-casa/" variant="solid" color="green" size="md" />
+
+Para los interesados en explorar más contenedores Docker para su montaje self-hosted, los [mejores 125+ contenedores Docker para home server en 2026](/es/contenedores-docker-servidor-casa/) tiene la lista actual. LiteLLM se sienta junto a OmniRoute, Langfuse y el resto del stack de agentes en [top AI GitHub repos](/top-ai-github-repos/).

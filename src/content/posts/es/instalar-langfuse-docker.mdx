@@ -1,0 +1,719 @@
+---
+date: 2026-10-10T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "langfuse-docker-install"
+title: "Instalar Langfuse con Docker: Alternativa Self-Hosted a LangSmith"
+description: "Instala Langfuse con Docker Compose en tu propio servidor. Alternativa self-hosted a LangSmith: imágenes v4, secretos .env, Cloudflare Tunnel, actualizaciones y backups."
+image: "@assets/images/24/07/langfuse-docker-install.jpeg"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["langfuse", "docker", "self-hosted"]
+canonical: "https://www.bitdoze.com/es/instalar-langfuse-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import { Picture } from "astro:assets";
+import imag1 from "@assets/images/24/01/cloudflare-tunel-setup.png";
+import imag2 from "@assets/images/24/07/langfuse-ui.png";
+
+Esta guía instala **Langfuse v4 con Docker Compose** en tu propio servidor: una alternativa self-hosted a LangSmith que mantiene las trazas LLM, los costes y las evaluaciones en hardware que controlas. Langfuse es una plataforma open-source de ingeniería LLM con observabilidad, analítica, gestión de prompts, evaluaciones y experimentos con datasets en un solo stack. Está en 35,6k estrellas de GitHub (comprobado 10-10-2026), y el equipo se ha unido a ClickHouse, lo que importa porque ClickHouse es el motor de analítica debajo.
+
+La cuestión de la versión primero, porque decide todo lo demás: Langfuse v4.0.0 salió el 29-07-2026 y v4.56.0 llegó el 09-10-2026. **Langfuse v3 recibe solo parches de seguridad hasta finales de enero de 2027.** Las instalaciones nuevas nunca deberían empezar en v3 ahora. Si ya corres v3, la sección de actualización de abajo recorre la migración; la infraestructura no cambia.
+
+<Notice type="warning" title="v3 está en fin de vida (solo parches de seguridad)">
+Langfuse v3 recibe parches de seguridad solo hasta finales de enero de 2027. Las instalaciones nuevas deberían usar imágenes v4. Las instalaciones v3 existentes deberían planear la actualización antes de esa fecha, mira [Actualizar una instalación Langfuse v3 existente a v4](#actualizar-una-instalación-langfuse-v3-existente-a-v4).
+</Notice>
+
+**Funciones:**
+
+<ListCheck>
+<ul>
+<li><strong>Observabilidad</strong> cubre instrumentar tu aplicación e ingerir trazas para ver cómo se comportan tus llamadas LLM, con búsqueda de texto completo sobre inputs, outputs y metadatos.</li>
+<li><strong>Analítica</strong> rastrea coste, latencia y calidad mediante dashboards y exportaciones de datos.</li>
+<li><strong>Gestión de prompts</strong> versiona y despliega prompts desde dentro de Langfuse.</li>
+<li><strong>Evaluaciones</strong> puntúan completados con evals basadas en modelo, feedback de usuarios y puntuación manual.</li>
+<li><strong>Experimentación</strong> corre datasets contra tu app antes de lanzar, y compara ejecuciones.</li>
+<li><strong>Integraciones</strong> funcionan con LangChain, LlamaIndex, LiteLLM y otros frameworks LLM populares. Si quieres un único gateway delante de tus proveedores, puedes instalar LiteLLM con Docker Compose y [enrutar llamadas LLM a través de LiteLLM, trazándolas en Langfuse](/es/litellm-docker-instalacion/).</li>
+</ul>
+</ListCheck>
+
+## Qué hay de nuevo en Langfuse v4 (y por qué las instalaciones nuevas deberían saltarse v3)
+
+v4 es mayormente un cambio de motor, no una reescritura del producto. El mayor cambio es el modelo de datos ClickHouse: los eventos aterrizan en `events_full` (filas anchas inmutables) con una proyección `events_core` optimizada para consultas encima. Las trazas ahora son spans raíz dentro de la misma tabla (span ID `t-<trace_id>`), y la superficie principal de la UI es una vista única de **Observations**, abierta filtrada a `Is Root Observation = true`. Si tienes capturas o memoria muscular de la tabla de trazas de v3, espera una primera pantalla distinta.
+
+Lo que ese modelo de datos desbloquea para self-hosters (estas fueron primero funciones de Langfuse Cloud):
+
+- **Búsqueda de texto completo** sobre inputs, outputs y metadatos, más una barra de búsqueda con filtros.
+- **Monitores y alertas** sobre métricas de trazas.
+- **Observations API v2** y **Metrics API v2** para exportaciones de datos más limpias.
+- **Agente en la app** movido fuera de la edición enterprise a beta pública.
+- Mejor ergonomía de self-hosting en el compose oficial: inicialización headless vía `LANGFUSE_INIT_*`, `LANGFUSE_AI_*` para el asistente en la app y modelos de eval, `LANGFUSE_MCP_*` para el servidor MCP, `LANGFUSE_S3_BATCH_EXPORT_*`, y `REDIS_TLS_*`.
+
+<Tabs>
+  <Tab name="Novedades de v4">
+  - Nuevo modelo ClickHouse (`events_full` + `events_core`), trazas como observaciones raíz
+  - Búsqueda de texto completo, barra de búsqueda con filtros, monitores y alertas
+  - Observations API v2 y Metrics API v2
+  - Agente en la app en beta pública
+  - Init headless, servidor MCP, bloques env de exportación por lotes en el compose oficial
+  - Ruta de escritura directa del SDK (Python SDK >= 4.7.0, JS/TS SDK >= 5.4.0)
+  </Tab>
+  <Tab name="Lo que sigue igual">
+  - Los mismos seis servicios: `langfuse-web`, `langfuse-worker`, PostgreSQL, ClickHouse, Redis, S3/MinIO
+  - Las variables env requeridas: `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`, `DATABASE_URL`, `CLICKHOUSE_*`, `REDIS_*`
+  - El flujo Docker Compose: un archivo compose, un `.env`, `docker compose up -d`
+  - `AUTH_DISABLE_SIGNUP`, opt-out de telemetría, endpoints de salud
+  - Solo cambiaron las versiones mínimas (ClickHouse >= 25.12, PostgreSQL 15+, Redis 7+)
+  </Tab>
+</Tabs>
+
+<Notice type="info" title="Sobre las cifras de rendimiento">
+La guía oficial de actualización afirma que los tiempos de carga del dashboard para proyectos grandes mejoran "10x o más"; el banner de marketing dice hasta 165x. No hemos medido estas cifras, vienen de los propios materiales de Langfuse comprobados el 10-10-2026. Tu kilometraje depende del hardware y el volumen de trazas.
+</Notice>
+
+¿Por qué saltarse v3 por completo? Está en modo mantenimiento con una fecha de fin de soporte dura, y v4 corre sobre la infraestructura idéntica. La propia FAQ de la guía de actualización responde "¿Necesito nuevos componentes de infraestructura?" con "No." Los mismos contenedores web y worker, el mismo PostgreSQL, ClickHouse, Redis y S3. Empezar en v3 hoy significa hacer la migración después sin beneficio. Si ya estás en v3, lee la [sección de actualización](#actualizar-una-instalación-langfuse-v3-existente-a-v4) y la [guía oficial de actualización v3 a v4](https://langfuse.com/self-hosting/upgrade/upgrade-guides/upgrade-v3-to-v4). El historial de releases vive en [GitHub releases](https://github.com/langfuse/langfuse/releases).
+
+## Guía paso a paso para instalar Langfuse con Docker Compose
+
+El recorrido de abajo cubre la instalación completa de Langfuse con Docker: archivo compose, secretos, verificación, HTTPS y backups. Si prefieres vídeo:
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/Gm4HBrK63AM"
+  label="How to Install Langfuse with Docker Compose"
+/>
+
+<Notice type="info" title="Vídeo grabado en v3">
+El recorrido incrustado se grabó sobre la UI de v3, así que las capturas difieren de lo que verás en v4. Los pasos de compose y .env son los mismos; solo cambiaron los tags de imagen y la vista de observaciones. El artículo de abajo refleja v4 (comprobado 10-10-2026).
+</Notice>
+
+Si quieres vigilar CPU, memoria y disco mientras corre este stack, monta primero [cómo monitorizar recursos del servidor y Docker](/sever-monitoring/). Langfuse es uno de los stacks compose más pesados que self-hostearás, y te dirá cuándo la máquina es demasiado pequeña.
+
+### 1. Prerequisitos y dimensionado del VPS para Langfuse v4
+
+Antes de empezar, ten esto en su sitio:
+
+<ListCheck>
+<ul>
+<li>Un VPS o home server. Uso <a href="https://go.bitdoze.com/hetzner">Hetzner</a> o <a href="https://go.bitdoze.com/hostinger-vps">Hostinger</a> para máquinas VPS; para un home server, un <a href="https://go.bitdoze.com/asus-dc510">mini PC como el ASUS DC510</a> funciona bien. Mira <a href="/best-mini-pc-home-server/">los mejores mini PCs para home server</a> si aún eliges hardware.</li>
+<li>Docker Engine con el plugin Compose v2 (<code>docker compose version</code> debe funcionar). Si quieres una UI para el stack, usa <a href="/es/instalar-dockge/">Dockge, un gestor de Docker Compose para self-hosting</a>.</li>
+<li>Un dominio o subdominio apuntando al servidor (por ejemplo <code>langfuse.yourdomain.com</code>).</li>
+<li>Una ruta de reverse proxy: <a href="/cloudpanel-setup-dockge/">CloudPanel como reverse proxy con Docker y Dockge</a>, <a href="/traefik-proxy-docker/">cómo usar Traefik como reverse proxy en Docker</a>, o Cloudflare Tunnels (cubierto en el paso 5).</li>
+<li>Puertos del host libres: <code>5061</code> (UI web) y, si quieres health checks del lado del host, <code>3030</code> (worker). Comprueba con <code>ss -tlnp | grep -E '5061|3030'</code>.</li>
+<li>Al menos 50 GB de disco libre. ClickHouse y MinIO crecen con el volumen de trazas, y el backfill de v3 a v4 quiere margen.</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="Dimensionado: el ejemplo oficial es 4 núcleos / 16 GiB RAM / 100 GiB de disco">
+El propio ejemplo Docker Compose de Langfuse usa una VM de 4 núcleos, 16 GiB RAM y 100 GiB de disco (un t3.xlarge en términos AWS, aproximadamente una máquina clase Hetzner CPX41, del orden de 15-25 €/mes). La guía de contenedores para producción es al menos 2 CPU y 4 GB RAM por contenedor. Una máquina de 8 GB puede funcionar para volumen de hobby, pero está por debajo del ejemplo oficial y no la hemos probado. El heap de Node.js va por defecto a 1,7 GiB, así que el .env de abajo pone <code>NODE_OPTIONS=--max-old-space-size=4096</code>. Vigila la memoria tras desplegar con <a href="/sever-monitoring/">cómo monitorizar recursos del servidor y Docker</a>.
+</Notice>
+
+_Los precios de VPS saltaron en bloque en 2026. Si estás replanteándote una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/vps-price-increases/)._
+
+### 2. Archivo Docker Compose de Langfuse (imágenes v4)
+
+El stack v4 son seis servicios, misma forma que v3:
+
+1. **langfuse-worker** procesa eventos de trazas de la cola, los escribe en ClickHouse, y corre trabajos en segundo plano incluyendo el backfill histórico.
+2. **langfuse-web** sirve la UI y las APIs públicas en el puerto 5061 del host. Este es el contenedor al que apunta tu reverse proxy.
+3. **postgres** es la base de datos transaccional (PostgreSQL 17) para usuarios, organizaciones, proyectos, prompts y claves API.
+4. **clickhouse** es el almacén OLAP para eventos y analítica. Aquí es donde vive el modelo de datos v4 (`events_full` + `events_core`).
+5. **minio** es almacenamiento de blobs compatible con S3 para payloads de eventos (`events/`) y medios multi-modal (`media/`).
+6. **redis** mantiene la cola de ingestión y la caché. Perderlo te cuesta eventos encolados, no tu base de datos.
+
+![Arquitectura self-hosted de Langfuse v4: langfuse-web y langfuse-worker conectados a PostgreSQL, Redis, ClickHouse y MinIO](@assets/images/24/07/langfuse-v4-architecture.svg)
+
+Crea un directorio para el stack y suelta este archivo compose:
+
+```sh
+mkdir -p /opt/langfuse && cd /opt/langfuse
+```
+
+```yaml
+services:
+  langfuse-worker:
+    image: langfuse/langfuse-worker:4
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:3030:3030 # worker health endpoint (new vs the old v3 file)
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      NEXTAUTH_URL: https://langfuse.yourdomain.com
+      SALT: ${SALT}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      NODE_OPTIONS: --max-old-space-size=4096
+      TELEMETRY_ENABLED: false
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${REDIS_PASSWORD}
+
+  langfuse-web:
+    image: langfuse/langfuse:4
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - 5061:3000
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      NEXTAUTH_URL: https://langfuse.yourdomain.com
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      SALT: ${SALT}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      NODE_OPTIONS: --max-old-space-size=4096
+      TELEMETRY_ENABLED: false
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${REDIS_PASSWORD}
+      AUTH_DISABLE_SIGNUP: ${AUTH_DISABLE_SIGNUP}
+
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - ./langfuse-db:/var/lib/postgresql/data:rw
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12 # pinned: v4 minimum is 25.12, 26.4 recommended
+    restart: always
+    user: "101:101"
+    ports:
+      - 127.0.0.1:8123:8123 # localhost only
+      - 127.0.0.1:9000:9000
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ./langfuse-clickhouse:/var/lib/clickhouse
+      - ./langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - 127.0.0.1:9090:9000 # localhost only
+      - 127.0.0.1:9091:9001 # MinIO console, localhost only
+    volumes:
+      - ./langfuse-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    restart: always
+    command: >
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory-policy noeviction
+    ports:
+      - 127.0.0.1:6379:6379 # localhost only, for debugging
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  langfuse_redis_data:
+```
+
+<Notice type="info" title="Qué cambió frente al archivo viejo (v3)">
+- Tags de imagen: <code>langfuse/langfuse:3</code> y <code>langfuse/langfuse-worker:3</code> pasan a <code>:4</code>.
+- ClickHouse ahora está fijado en <code>clickhouse/clickhouse-server:25.12</code> (antes flotaba en <code>latest</code>, que es exactamente el tipo de deriva que rompe un stack meses después).
+- El worker publica <code>127.0.0.1:3030</code> para que puedas pegarle a su endpoint de salud.
+- Redis obtiene un volumen nombrado persistente; los puertos de ClickHouse, MinIO y Redis están enlazados a localhost en vez de al mundo.
+- Las credenciales MinIO usan los nombres oficiales <code>MINIO_ROOT_USER</code> / <code>MINIO_ROOT_PASSWORD</code>.
+- <code>NODE_OPTIONS</code> subido a 4 GiB para igualar la guía de contenedores.
+</Notice>
+
+Una nota sobre registries, ya que el compose oficial hace pull desde `docker.langfuse.com`:
+
+<Tabs>
+  <Tab name="Imágenes de Docker Hub">
+  El archivo de arriba usa <code>langfuse/langfuse:4</code> y <code>langfuse/langfuse-worker:4</code> de Docker Hub. Más simple de leer, funciona bien.
+  </Tab>
+  <Tab name="Registry oficial">
+  El compose oficial hace pull de <code>docker.langfuse.com/langfuse/langfuse:4</code>. Ese host es un espejo de Docker Hub (hace 307-redirect a registry-1.docker.io), así que las imágenes son idénticas. Usa esto si tu organización lista el registry de Langfuse en la allowlist.
+  </Tab>
+</Tabs>
+
+Notas sobre el archivo:
+
+- Las variables de entorno (`${VARIABLE_NAME}`) mantienen secretos y hostnames fuera del YAML. La siguiente sección los genera.
+- Todos los servicios de respaldo tienen healthchecks con `start_period`, y los contenedores Langfuse esperan a dependencias sanas antes de arrancar.
+- Los bind mounts (`./langfuse-db`, `./langfuse-clickhouse`, `./langfuse-minio`) mantienen los datos en el filesystem del host. Prefiero bind mounts aquí frente a volúmenes nombrados: son triviales de empaquetar en tar en la [sección de backups](#hacer-backup-de-tus-volúmenes-docker-de-langfuse) y triviales de inspeccionar cuando algo se rompe.
+- Telemetría desactivada. El default de compose de Langfuse es ahora `true`, así que mantén esta línea si no quieres estadísticas phone-home.
+- Los prefijos S3 `events/` y `media/` están puestos explícitamente; el servidor tiene los mismos defaults, así que esto es documentación más que configuración.
+- Para despliegues reproducibles, fija la versión de patch exacta (por ejemplo `langfuse/langfuse:4.56.0`, actual al 10-10-2026). El tag `:4` sigue el minor actual y se parchea aproximadamente a diario. Vigila los [GitHub releases](https://github.com/langfuse/langfuse/releases) de cualquier modo.
+
+La referencia completa de cada variable vive en los [docs oficiales de configuración self-hosting](https://langfuse.com/self-hosting/configuration). El archivo upstream contra el que hacer diff es el [docker-compose.yml oficial de Langfuse](https://github.com/langfuse/langfuse/blob/main/docker-compose.yml).
+
+### 3. El archivo .env: secretos y variables LANGFUSE_INIT opcionales
+
+Crea `.env` junto al archivo compose:
+
+```sh
+POSTGRES_USER='langfuse'
+POSTGRES_PASSWORD='change-me-strong'
+POSTGRES_DB='langfuse'
+NEXTAUTH_SECRET=
+SALT=
+ENCRYPTION_KEY=
+CLICKHOUSE_USER=clickhouse
+CLICKHOUSE_PASSWORD=change-me-strong
+MINIO_ROOT_USER=minio
+MINIO_ROOT_PASSWORD=change-me-strong
+REDIS_PASSWORD=change-me-strong
+AUTH_DISABLE_SIGNUP=false
+```
+
+Genera los tres secretos y pégalos. No deben ser adivinables, y `ENCRYPTION_KEY` tiene un formato fijo:
+
+<ListCheck>
+<ul>
+<li><code>openssl rand -base64 32</code> → <code>NEXTAUTH_SECRET</code></li>
+<li><code>openssl rand -base64 32</code> → <code>SALT</code></li>
+<li><code>openssl rand -hex 32</code> → <code>ENCRYPTION_KEY</code> (exactamente 64 caracteres hex)</li>
+</ul>
+</ListCheck>
+
+```sh
+openssl rand -base64 32
+openssl rand -base64 32
+openssl rand -hex 32
+```
+
+Luego bloquea el archivo:
+
+```sh
+chmod 600 .env
+```
+
+<Notice type="warning" title="Trata .env como un secreto de producción">
+Nunca lo subas a control de versiones y nunca lo pegues en un chat. <code>ENCRYPTION_KEY</code> protege credenciales de conexión sensibles: si lo pierdes, los valores cifrados en la base de datos no pueden descifrarse. Haz backup de <code>.env</code> junto con los volúmenes de datos (mira la sección de backups) o los backups son solo media ruta de restauración.
+</Notice>
+
+Inicialización headless opcional: si prefieres no hacer clic por el registro de primer arranque, Langfuse puede pre-crear la organización, el proyecto, las claves API y el primer usuario desde variables env al arrancar. Añade esto a `.env`:
+
+```sh
+# Optional: headless initialization (skip the UI first-run flow)
+# LANGFUSE_INIT_ORG_NAME=My Org
+# LANGFUSE_INIT_PROJECT_NAME=default
+# LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-...
+# LANGFUSE_INIT_USER_EMAIL=you@yourdomain.com
+# LANGFUSE_INIT_USER_PASSWORD=change-me-strong
+```
+
+Déjalas comentadas y el primer usuario se crea desde la página de registro en su lugar. Ambos caminos valen; el init headless es mejor cuando automatizas despliegues y quieres una clave API impresa en logs en vez de cliqueada. Detalles en los [docs de inicialización headless](https://langfuse.com/self-hosting/administration/headless-initialization).
+
+### 4. Desplegar el stack y verificar que está sano
+
+Arranca todo desde el directorio con el archivo compose:
+
+```sh
+docker compose up -d
+```
+
+Eso baja imágenes, crea contenedores y los arranca en segundo plano. Comprueba que existen:
+
+```sh
+docker compose ps
+```
+
+Los seis servicios deberían reportar `running`, y los cuatro servicios de respaldo deberían pasar a `healthy` en cosa de un minuto.
+
+<Notice type="info" title="El primer arranque tarda 2-3 minutos">
+Las migraciones corren al inicio. El contenedor web imprime <code>Ready</code> cuando termina. No reinicies a mitad de migración, y no entres en pánico si la UI está en blanco los primeros minutos.
+</Notice>
+
+Vigila el contenedor web hasta que esté listo:
+
+```sh
+docker compose logs -f langfuse-web
+```
+
+La señal de éxito es una línea de log `Ready`. Luego golpea los endpoints de salud:
+
+```sh
+# web: expect {"success":true}
+curl -s http://localhost:5061/api/public/health | jq
+
+# web with DB check: expect {"success":true}
+curl -s "http://localhost:5061/api/public/health?failIfDatabaseUnavailable=true" | jq
+
+# readiness: expect 200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5061/api/public/ready
+
+# worker: expect {"success":true}
+curl -s http://localhost:3030/api/health | jq
+```
+
+<ListCheck>
+<ul>
+<li><code>docker compose ps</code>: seis servicios corriendo, servicios de respaldo healthy</li>
+<li><code>docker compose logs langfuse-web</code>: línea <code>Ready</code> presente</li>
+<li><code>/api/public/health</code> devuelve `{"success":true}`</li>
+<li><code>curl localhost:3030/api/health</code> devuelve `{"success":true}`</li>
+<li>La UI carga en <code>http://your-server-ip:5061</code> (antes de que el tunnel esté arriba)</li>
+</ul>
+</ListCheck>
+
+La referencia oficial de endpoints es el [doc de endpoints de salud y readiness](https://langfuse.com/self-hosting/configuration/health-readiness-endpoints). Dos modos de fallo aparecen aquí más a menudo: una dependencia atascada en `unhealthy` (casi siempre credenciales malas en `.env`, revisa `docker compose logs postgres` o `clickhouse`), y el puerto 5061 del host ya ocupado (`ss -tlnp | grep 5061`, luego cambia el puerto del host en el archivo compose). Más de estos en la sección de troubleshooting.
+
+### 5. HTTPS con Cloudflare Tunnels
+
+[Cloudflare Tunnels](https://www.cloudflare.com/products/tunnel/) conectan tu app a internet sin abrir puertos entrantes en el servidor. El daemon `cloudflared` marca hacia la red de Cloudflare y mantiene un tunnel persistente a tu origen. Las peticiones a tu dominio bajan por ese tunnel a tu servidor, y las respuestas suben por él. Sin port forwarding, sin agujeros de firewall.
+
+En el panel de Cloudflare Zero Trust, ve a **Access - Tunnels**, elige tu tunnel, y añade un hostname que mapee tu subdominio al servicio y puerto (`http://langfuse-web:3000` si el tunnel corre en la misma red Docker, o `http://localhost:5061` si corre en el host).
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Panel de Cloudflare Zero Trust mostrando un hostname de tunnel enrutado a Langfuse en el puerto 5061" />
+
+Verifica desde tu estación de trabajo:
+
+```sh
+curl -I https://langfuse.yourdomain.com
+```
+
+Deberías obtener un `302` o `200` apuntando a la página de login de Langfuse, no un error de Cloudflare. Si ves un `502`, el tunnel no puede alcanzar el puerto de origen.
+
+<Notice type="info" title="NEXTAUTH_URL debe coincidir con la URL pública">
+Lo que pongas en <code>NEXTAUTH_URL</code> debe ser exactamente la URL que los usuarios escriben en el navegador, incluyendo https. Un desajuste es la causa clásica de bucles de redirección de login tras montar el tunnel.
+</Notice>
+
+Alternativamente, puedes usar [Setup CloudPanel as Reverse Proxy with Docker and Dockge](/cloudpanel-setup-dockge/) o [How to Use Traefik as A Reverse Proxy in Docker](/traefik-proxy-docker/).
+
+### 6. Primer login: crea tu cuenta de admin (o haz init headless)
+
+<Notice type="info" title="Sin cuenta de admin por defecto">
+Langfuse se entrega sin ningún login. La primera cuenta creada por la página de registro se convierte en la admin. Si los registros ya están desactivados y no tienes cuenta, quedarás fuera, así que crea la admin antes de activar <code>AUTH_DISABLE_SIGNUP</code>.
+</Notice>
+
+<Tabs>
+  <Tab name="Crear admin en la UI (default)">
+  1. Abre <code>https://langfuse.yourdomain.com</code>.
+  2. Usa la opción de registro en la página de login. El primer usuario se convierte en la admin.
+  3. Crea un proyecto, luego abre los ajustes del proyecto y genera una clave API (par de clave pública + secreta).
+  4. Apunta el SDK de tu app a la instancia y empieza a enviar trazas.
+  </Tab>
+  <Tab name="Init headless vía LANGFUSE_INIT_*">
+  1. Pon las variables <code>LANGFUSE_INIT_*</code> en <code>.env</code> antes del primer arranque (sección anterior).
+  2. <code>docker compose up -d</code> crea la organización, el proyecto, las claves API y el primer usuario.
+  3. Entra con <code>LANGFUSE_INIT_USER_EMAIL</code> / <code>LANGFUSE_INIT_USER_PASSWORD</code>.
+  4. Rota la clave secreta generada si la generaste fuera de Langfuse.
+  </Tab>
+</Tabs>
+
+Una vez dentro, el ciclo de despliegue está cerrado: proyecto creado, clave API generada, listo para trazar. En v4 la pantalla principal es la vista de **Observations** filtrada a observaciones raíz, no la vieja tabla de trazas de v3, así que las capturas más viejas pueden resultar extrañas.
+
+Puedes integrarlo con tus apps IA a continuación. El vídeo incrustado muestra la integración con Flowise; para la otra mitad de ese stack mira [cómo instalar FlowiseAI con Docker Compose](/flowiseai-install/).
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag2} alt="Dashboard de Langfuse tras el primer login con proyectos, trazas y claves API" />
+
+## Actualizar una instalación Langfuse v3 existente a v4
+
+Si seguiste la versión vieja de esta guía, la actualización son tres pasos y puedes pausar entre ellos. No es una instalación nueva: tus datos se quedan en los mismos bind mounts. El detalle completo vive en la [guía oficial de actualización v3 a v4](https://langfuse.com/self-hosting/upgrade/upgrade-guides/upgrade-v3-to-v4); esto es el resumen para operadores.
+
+![Cronología de migración de Langfuse v3 a v4: backup, actualización de ClickHouse, imágenes v4 con backfill, luego cutover](@assets/images/24/07/langfuse-v3-to-v4-migration.svg)
+
+<Notice type="error" title="Haz backup antes de actualizar">
+Las migraciones v4 no son reversibles cambiando las imágenes de vuelta a <code>:3</code>. Después de que el schema migra, un simple cambio a imagen v3 falla con <code>no migration found for version 46</code>. Haz un backup completo (Postgres + ClickHouse + MinIO + .env) antes de tocar las imágenes. Mira <a href="#hacer-backup-de-tus-volúmenes-docker-de-langfuse">hacer backup de tus volúmenes Docker de Langfuse</a>.
+</Notice>
+
+**Paso 1: actualiza ClickHouse primero, aún en v3.** v4 necesita ClickHouse >= 25.12 (26.4 recomendado) para lightweight updates, el tipo JSON y la búsqueda de texto completo. Las releases v3 actuales son compatibles con ClickHouse actual, así que sube la imagen en el stack v3 corriendo:
+
+```yaml
+clickhouse:
+  image: clickhouse/clickhouse-server:25.12
+```
+
+```sh
+docker compose up -d clickhouse
+docker compose ps   # clickhouse must go healthy before you continue
+```
+
+**Paso 2: sube las imágenes del servidor a v4.** Cambia `langfuse/langfuse:3` y `langfuse/langfuse-worker:3` a `:4`, luego:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+Las migraciones de schema corren automáticamente al arrancar. Los datos históricos se re-rellenan en segundo plano, de más nuevo a más viejo. El backfill es reanudable, pero necesita espacio de trabajo.
+
+<Notice type="warning" title="Margen de disco para el backfill">
+El backfill histórico usa una tabla de trabajo y necesita del orden de 3x tu uso de disco actual de ClickHouse hasta que se limpie. Si el disco está justo, añade espacio primero: <a href="/add-new-drive-lvm/">añade un nuevo disco a Ubuntu LVM y móntalo permanentemente</a>.
+</Notice>
+
+El comportamiento de escritura durante la migración se controla con variables env que puedes poner en ambos contenedores:
+
+| Variable | Valores | Default | Qué controla |
+| --- | --- | --- | --- |
+| `LANGFUSE_MIGRATION_V4_WRITE_MODE` | `legacy`, `dual`, `events_only` | `events_only` | Qué pipelines aceptan escrituras. En modo `dual`, los datos de SDKs viejos aparecen con unos 15 minutos de retardo (pipeline de staging). |
+| `LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR` | ver guía de actualización | - | Comportamiento de ingestión OTEL nativa durante la migración. |
+| `LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN` | ver guía de actualización | - | Opt-in para rutas de ingestión de preview. |
+| `LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL` | `true`, `false` | `true` | Backfill en segundo plano de datos históricos al nuevo modelo. |
+| `LANGFUSE_BACKGROUND_MIGRATION_V4_DROP_PID_TID_SORTING_TABLES` | `true`, `false` | ver guía de actualización | Limpieza de viejas tablas de ordenación tras el backfill. |
+
+Si corre un periodo de escritura dual, comprueba la sonda de propagación del worker (espera la publicación de puerto `127.0.0.1:3030` del archivo compose de arriba):
+
+```sh
+curl -s "http://localhost:3030/api/health?failIfEventPropagationStuck=true" | jq
+```
+
+Un `503` significa que la propagación de eventos lleva atascada más de 15 minutos. Arréglalo antes del cutover.
+
+**Paso 3: cutover, el punto de no retorno.** Actualiza primero tus SDKs: la escritura directa necesita Python SDK >= 4.7.0 y JS/TS SDK >= 5.4.0. Los clientes Python v2 y JS/TS v3 son rechazados una vez que estás en la nueva ruta de escritura. Luego mueve los evaluadores a puntuación a nivel de observación, cambia las exportaciones a la fuente "Enriched observations", y corre con defaults. Desde aquí, un rollback a v3 es un rewind de schema (`migrate ... goto 37` desde la imagen web v4 en `/app/packages/shared`) o una restauración desde tu backup. Prefiere el backup.
+
+La infraestructura en sí no cambió: mismos contenedores web y worker, mismo PostgreSQL, ClickHouse, Redis y S3. Solo se movieron las versiones mínimas (ClickHouse 25.12, PostgreSQL 15, Redis 7.0). Una advertencia honesta: este resumen sigue la guía oficial, pero una actualización de ClickHouse en sitio sobre datos en bind-mount merece una pasada en staging antes de hacerla en algo que te importe.
+
+## Troubleshooting: fallos comunes de la instalación Docker de Langfuse
+
+<Accordion label="Un contenedor de dependencia se queda unhealthy" group="troubleshooting" expanded="true">
+Cuando <code>docker compose ps</code> muestra postgres, clickhouse, minio o redis como <code>unhealthy</code>, los contenedores Langfuse nunca arrancan (están bloqueados en <code>service_healthy</code>). Casi siempre son credenciales malas en <code>.env</code>, o un directorio de volumen con propiedad incorrecta (ClickHouse corre como uid 101).
+
+Revisa <code>docker compose logs postgres</code> (o <code>clickhouse</code>, <code>minio</code>, <code>redis</code>) y lee el error de auth. Para bind mounts de ClickHouse: <code>sudo chown -R 101:101 ./langfuse-clickhouse ./langfuse-clickhouse-logs</code>. Luego <code>docker compose up -d</code> para reintentar.
+</Accordion>
+
+<Accordion label="El puerto 5061 o 3030 ya está en uso" group="troubleshooting">
+<code>docker compose up -d</code> falla con <code>Bind for 0.0.0.0:5061 failed: port is already allocated</code> cuando otro contenedor o servicio del host posee el puerto.
+
+Encuentra al culpable con <code>ss -tlnp | grep -E '5061|3030'</code>, luego páralo o remapea el puerto del host (por ejemplo <code>5062:3000</code>). Mantén <code>NEXTAUTH_URL</code> apuntando a lo que los usuarios navegan.
+</Accordion>
+
+<Accordion label="El contenedor web nunca imprime Ready" group="troubleshooting">
+Pasan minutos y <code>docker compose logs -f langfuse-web</code> muestra migraciones o errores en vez de <code>Ready</code>. O las migraciones siguen corriendo (dale 2-3 minutos), ClickHouse es más viejo que 25.12 (si actualizaste desde v3 sin subir ClickHouse primero), o el contenedor web no puede alcanzar uno de los servicios de respaldo.
+
+Revisa el final del log para el error real. Confirma que ClickHouse responde: <code>curl -s http://localhost:8123/ping</code> debería imprimir <code>Ok.</code>. Confirma que el host de <code>DATABASE_URL</code> es <code>postgres</code> (el nombre del servicio compose), no <code>localhost</code>.
+</Accordion>
+
+<Accordion label="OOM kills o el proceso Node se queda sin heap" group="troubleshooting">
+Los contenedores se reinician con código de salida 137, o la UI web muere bajo carga. La máquina es demasiado pequeña (16 GiB es el ejemplo oficial) o el default de heap de Node de 1,7 GiB es demasiado bajo para tu volumen de trazas.
+
+El archivo compose de arriba pone <code>NODE_OPTIONS=--max-old-space-size=4096</code>; súbelo junto con los límites de memoria del contenedor si tienes la RAM. Vigila el uso con <a href="/sever-monitoring/">cómo monitorizar recursos del servidor y Docker</a>. Si la máquina tiene 8 GB, espera problemas por encima de volumen de hobby y considera redimensionar.
+</Accordion>
+
+<Accordion label="La cola del worker está atascada" group="troubleshooting">
+Las trazas no aparecen en la UI, pero la API las acepta. El worker dejó de consumir de Redis (a menudo tras un reinicio de Redis o un evento OOM).
+
+<code>curl -s "http://localhost:3030/api/health?failIfQueueConsumptionStuck=true" | jq</code> devuelve 503 si no se ha procesado ningún trabajo en más de 60 minutos. <code>docker compose restart langfuse-worker</code>, luego verifica que llegan nuevas trazas. Los eventos encolados de la ventana de caída pueden perderse, dependiendo de cuándo persistió Redis por última vez.
+</Accordion>
+
+<Accordion label="El login vuelve a la página de registro o redirige mal" group="troubleshooting">
+Tras levantar el tunnel o reverse proxy, el login te rebota entre la página de login y un error. La causa es que <code>NEXTAUTH_URL</code> no coincide exactamente con la URL pública (esquema, host, barra final).
+
+Pon <code>NEXTAUTH_URL=https://langfuse.yourdomain.com</code> exactamente a lo que los usuarios escriben, luego <code>docker compose up -d</code> (un cambio de env basta; no hace falta pull).
+</Accordion>
+
+## Asegurar tu instancia Langfuse self-hosted
+
+Por defecto, cualquiera que encuentre la URL puede registrarse y crear una cuenta. Después de crear la cuenta de admin, activa el flag en `.env`:
+
+```sh
+AUTH_DISABLE_SIGNUP=true
+```
+
+Aplica el cambio:
+
+```sh
+docker compose up -d
+```
+
+<Notice type="warning" title="Desactivar registros también bloquea invitaciones">
+<code>AUTH_DISABLE_SIGNUP=true</code> bloquea cualquier creación de cuenta nueva, incluyendo usuarios que tienen una invitación de proyecto abierta. Desactívalo temporalmente para incorporar compañeros, luego vuelve a activarlo. No necesitas <code>docker compose pull</code> para un cambio de env; <code>up -d</code> recrea los contenedores con el nuevo valor.
+</Notice>
+
+Más opciones de endurecimiento de los [docs oficiales de hardening](https://langfuse.com/self-hosting/configuration/hardening):
+
+- `AUTH_EMAIL_VERIFICATION_REQUIRED=true` si tienes SMTP configurado.
+- `AUTH_SESSION_MAX_AGE` controla la duración de la sesión (default 43200 minutos, 30 días). Bájalo en máquinas compartidas.
+- `AUTH_DOMAINS_WITH_SSO_ENFORCEMENT` y `AUTH_DISABLE_USERNAME_PASSWORD=true` si corres SSO y quieres que el login con contraseña desaparezca por completo.
+- Langfuse self-hosted rechaza objetivos privados o de loopback para conexiones LLM configuradas por el usuario y webhooks por defecto (defensa SSRF). Hay overrides `*_WHITELISTED_*` si apuntas intencionadamente a un servidor de modelos interno.
+
+<ListCheck>
+<ul>
+<li>Desactiva registros tras la primera admin</li>
+<li>Valores únicos fuertes en <code>.env</code>, modo de archivo <code>600</code>, nunca en el repo</li>
+<li>Telemetría desactivada si el servidor tiene egress restringido</li>
+<li>Duración de sesión bajada para coincidir con tu modelo de amenaza</li>
+<li>Verificación de email activada si hay SMTP</li>
+<li>Puertos de servicios internos enlazados a <code>127.0.0.1</code> (como en el archivo compose de arriba)</li>
+</ul>
+</ListCheck>
+
+A nivel de servidor entero, no solo Langfuse: [cómo aseguré mi servidor Docker (guía de hardening BSI)](/bsi-security-report-docker-ufw/) cubre el firewall y los agujeros específicos de Docker que importan aquí.
+
+Límite de coste que vale conocer: el núcleo es licencia MIT y gratis para siempre, pero SSO/SAML, RBAC, SCIM y audit logs viven en la edición enterprise y requieren una clave de licencia de pago. Todo lo de esta guía corre sin ella.
+
+## Hacer backup de tus volúmenes Docker de Langfuse
+
+Self-hostear significa que los datos son tuyos de perder. El stack escribe en tres bind mounts y un volumen nombrado:
+
+| Ruta | Contiene | Método de backup | Criticidad |
+| --- | --- | --- | --- |
+| `./langfuse-db` | PostgreSQL: usuarios, orgs, proyectos, prompts, claves API | `pg_dump` en cron | Crítica |
+| `./langfuse-clickhouse` (+ `-logs`) | Trazas, eventos, analítica | Snapshot de volumen o `clickhouse-backup` | Crítica |
+| `./langfuse-minio` | Payloads de eventos y blobs de medios | Tar o rclone a almacenamiento compatible con S3 | Alta |
+| `langfuse_redis_data` | Cola y caché | Saltar; reconstruible | Baja |
+| `.env` | Todos los secretos incluyendo `ENCRYPTION_KEY` | Copia cifrada fuera del sitio | Crítica |
+
+Los backups de ClickHouse son tu trabajo al self-hostear. La [guía oficial de backups](https://langfuse.com/self-hosting/configuration/backups) dice lo mismo: snapshots de volumen o `clickhouse-backup`, tú eliges. Un script mínimo programable por cron:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/langfuse
+set -a; source ./.env; set +a   # export POSTGRES_USER / POSTGRES_DB for pg_dump
+STAMP=$(date +%F)
+DEST="/backup/langfuse/$STAMP"
+mkdir -p "$DEST"
+
+# Postgres logical dump
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$DEST/postgres.sql.gz"
+
+# ClickHouse: cold copy of the data dir (stop-free, consistent enough for most self-hosters;
+# use clickhouse-backup for stricter consistency)
+sudo tar -czf "$DEST/clickhouse.tar.gz" ./langfuse-clickhouse
+
+# MinIO blobs
+sudo tar -czf "$DEST/minio.tar.gz" ./langfuse-minio
+
+# Secrets: without these, the volume backups are half a restore
+cp .env "$DEST/env.copy"
+
+# Offsite sync (rclone, restic, rsync over SSH, whatever you already trust)
+# rclone sync "$DEST" remote:langfuse-backups/"$STAMP"
+```
+
+<Notice type="warning" title="Los backups incluyen .env">
+Sin <code>ENCRYPTION_KEY</code> y la contraseña de la base de datos, los volcados de los volúmenes no pueden descifrarse ni cargarse. Guarda <code>.env</code> con los backups, cifrado en reposo, en un dominio de fallo distinto al VPS.
+</Notice>
+
+<ListCheck>
+<ul>
+<li><code>.env</code> incluido y guardado cifrado fuera del sitio</li>
+<li><code>pg_dump</code> de Postgres en cron diario</li>
+<li>Snapshot de ClickHouse o <code>clickhouse-backup</code> semanal, y antes de cada actualización</li>
+<li>Volumen de MinIO sincronizado a almacenamiento compatible con S3</li>
+<li>Ensayo de restauración en una máquina de prueba al menos una vez por trimestre</li>
+</ul>
+</ListCheck>
+
+**Verifica el backup, no solo el trabajo de backup.** Restaura los tres directorios de datos más `.env` en un directorio compose limpio en otra máquina, corre `docker compose up -d`, y comprueba que aparecen tus proyectos y trazas. Un backup que nunca has restaurado es una hipótesis. Para la parte offsite, mira [configurar backups de Dokploy con Cloudflare R2 (compatible con S3)](/dokploy-backups-cloudflare-r2/).
+
+## Langfuse self-hosted vs LangSmith: precios 2026
+
+La parte de "alternativa a LangSmith" del título es mayormente un argumento de coste y control de datos. Cifras al 10-10-2026:
+
+| | Langfuse self-hosted | Langfuse Cloud | LangSmith |
+| --- | --- | --- | --- |
+| Nivel de entrada | Gratis (núcleo MIT) | Hobby: gratis | Developer: $0 |
+| Niveles de pago | Clave de licencia solo para add-ons EE | Core $29/mes, Pro $199/mes, Enterprise $2499/mes | Plus $39/asiento/mes, Enterprise a medida |
+| Modelo de uso | Ilimitado, tu hardware | Hobby 50k unidades/mes; Core 100k incluidas, $8/100k extra | Dev 5k trazas base/mes; Plus 10k trazas base |
+| Retención | Lo que aguante tu disco | Hobby 30 días, Core 90 días, Pro 3 años | Depende del plan |
+| Opción self-hosted | Sí, es esta guía | No | Solo Enterprise |
+| Mejor para | Control de datos, volumen y sin facturación por asiento | Pocas ops, arranque rápido | Equipos LangChain que ya pagan por asiento |
+
+<Notice type="info" title="Precios comprobados 10-10-2026">
+Verificado contra <a href="https://langfuse.com/pricing">langfuse.com/pricing</a> y <a href="https://www.langchain.com/pricing">langchain.com/pricing</a> el 10-10-2026. Las páginas de precios cambian; vuelve a comprobar si lees esto más de un mes después.
+</Notice>
+
+La matemática de coste del self-hosting es el VPS más tu tiempo. En una máquina clase CPX41 de [Hetzner](https://go.bitdoze.com/hetzner) (orden de magnitud 15-25 €/mes) tienes trazas ilimitadas y usuarios ilimitados, y el trade-off es que posees las actualizaciones y los backups. Cuando un equipo necesita SSO/SAML, RBAC, SCIM o audit logs, esos son features de la edición enterprise que necesitan una clave de licencia de pago encima. La plataforma núcleo de esta guía sigue gratis de todas formas.
+
+## Conclusión
+
+Self-hostear Langfuse con Docker Compose te da control total sobre tus datos y corre la misma infraestructura que alimenta Langfuse Cloud. El rendimiento depende de tu hardware, el ejemplo oficial empieza en 4 núcleos y 16 GiB, y los endpoints de salud te dicen rápido cuándo algo va mal.
+
+El resumen para operadores: despliega el stack v4 de seis servicios, verifica con `/api/public/health` y la sonda del worker, haz backup de los volúmenes más `.env` antes de necesitarlos, y decide entre el tag flotante `:4` y un `langfuse/langfuse:4.56.0` fijado (actual 10-10-2026) según quieras parches automáticos o despliegues reproducibles. Si sigues en v3, actualiza antes de finales de enero de 2027.
+
+Un ángulo más si usas agentes de codificación: la organización Langfuse publica plugins de observabilidad que trazan sesiones de Claude Code, Codex, Cursor, [OpenCode](https://go.bitdoze.com/opencode-go) y Pi a Langfuse, más un servidor MCP (el bloque env `LANGFUSE_MCP_*`) que expone la gestión de prompts a agentes. Es pronto, pero trazar sesiones de agentes al mismo sitio que las trazas de tu app es útil una vez que depuras ejecuciones de agente multi-paso.
+
+Si quieres explorar más contenedores Docker para tu home server, incluyendo otras herramientas IA, mira los [mejores 100+ contenedores Docker para home server](/es/contenedores-docker-servidor-casa/). Langfuse también está listado con LiteLLM, OmniRoute y el stack de agentes en [top AI GitHub repos](/top-ai-github-repos/).
+
+<Button text="Docs oficiales de Langfuse" link="https://langfuse.com/self-hosting" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Guía de actualización v3 a v4" link="https://langfuse.com/self-hosting/upgrade/upgrade-guides/upgrade-v3-to-v4" variant="outline" color="blue" size="md" />

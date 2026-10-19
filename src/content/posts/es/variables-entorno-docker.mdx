@@ -1,0 +1,602 @@
+---
+date: 2026-10-06T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "docker-env-vars"
+title: "Cómo Usar Variables de Entorno en Docker: ARG vs ENV"
+meta_title: "Variables de Entorno en Docker: ARG vs ENV (Guía Dockerfile)"
+description: "Aprende cómo funcionan las variables de entorno en Docker: ARG para build time, ENV para runtime, en Dockerfiles y Docker Compose. Ejemplos, reglas de precedencia, secrets."
+image: "@assets/images/24/01/docker-user-env-vars.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "docker-compose", "dockerfile"]
+canonical: "https://www.bitdoze.com/es/variables-entorno-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Las variables de entorno en Docker parecen simples hasta que un contenedor las ignora silenciosamente. Esta guía cubre las dos instrucciones de Dockerfile que las definen: ARG para build time, y ENV para build time más runtime. También cubre cómo Docker Compose apila interpolación, `env_file` y reglas de precedencia encima. Tienes ejemplos funcionales para cada uno, más comandos de verificación para correr tras cada cambio.
+
+Todo aquí está comprobado contra el Docker actual (octubre 2026): BuildKit es el builder por defecto desde Engine 23, Compose va por v5.x (el viejo comando `docker-compose` V1 con guion lleva muerto tiempo), y el campo `version:` en los archivos compose ahora emite un aviso de obsoleto. Primero el modelo mental, luego snippets copiables, luego los modos de fallo que hacen que las variables de entorno "no funcionen", incluida la trampa del CMD en forma exec que atrapa a casi todo el mundo.
+
+## ¿Qué son las variables de entorno en Docker?
+
+Las variables de entorno son pares clave/valor definidos en el entorno de un proceso. Tu aplicación las lee al arrancar (o después) en vez de hardcodear configuración. En Docker hacen el mismo trabajo: una imagen puede apuntar a una base de datos de prueba en un contenedor y a una de producción en el siguiente, sin rebuild.
+
+Docker añade dos instrucciones sobre el env de proceso plano. `ARG` alimenta valores durante el build de la imagen. `ENV` define valores que persisten en la imagen y aterrizan en el entorno del contenedor en runtime. También puedes inyectar variables en runtime sin tocar la imagen, con `docker run -e` o un bloque `environment:` de Docker Compose. Esa es toda la caja de herramientas.
+
+Dentro del contenedor, cómo lees una variable depende de tu lenguaje: `os.environ` en Python, `process.env` en Node, `$VAR` en un script shell. La variable en sí es la misma en todas partes.
+
+<ListCheck>
+<ul>
+<li>Build args con `ARG` y `docker build --build-arg`</li>
+<li>Config de runtime con `ENV` y `docker run -e`</li>
+<li>Variables de entorno en Docker Compose, `env_file` e interpolación de `.env`</li>
+<li>Qué valor gana: el orden de precedencia de Compose</li>
+<li>Secrets hechos con seguridad (build secret mounts, Compose secrets)</li>
+<li>Comandos de verificación para cada paso</li>
+</ul>
+</ListCheck>
+
+Más guías de Docker en este sitio:
+
+- [añade un usuario no-root a un contenedor Docker](https://www.bitdoze.com/add-users-to-docker-container/)
+- [copia múltiples archivos en una capa de Dockerfile](https://www.bitdoze.com/copy-multiple-files-in-one-layer-using-a-dockerfile/)
+- [instala Docker en Ubuntu](https://www.bitdoze.com/install-docker-ubuntu-arm/)
+- [redirige los logs de Docker a un solo archivo](https://www.bitdoze.com/redirect-docker-logs-to-a-single-file/)
+
+### ARG vs ENV: en qué se diferencian
+
+| | ARG | ENV |
+|---|---|---|
+| Se define en | Build time | Build time, persiste en runtime |
+| Visible en el contenedor corriendo | No | Sí |
+| Se puede pisar en `docker run` | No | Sí, con `-e` |
+| Horneado en la config de la imagen | No | Sí |
+| Visible en `docker history` | Sí, si se usa en una capa | Sí |
+
+Una sutileza que los docs oficiales deletrean: si un `ENV` y un `ARG` comparten nombre, el valor `ENV` gana para cada instrucción `RUN` posterior. Un `--build-arg` pasado solo funciona mientras el ARG es la fuente de verdad. Y aunque ARG no se convierte en variable de runtime, los valores usados en capas de build son legibles en `docker history`. Trátalos como públicos (más en la sección de secrets).
+
+<Notice type="warning" title="Los dos errores que más cuestan">
+<p>El CMD en forma exec <code>CMD ["python", "app.py"]</code> <strong>no</strong> expande <code>$VAR</code>. Si tu app recibe la cadena literal <code>$DB_URL</code>, es por esto.</p>
+<p>Los valores ARG usados en capas de build aparecen en <code>docker history</code>. Nunca pongas contraseñas o tokens en ARG o ENV.</p>
+</Notice>
+
+<svg viewBox="0 0 700 360" role="img" aria-label="Docker environment variables diagram showing ARG for build-time and ENV for build-time plus runtime in a Dockerfile and Docker Compose file" xmlns="http://www.w3.org/2000/svg">
+  <title>Docker environment variables: ARG vs ENV lifecycle from build to container</title>
+  <rect width="700" height="360" fill="#f8fafc" rx="8" />
+  <rect x="20" y="50" width="150" height="70" fill="#e0f2fe" stroke="#0369a1" strokeWidth="2" rx="6" />
+  <text x="95" y="80" fontSize="12" fontFamily="monospace" fill="#0c4a6e" textAnchor="middle">docker build</text>
+  <text x="95" y="100" fontSize="12" fontFamily="monospace" fill="#0c4a6e" textAnchor="middle">--build-arg NAME=x</text>
+  <line x1="170" y1="85" x2="215" y2="85" stroke="#334155" strokeWidth="2" />
+  <polygon points="215,85 205,80 205,90" fill="#334155" />
+  <rect x="215" y="50" width="130" height="70" fill="#fef3c7" stroke="#b45309" strokeWidth="2" rx="6" />
+  <text x="280" y="80" fontSize="13" fontFamily="monospace" fill="#78350f" textAnchor="middle">ARG</text>
+  <text x="280" y="100" fontSize="11" fontFamily="sans-serif" fill="#78350f" textAnchor="middle">build stage only</text>
+  <line x1="345" y1="85" x2="395" y2="85" stroke="#334155" strokeWidth="2" />
+  <polygon points="395,85 385,80 385,90" fill="#334155" />
+  <text x="370" y="72" fontSize="10" fontFamily="sans-serif" fill="#475569" textAnchor="middle">ARG to ENV</text>
+  <rect x="395" y="50" width="130" height="70" fill="#dcfce7" stroke="#15803d" strokeWidth="2" rx="6" />
+  <text x="460" y="80" fontSize="13" fontFamily="monospace" fill="#14532d" textAnchor="middle">ENV</text>
+  <text x="460" y="100" fontSize="11" fontFamily="sans-serif" fill="#14532d" textAnchor="middle">image config</text>
+  <line x1="525" y1="85" x2="575" y2="85" stroke="#334155" strokeWidth="2" />
+  <polygon points="575,85 565,80 565,90" fill="#334155" />
+  <text x="550" y="72" fontSize="10" fontFamily="sans-serif" fill="#475569" textAnchor="middle">-e override</text>
+  <rect x="575" y="50" width="110" height="70" fill="#ede9fe" stroke="#6d28d9" strokeWidth="2" rx="6" />
+  <text x="630" y="80" fontSize="11" fontFamily="monospace" fill="#4c1d95" textAnchor="middle">container</text>
+  <text x="630" y="98" fontSize="11" fontFamily="monospace" fill="#4c1d95" textAnchor="middle">os.environ</text>
+  <text x="350" y="30" fontSize="13" fontFamily="sans-serif" fill="#0f172a" textAnchor="middle">Build time ---------------------------&gt; runtime</text>
+  <line x1="280" y1="120" x2="280" y2="190" stroke="#b91c1c" strokeWidth="2" strokeDasharray="6 4" />
+  <polygon points="280,195 275,185 285,185" fill="#b91c1c" />
+  <rect x="185" y="195" width="200" height="60" fill="#fee2e2" stroke="#b91c1c" strokeWidth="2" rx="6" />
+  <text x="285" y="220" fontSize="12" fontFamily="monospace" fill="#7f1d1d" textAnchor="middle">docker history</text>
+  <text x="285" y="240" fontSize="11" fontFamily="sans-serif" fill="#7f1d1d" textAnchor="middle">ARG values used in layers leak</text>
+  <rect x="420" y="195" width="260" height="60" fill="#f1f5f9" stroke="#64748b" strokeWidth="1.5" rx="6" />
+  <text x="550" y="220" fontSize="11" fontFamily="sans-serif" fill="#334155" textAnchor="middle">ENV is overridable per container:</text>
+  <text x="550" y="240" fontSize="11" fontFamily="monospace" fill="#334155" textAnchor="middle">docker run -e DB_URL=... image</text>
+  <rect x="20" y="290" width="665" height="50" fill="#ffffff" stroke="#cbd5e1" strokeWidth="1" rx="6" />
+  <text x="350" y="312" fontSize="11" fontFamily="sans-serif" fill="#334155" textAnchor="middle">Compose adds interpolation ($&#123;VAR:-default&#125;) and precedence: run -e beats environment: beats env_file: beats image ENV</text>
+  <text x="350" y="330" fontSize="11" fontFamily="sans-serif" fill="#334155" textAnchor="middle">Secrets: use build --secret mounts and Compose secrets, never ARG or ENV</text>
+</svg>
+
+## Usando variables ARG en un Dockerfile (build args)
+
+Un `ARG` declara una variable que solo existe durante `docker build`. Pasas valores con `--build-arg`. Si no pasas uno, aplica el default del Dockerfile.
+
+Declara el ARG, refiérelo en instrucciones posteriores, písalo en build time:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+ARG NODE_VERSION=24
+FROM node:${NODE_VERSION}-alpine
+
+ARG APP_VERSION=0.0.0
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+RUN echo "Building version ${APP_VERSION}"
+CMD ["node", "server.js"]
+```
+
+Puedes declarar varios ARGs en una línea (`ARG APP_VERSION=0.0.0 APP_ENV=dev`) y pasar varios flags `--build-arg`:
+
+```bash
+docker build -t my_image \
+  --build-arg NODE_VERSION=24 \
+  --build-arg APP_VERSION=1.4.2 .
+```
+
+Verifica que el build tuvo éxito, luego comprueba qué se filtró al historial de la imagen:
+
+```bash
+docker history my_image --no-trunc | grep APP_VERSION
+```
+
+Si el build falla con "empty or invalid base image name", un ARG global usado en `FROM` estaba vacío; mira la sección de scope abajo. Para la referencia completa de flags de `docker build`, mira [comandos esenciales de Docker](https://www.bitdoze.com/docker-commands/).
+
+### Scope de ARG: global vs en-stage (antes y después de FROM)
+
+`ARG` es la única instrucción permitida antes de `FROM`, pero también puedes declarar ARGs en cualquier sitio dentro de un stage. La regla que la gente hace mal: un ARG declarado antes de `FROM` **no** se hereda al stage. Para usarlo tras `FROM`, redéclaralo sin default dentro del stage:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+ARG VERSION=latest          # global scope, usable in FROM
+FROM alpine:${VERSION}
+ARG VERSION                 # bare re-declaration, picks up the global value
+RUN echo "$VERSION"         # prints the value here
+```
+
+Un ARG declarado dentro de un stage lo heredan los stages hijos basados en ese stage. Los stages no relacionados no pueden verlo. Dos build checks vigilan esta zona: `UndefinedArgInFrom` marca una variable no declarada usada en `FROM`, e `InvalidDefaultArgInFrom` marca un ARG global sin default usable cuando no has pasado uno.
+
+<Notice type="info" title="La línea que la gente olvida">
+<p>El <code>ARG VERSION</code> pelado tras <code>FROM</code>. Sin él, <code>$VERSION</code> dentro del stage está vacío, aunque <code>--build-arg VERSION=1.2.3</code> funcionó bien en <code>FROM</code>.</p>
+</Notice>
+
+Modos de fallo: `FROM $VAR` con un VAR no declarado dispara `UndefinedArgInFrom`. Un `ARG BASE` global sin default y sin `--build-arg` da "empty or invalid base image name". Arregla ambos declarando un default (`ARG BASE=alpine:3.21`) o pasando el flag.
+
+### Pisando defaults con `docker build --build-arg`
+
+`--build-arg NAME=value` es repetible, un flag por variable. Omite el flag y aplica el default del Dockerfile. Declara un ARG sin default y no pases nada, y el valor es una cadena vacía, normalmente un mal momento.
+
+Dos grupos predefinidos que vale conocer:
+
+- Los args de proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` y variantes en minúsculas) son usables sin declararlos. Están excluidos de `docker history` por defecto. Sáltate la línea explícita `ARG HTTP_PROXY`: redeclararlo devuelve el valor a `docker history` y ata la caché de capas a él.
+- Los args de plataforma de BuildKit (`TARGETPLATFORM`, `TARGETOS`, `TARGETARCH`, `TARGETVARIANT`, `BUILDPLATFORM`) están disponibles en scope global. Como cualquier ARG global, necesitan una redeclaración pelada dentro de un stage (`ARG TARGETARCH`) antes de poder usarlos ahí.
+
+## Usando variables ENV en un Dockerfile
+
+`ENV` define variables que persisten en la config de la imagen y aparecen en el entorno de cada contenedor arrancado desde esa imagen. Se definen durante el build y viven en runtime. Esa es toda la diferencia con ARG.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM python:3.13-slim
+
+ENV DB_URL=postgres://user:pass@localhost:5432/app \
+    API_KEY=changeme \
+    APP_PORT=8000
+
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "app.py"]
+```
+
+Notas sobre sintaxis y scope:
+
+- Usa `ENV KEY=value`, o varios pares en una línea (`ENV A=1 B=2`). La vieja forma con espacio (`ENV key value`) está desaconsejada y puede eliminarse en una versión futura. El build check `LegacyKeyValueFormat` la marca.
+- Usa nombres `UPPER_SNAKE_CASE`. Todas las variables que envían Docker y las imágenes base principales son mayúsculas; igualar esa convención ahorra confusión.
+- ENV se hereda a través de builds multi-stage: "Un stage hereda cualquier variable de entorno definida con ENV por su stage padre o cualquier ancestro". ARG no. Los stages hijos necesitan su propia declaración.
+- El entorno de un contenedor está namespaced por contenedor. Nunca puede sobrescribir las variables de tu host. Lo que corre dentro se queda dentro.
+
+El gotcha clásico de persistencia es `DEBIAN_FRONTEND=noninteractive`. Si lo horneas como `ENV`, se queda en la imagen final y sorprende a cada usuario interactivo después. Ponlo inline en el `RUN` en su lugar:
+
+```dockerfile
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Si quieres un servicio Python completo funcionando con este patrón, mira [cómo correr una app Python en Docker con Docker Compose](https://www.bitdoze.com/docker-run-python/).
+
+### Por qué `$VAR` no se expande en CMD en forma exec
+
+Esta es la razón única más común de "las variables de entorno de Docker no funcionan". La forma exec corre sin shell:
+
+```dockerfile
+CMD ["python", "app.py", "$DB_URL"]
+```
+
+La app recibe la cadena literal `$DB_URL`. Sin expansión, sin pipes, sin `&&`. La forma shell expande, pero entonces `/bin/sh` es PID 1 y se traga `SIGTERM`, así que `docker stop` espera diez segundos y mata el contenedor a las malas. Tres opciones, en orden de preferencia:
+
+<Tabs>
+<Tab name="Leer env en la app (recomendado)">
+
+```dockerfile
+ENV DB_URL=postgres://user:pass@localhost:5432/app
+CMD ["python", "app.py"]
+```
+
+```python
+import os
+db_url = os.environ["DB_URL"]
+```
+
+La forma exec se queda, el manejo de señales funciona, y la app obtiene la variable de su propio entorno. Así se comportan las imágenes oficiales.
+
+</Tab>
+<Tab name="Forma shell (rápido)">
+
+```dockerfile
+CMD python app.py "$DB_URL"
+```
+
+La expansión funciona. El truco: `/bin/sh` se convierte en PID 1 y no reenvía señales a Python. Aceptable para jobs cortos, descuidado para un servicio web longevo.
+
+</Tab>
+<Tab name="Script wrapper (lo mejor de ambos)">
+
+```dockerfile
+COPY --chmod=755 <<EOT /entrypoint.sh
+#!/bin/sh
+set -e
+exec python app.py "$DB_URL"
+EOT
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+El shell expande la variable, `exec` reemplaza el shell con Python, y Python se convierte en PID 1. Las señales vuelven a funcionar.
+
+</Tab>
+</Tabs>
+
+<Notice type="error" title="Por esto tu contenedor ignora $DB_URL">
+<p>El CMD en forma exec <code>CMD ["python", "app.py", "$DB_URL"]</code> pasa el texto literal <code>$DB_URL</code> a la app. Usa una de las tres opciones de arriba. El build check <code>JSONArgsRecommended</code> avisa de la mitad de señales de este problema; corre <code>docker build --check .</code> para verlo.</p>
+</Notice>
+
+Modos de fallo: la app loguea un error de conexión que contiene `$DB_URL` o falla al parsearlo como URL, lo que significa forma exec. `docker stop` se cuelga diez segundos, lo que significa forma shell sin `exec`. Arreglo: lee la variable dentro de la app, o usa el script wrapper.
+
+### Pisando ENV en runtime con `docker run -e`
+
+El ENV de la imagen es un default, no una sentencia. `docker run -e` lo pisa por contenedor:
+
+```bash
+docker run -d --name app -p 8000:8000 \
+  -e DB_URL=postgres://user:pass@db:5432/app \
+  -e API_KEY=supersecret \
+  my_image
+```
+
+Dos formas, comportamiento distinto:
+
+- `-e DB_URL=value` define o pisa la variable solo para este contenedor.
+- `-e DB_URL` (sin `=`) pasa el valor de tu shell actual. Si está unset ahí, la variable está ausente en el contenedor.
+
+Ninguna forma toca el entorno del host. `docker run -e` solo escribe valores en el contenedor.
+
+Para muchas variables, usa un archivo:
+
+```bash
+docker run --env-file env.list my_image
+```
+
+```bash
+# env.list
+# full-line comments only; a # anywhere else is literal text
+DB_URL=postgres://user:pass@db:5432/app
+API_KEY=supersecret
+USER
+```
+
+Una línea `USER` pelada extrae ese valor de tu entorno local. No hay interpolación `${VAR}` en `docker run --env-file`; eso es una función solo de Compose.
+
+Verifica lo que recibió el contenedor:
+
+```bash
+docker exec app printenv | grep DB_URL
+```
+
+Si falta la línea, la variable nunca entró. Revisa los flags de `docker run` y la config de la imagen con `docker inspect` (mira la sección de verificación).
+
+## Variables de entorno en Docker Compose
+
+Compose es donde la mayoría de gente se encuentra con las variables de entorno de Docker en serio, porque el mismo valor aparece en cuatro sitios: el shell, un archivo `.env`, el archivo compose y la imagen. Primero, dos notas de modernización.
+
+<Notice type="warning" title="Borra version: de tu archivo compose">
+<p>Compose valida con el esquema más nuevo sin importar el campo <code>version:</code>. Mantenerlo solo imprime un aviso de obsoleto. Usa también el plugin <code>docker compose</code> (comprueba con <code>docker compose version</code>; v5.x a octubre de 2026), no el muerto <code>docker-compose</code> V1 con guion.</p>
+</Notice>
+
+Un servicio mínimo con env vars explícitas:
+
+```yaml
+services:
+  app:
+    image: my_image
+    ports:
+      - "8000:8000"
+    environment:
+      DB_URL: postgres://user:pass@db:5432/app
+      API_KEY: supersecret
+```
+
+Cuando despliegas stacks reales así, un panel de control ayuda. Yo corro apps Docker Compose en un VPS a través de Dokploy, y los archivos env son parte de cada deploy; mira [cómo desplegar una app Docker Compose en Dokploy](https://www.bitdoze.com/dokploy-docker-compose-app/).
+
+### Definiendo vars con `environment:` y `env_file:`
+
+`environment:` acepta forma lista o mapa. La forma mapa es la que uso; se lee mejor y hace los overrides obvios:
+
+```yaml
+# list form
+    environment:
+      - DB_URL=postgres://user:pass@db:5432/app
+      - API_KEY=supersecret
+```
+
+```yaml
+# map form (same values, easier to override one key)
+    environment:
+      DB_URL: postgres://user:pass@db:5432/app
+      API_KEY: supersecret
+```
+
+`env_file:` carga un archivo entero. Las rutas son relativas al archivo compose. Con varias entradas, los archivos posteriores pisan a los anteriores:
+
+```yaml
+services:
+  app:
+    image: my_image
+    env_file:
+      - ./app.env
+      - ./overrides.env
+```
+
+La sintaxis larga vale conocerla para archivos opcionales:
+
+```yaml
+    env_file:
+      - path: ./app.env
+        required: false   # silently ignored when missing (Compose >= v2.24.0)
+      - path: ./extra.env
+        required: true
+        format: yaml      # alternative format (Compose >= v2.30.0)
+```
+
+Overrides puntuales sin editar nada: `docker compose run -e DEBUG=1 app` o `docker compose exec -e DEBUG=1 app`. Las imágenes oficiales como Postgres y MySQL también aceptan una variante `_FILE` de sus variables (`POSTGRES_PASSWORD_FILE`); más en la sección de secrets.
+
+### Interpolación y archivos `.env`
+
+La interpolación ocurre en la CLI de Compose cuando parsea el archivo compose. No es una función de Docker Engine. Sintaxis soportada:
+
+```yaml
+image: webapp:${TAG}                # value from shell or .env
+environment:
+  LOG_LEVEL: ${LOG_LEVEL:-info}     # default if unset OR empty
+  MODE: ${MODE-dev}                 # default only if unset
+  DB_URL: ${DB_URL:?set DB_URL}     # fail if unset or empty
+  BANNER: ${MSG:+configured}        # alternative if set
+```
+
+Un archivo `.env` en el directorio del proyecto alimenta la interpolación automáticamente. Reglas de parseo que hacen tropezar:
+
+```bash
+TAG=1.4.2
+DB_URL=postgres://user:pass@db:5432/app
+LITERAL='${TAG}'      # single quotes: literal, no interpolation
+EXPANDED="${TAG}"     # double quotes: interpolation and \n \t escapes work
+LOG_LEVEL=debug       # inline comments need a leading space before #
+```
+
+Dónde busca Compose los valores de interpolación, de mayor a menor: tu entorno de shell, luego archivos `--env-file` (el último gana), luego el `.env` del proyecto. Dos límites de scope: `docker run --env-file` no interpola, y tampoco lo hace `docker stack deploy` de Swarm.
+
+Modo de fallo: un marcador `${VAR}` llegó a la app como texto literal. O lo usaste en `docker run --env-file` (no soportado) o el valor del `.env` está entre comillas simples.
+
+### Qué valor gana: orden de precedencia de Compose
+
+Para el entorno de un contenedor corriendo, de mayor a menor:
+
+1. `docker compose run -e VAR=...`
+2. Entradas `environment:` / `env_file:` cuyo valor se interpoló del shell o `.env`
+3. `environment:` en el archivo compose
+4. `env_file:` en el archivo compose
+5. `ENV` de la imagen desde el Dockerfile
+
+El gotcha que muerde a todos: una variable de host que nunca es referenciada por `environment:`, `env_file:` o `run -e` **no** llega al contenedor. Compose no autoinyecta tu entorno de shell. Si tu contenedor ignora una variable que exportaste, es por esto.
+
+<svg viewBox="0 0 700 400" role="img" aria-label="Docker Compose environment variable precedence order from compose run down to image ENV" xmlns="http://www.w3.org/2000/svg">
+  <title>Docker Compose environment variable precedence ladder</title>
+  <rect width="700" height="400" fill="#f8fafc" rx="8" />
+  <text x="220" y="32" fontSize="13" fontFamily="sans-serif" fill="#0f172a" textAnchor="middle">Highest priority</text>
+  <rect x="40" y="45" width="360" height="50" fill="#0f172a" rx="6" />
+  <text x="220" y="75" fontSize="13" fontFamily="monospace" fill="#ffffff" textAnchor="middle">1. docker compose run -e VAR=...</text>
+  <rect x="40" y="110" width="360" height="50" fill="#1e3a5f" rx="6" />
+  <text x="220" y="140" fontSize="12" fontFamily="monospace" fill="#ffffff" textAnchor="middle">2. environment: / env_file: (interpolated)</text>
+  <rect x="40" y="175" width="360" height="50" fill="#2c5282" rx="6" />
+  <text x="220" y="205" fontSize="12" fontFamily="monospace" fill="#ffffff" textAnchor="middle">3. environment: in compose.yaml</text>
+  <rect x="40" y="240" width="360" height="50" fill="#3182ce" rx="6" />
+  <text x="220" y="270" fontSize="12" fontFamily="monospace" fill="#ffffff" textAnchor="middle">4. env_file: in compose.yaml</text>
+  <rect x="40" y="305" width="360" height="50" fill="#63b3ed" rx="6" />
+  <text x="220" y="335" fontSize="12" fontFamily="monospace" fill="#1a202c" textAnchor="middle">5. image ENV (Dockerfile default)</text>
+  <text x="220" y="380" fontSize="12" fontFamily="sans-serif" fill="#334155" textAnchor="middle">Lowest priority</text>
+  <rect x="430" y="110" width="250" height="160" fill="#fff7ed" stroke="#c2410c" strokeWidth="1.5" rx="6" />
+  <text x="555" y="140" fontSize="12" fontFamily="sans-serif" fill="#7c2d12" textAnchor="middle">Unreferenced host var</text>
+  <text x="555" y="165" fontSize="11" fontFamily="sans-serif" fill="#7c2d12" textAnchor="middle">A variable in your shell that</text>
+  <text x="555" y="185" fontSize="11" fontFamily="sans-serif" fill="#7c2d12" textAnchor="middle">no environment:, env_file:,</text>
+  <text x="555" y="205" fontSize="11" fontFamily="sans-serif" fill="#7c2d12" textAnchor="middle">or run -e entry references</text>
+  <text x="555" y="235" fontSize="12" fontFamily="monospace" fill="#7c2d12" textAnchor="middle">never reaches the container</text>
+</svg>
+
+Verifica el resultado resuelto antes de desplegar:
+
+```bash
+docker compose config
+docker compose config --environment   # if your Compose version supports it
+```
+
+`docker compose config` imprime el archivo compose efectivo tras la interpolación y la fusión de `env_file`. Si el valor está mal ahí, el contenedor también estará mal.
+
+## Usando ARG y ENV juntos
+
+El patrón puente: declara un ARG, cópialo en un ENV, y el argumento de build se convierte en el default de runtime.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+ARG APP_PORT=8080
+ENV APP_PORT=${APP_PORT}
+CMD ["node", "server.js"]
+```
+
+La app lee `process.env.APP_PORT`, sin expansión de forma exec implicada (mira el arreglo arriba). Buildea con `--build-arg APP_PORT=9090` y la imagen sale con `APP_PORT=9090` como default. Corre con `-e APP_PORT=3000` y eso sigue ganando para el contenedor.
+
+Sé preciso sobre lo que esto hace: los valores que puentees con `ENV` **están** en el entorno de runtime (ese es el punto del puente). Los valores que dejas solo como ARG no, y solo son usables en instrucciones de build.
+
+Verifica el default horneado:
+
+```bash
+docker build -t my_image --build-arg APP_PORT=9090 .
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' my_image | grep APP_PORT
+# APP_PORT=9090
+```
+
+Los docs oficiales usan la misma forma: `ENV CONT_IMG_VER=${CONT_IMG_VER:-v1.0.0}` con un `ARG` encima. Fíjate en la interacción: después de definirse `ENV APP_PORT=...`, un `RUN` posterior que lea `$APP_PORT` ve el valor ENV aunque `--build-arg` cambiara el ARG.
+
+## Pasando secrets con seguridad: no uses ARG ni ENV para credenciales
+
+Las variables de entorno son cómodas y con fugas. Cualquiera que pueda correr `docker inspect` sobre el contenedor las ve, igual que `docker exec printenv` y `/proc/<pid>/environ`. ARG es peor: los valores usados en capas de build se quedan en `docker history` para siempre, y las attestations de procedencia también pueden portarlos. Los propios docs de ARG de Docker lo dicen claramente: no se recomienda usar build arguments para pasar secrets.
+
+<Notice type="warning" title="Nunca pongas contraseñas o tokens API en ARG o ENV">
+<p>Acaban en <code>docker history</code> y <code>docker inspect</code>. Usa build secret mounts y Compose secrets en su lugar.</p>
+</Notice>
+
+En build time, pasa secrets como mounts que nunca entran en una capa:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM alpine:3.21
+
+# secret as a file at /run/secrets/API_TOKEN
+RUN --mount=type=secret,id=API_TOKEN \
+    ./fetch-artifact.sh "$(cat /run/secrets/API_TOKEN)"
+
+# or mounted straight into an env var for that single RUN
+RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,env=AWS_SECRET_ACCESS_KEY \
+    aws s3 cp s3://my-bucket/file .
+```
+
+```bash
+docker build --secret id=API_TOKEN .                        # from local env var API_TOKEN
+docker build --secret id=AWS_ACCESS_KEY_ID,src=./aws_key .  # from a file
+docker build --secret id=aws,target=/root/.aws/credentials .
+docker build --ssh default=.                               # private repos over SSH agent
+```
+
+Los secrets van por defecto a `/run/secrets/<id>`; `target=` renombra la ruta y `env=` lo monta como variable de entorno en vez de archivo.
+
+En runtime, los secrets de Compose funcionan sin Swarm. Define el secret a nivel top, adjúntalo al servicio, y aparece como archivo en el contenedor:
+
+```yaml
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+
+secrets:
+  db_password:
+    file: ./db_password.txt
+```
+
+La convención `_FILE` (`POSTGRES_PASSWORD_FILE`, `MYSQL_ROOT_PASSWORD_FILE`) es como las imágenes oficiales esperan esto. Los secrets de Docker planos son solo para contenedores Linux (archivos individuales bind-mounted). Para más opciones, incluyendo qué funciona y qué no, mira [secrets en Docker Compose](https://www.bitdoze.com/docker-compose-secrets/).
+
+Los build checks de BuildKit pueden marcar los viejos hábitos: corre `docker build --check .` y busca `SecretsUsedInArgOrEnv`, que coincide con nombres de clave como `*TOKEN*` y `AWS_*_KEY`.
+
+<ListCheck>
+<ul>
+<li>Secrets de build vía `docker build --secret` y `RUN --mount=type=secret`</li>
+<li>Secrets de runtime vía `secrets:` de Compose montados en `/run/secrets/NAME`</li>
+<li>Variantes `_FILE` donde la imagen las soporta</li>
+<li>`docker build --check .` antes de publicar una imagen</li>
+<li>Nada sensible en un archivo `.env` que git pueda ver</li>
+</ul>
+</ListCheck>
+
+Coste y ops: los secret mounts no cuestan nada extra en runtime. La restricción es operativa: el archivo de secret debe existir en build o deploy time, así que en un VPS guárdalo fuera del repo (propiedad de root, modo 600) o en un gestor de secrets. Si `docker history` sigue mostrando tu token, usaste ARG o ENV. Si `/run/secrets` está vacío en el contenedor, falta la entrada `secrets:` a nivel de servicio. Si el build no encuentra un secret, la ruta `src=` está mal.
+
+## Cómo verificar tus variables de entorno
+
+No adivines. Tras cada cambio, comprueba lo que tiene el contenedor:
+
+1. Para el env del contenedor vivo, corre `docker exec <container> printenv`. Imprime todo lo que el proceso ve, una línea por variable.
+2. Para la config de la imagen o contenedor, corre `docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' <container-or-image>`. Esto es lo que Docker registró en create time, independiente de mutaciones de runtime.
+3. Para lo que se filtró a las capas, corre `docker history my_image --no-trunc`. Busca build args y valores ENV en el historial de la imagen.
+4. Para la config de Compose resuelta, corre `docker compose config`. Imprime el archivo efectivo tras interpolación y fusión de `env_file`. `docker compose config --environment` lista las variables interpoladas si tu versión de Compose lo soporta; `docker compose config` a secas funciona en todas partes.
+5. Para un lint del Dockerfile, corre `docker build --check .`. Atrapa los errores habituales de ARG/ENV: `SecretsUsedInArgOrEnv`, `JSONArgsRecommended`, `UndefinedArgInFrom`, `InvalidDefaultArgInFrom`, `UndefinedVar`, `LegacyKeyValueFormat`.
+
+Si `printenv` no coincide con tu archivo compose, la escalera de precedencia de arriba decide quién ganó; `docker compose config` muestra la misma respuesta desde el lado Compose. Una referencia de comandos más amplia está en [comandos esenciales de Docker](https://www.bitdoze.com/docker-commands/).
+
+## Buenas prácticas para variables de entorno en Docker
+
+<ListCheck>
+<ul>
+<li>Usa ARG para valores de build time (números de versión, plataformas objetivo), nunca para credenciales.</li>
+<li>Usa ENV para config de runtime que la app lee; mantén la app leyendo `os.environ` / `process.env`.</li>
+<li>Nunca pongas contraseñas o tokens en ARG o ENV; usa secret mounts y Compose secrets.</li>
+<li>Nombra todo `UPPER_SNAKE_CASE` y mantén nombres consistentes entre servicios.</li>
+<li>Documenta las variables requeridas con un archivo `env.example` en el repo (nombres y valores dummy, los valores reales fuera).</li>
+<li>Da a las vars no sensibles defaults sensatos, ya sea en `ENV` o con sintaxis de default estilo compose.</li>
+<li>Usa `.env` para desarrollo local. No lo commitees, y no lo hagas tu único mecanismo de producción.</li>
+</ul>
+</ListCheck>
+
+Esto no cuesta nada en deploy time y previene los dos incidentes que más aparecen: credenciales filtradas y contenedores que ignoran su config en silencio.
+
+## Problemas comunes con variables de entorno en Docker
+
+Síntoma, causa, arreglo:
+
+1. **La app recibe la cadena literal `$DB_URL`.** Causa: el CMD en forma exec no expande variables. Arreglo: lee la env var en la app, usa forma shell, o un script wrapper con `exec`.
+2. **`--build-arg` no tuvo efecto dentro de mi stage.** Causa: el ARG se declaró antes de `FROM` y nunca se redeclaró en el stage. Arreglo: añade un `ARG NAME` pelado tras `FROM`.
+3. **Compose ignora mi variable de entorno del host.** Causa: las vars de host no referenciadas nunca llegan al contenedor. Arreglo: declárala en `environment:` o `env_file:`.
+4. **`${VAR}` llegó como texto literal.** Causa: la interpolación es una función de la CLI de Compose (no funciona en `docker run --env-file` ni en stacks Swarm), o el valor del `.env` está entre comillas simples. Arreglo: interpola en el archivo compose, no en el archivo env.
+5. **El nuevo valor no aplicó a un contenedor corriendo.** Causa: el env se fija cuando se crea el contenedor. Arreglo: `docker compose up -d` para recrear, o `docker rm -f` y corre de nuevo. Un reinicio a secas no siempre basta si la config de la imagen en sí cambió.
+6. **Gana el valor equivocado.** Causa: confusión de precedencia. Arreglo: `docker compose config` y lee el valor resuelto; compara contra la escalera de arriba.
+7. **"Docker sobrescribió una variable en mi host."** No puede. El env del contenedor está namespaced por contenedor. Lo que viste es la dirección contraria: `docker run -e VAR` sin `=` pasa el valor del host al contenedor.
+
+Cuando el contenedor se porta mal tras un cambio de env, los logs ayudan: [redirige los logs de Docker a un solo archivo](https://www.bitdoze.com/redirect-docker-logs-to-a-single-file/) y busca el nombre de variable que tu app loguea al arranque.
+
+## FAQ
+
+<Accordion label="¿Las variables ENV de Docker persisten después de parar el contenedor?" group="faq" expanded="true">
+<p>Los valores ENV horneados en la imagen persisten mientras la imagen lo haga. Los valores pasados con <code>docker run -e</code> pertenecen solo a ese contenedor. Si eliminas y recreas el contenedor, debes pasarlos otra vez. Si horneas secrets como ENV, persisten en la imagen, que es exactamente el problema. Usa secret mounts en su lugar.</p>
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre ENV y ARG en Dockerfile?" group="faq">
+<p>ARG es solo build-time y no aparece en el entorno del contenedor. ENV se define en build time y persiste en runtime. Los valores ARG usados en capas siguen siendo visibles en <code>docker history</code>, así que ARG no es un mecanismo de secrets. Para puentearlos, <code>ENV MI_VAR=$&#123;MI_ARG&#125;</code> copia el valor de build en el default de runtime.</p>
+</Accordion>
+
+<Accordion label="¿Puedo usar archivos .env con docker run?" group="faq">
+<p>Sí, con <code>docker run --env-file env.list</code>. El formato son líneas planas <code>KEY=value</code> y nombres <code>KEY</code> pelados que extraen de tu shell local. Solo comentarios <code>#</code> de línea completa. No hay interpolación <code>$&#123;VAR&#125;</code> en ese archivo; la interpolación es una función de la CLI de Compose.</p>
+</Accordion>
+
+<Accordion label="¿Dónde viven los secrets de Docker Compose?" group="faq">
+<p>En <code>/run/secrets/&lt;nombre&gt;</code> dentro del contenedor, como un archivo individual bind-mounted. Esto funciona con Docker Compose plano en contenedores Linux, sin Swarm requerido. Las imágenes que siguen la convención <code>_FILE</code> (Postgres, MySQL) los leen directamente vía <code>POSTGRES_PASSWORD_FILE</code> y amigos.</p>
+</Accordion>
+
+<Accordion label="¿Por qué es obsoleto version: en mi archivo compose?" group="faq">
+<p>Compose valida cada archivo con el esquema más nuevo sin importar ese campo, así que solo imprime un aviso. Bórralo. Confirma también que estás en el plugin <code>docker compose</code> (<code>docker compose version</code>, actualmente v5.x) en vez del eliminado comando V1 <code>docker-compose</code>.</p>
+</Accordion>
+
+## Conclusión
+
+El modelo mental es pequeño: ARG alimenta el build, ENV alimenta el build y el contenedor, y Docker Compose añade interpolación más un orden de precedencia que siempre puedes resolver con `docker compose config`. Los dos errores caros son el CMD en forma exec comiéndose tus variables y las credenciales en ARG o ENV filtrándose por `docker history`. Los secret mounts arreglan ambos. Corre los comandos de verificación tras cada cambio y "ignora mi env var" deja de ser un misterio.
+
+Todo lo de arriba corre igual en un VPS pequeño, que es como despliego la mayoría de estos stacks. [Hetzner Cloud](https://go.bitdoze.com/hetzner) es mi default cuando necesito una máquina EU barata y fiable para Docker y Compose.
+
+<Button text="Explora más guías de Docker" link="https://www.bitdoze.com/tags/docker/" variant="solid" color="blue" size="md" icon="arrow-right" />

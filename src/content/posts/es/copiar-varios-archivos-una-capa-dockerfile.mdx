@@ -1,0 +1,575 @@
+---
+date: 2026-10-01T00:00:00Z
+lastmod: 2026-10-01T00:00:00Z
+translationKey: "copy-multiple-files-in-one-layer-using-a-dockerfile"
+title: "Docker COPY: copiar varios archivos en una capa (guía de Dockerfile)"
+meta_title: "COPY en Dockerfile: varios archivos, una capa y comodines"
+description: "Cómo copiar varios archivos con una sola instrucción COPY de Docker: sintaxis multifuente, comodines, --parents, --exclude y buenas prácticas de caché con BuildKit."
+image: "@assets/images/23/07/copy-multiple-files-one-layer-docker.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "dockerfile", "buildkit"]
+canonical: "https://www.bitdoze.com/es/copiar-varios-archivos-una-capa-dockerfile/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Cuando compilas imágenes de Docker, a menudo necesitas copiar varios archivos a la vez. La instrucción `COPY` de Docker te permite listar varias fuentes en una sola instrucción, y esa instrucción crea una única capa del sistema de archivos para todas ellas:
+
+```dockerfile
+COPY file1.txt file2.txt /app/files/
+```
+
+Eso copia tanto `file1.txt` como `file2.txt` desde el contexto de compilación a `/app/files/` en la imagen. Una instrucción, una capa. Agrupar los archivos que cambian juntos evita que la caché de compilación se rompa por motivos ajenos, y mantiene el Dockerfile más corto.
+
+El número de flags ha crecido desde que se publicó este artículo: `COPY --parents` y `COPY --exclude` ya son estables (sintaxis de Dockerfile 1.20 y 1.19), y los globs recursivos con `**` están oficialmente documentados. Esta guía cubre la sintaxis multifuente, las reglas de los comodines y los flags de BuildKit que merece la pena usar, además de cómo verificar que tus capas se ven como crees.
+
+Otros artículos sobre Docker que pueden resultarte útiles:
+
+- [Añadir usuarios a un contenedor Docker](https://www.bitdoze.com/add-users-to-docker-container/)
+- [Instalar Docker y Docker Compose en Ubuntu ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/)
+- [Redirigir los logs de Docker a un solo archivo](https://www.bitdoze.com/redirect-docker-logs-to-a-single-file/)
+- [Variables ARG y ENV en Docker y Dockerfiles](/es/variables-entorno-docker/)
+
+### Qué necesitas
+
+<ListCheck>
+<ul>
+<li>Docker Engine 23.0 o superior. BuildKit es el compilador por defecto desde la 23.0, y el compilador heredado está obsoleto. Si aún no tienes Docker instalado, consulta [Instalar Docker y Docker Compose en Ubuntu ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/).</li>
+<li>Un directorio de proyecto que sirva como contexto de compilación, con un Dockerfile dentro.</li>
+<li>La directiva de parser `# syntax=docker/dockerfile:1` al inicio del Dockerfile para desbloquear los flags nuevos de COPY (se explica en la sección de BuildKit más abajo).</li>
+<li>Opcional: `jq` para la comprobación del número de capas en la sección de verificación.</li>
+<li>Opcional: Docker Buildx (incluido en las instalaciones actuales de Docker) si quieres usar `--no-cache-filter`.</li>
+</ul>
+</ListCheck>
+
+Todo lo de esta guía funciona en una instalación local de Docker o en una pequeña máquina de compilación. Sin servicios de pago.
+
+## Uso de la instrucción COPY para copiar archivos en un Dockerfile
+
+`COPY` transfiere archivos desde tu contexto de compilación (el directorio desde el que ejecutas `docker build`, o el contexto que pases explícitamente) al sistema de archivos de la imagen.
+
+Un límite estricto que debes recordar: `COPY` no puede leer archivos fuera del contexto de compilación. Si necesitas algo que está un nivel por encima, reestructura tu contexto o usa CI para montar uno.
+
+### Sintaxis básica
+
+```dockerfile
+COPY <src> <dest>
+```
+
+- `<src>`: archivo(s) o directorio del contexto de compilación
+- `<dest>`: ruta de destino en la imagen (se crea si no existe)
+
+Con una sola fuente puedes renombrar un archivo al copiarlo (`COPY app.js /usr/local/bin/start.js`). Con varias fuentes, no.
+
+<Notice type="warning" title="El destino debe ser un directorio con varias fuentes">
+Cuando pasas más de una fuente (una lista explícita o un comodín), el destino <strong>debe</strong> ser un directorio, y debe terminar con una <code>/</code> final. Es un requisito, no solo una convención. Sin la barra final, Docker trata el destino como una ruta de archivo y obtienes un error de copia o un archivo sobrescrito de forma inesperada en lugar de un directorio lleno de archivos.
+</Notice>
+
+Fallos que conviene conocer desde el principio:
+
+- Dos o más fuentes y un destino sin `/` final → error de compilación o un único archivo malformado en el destino
+- Ruta de origen fuera del contexto de compilación → "file not found" mientras Docker transfiere el contexto, antes incluso de crear cualquier capa
+
+### Casos de uso habituales
+
+Copiar un solo archivo:
+```dockerfile
+COPY app.js /app/
+```
+
+Copiar un directorio completo (por ejemplo, al [crear un Dockerfile para una app de Python](https://www.bitdoze.com/docker-run-python/)):
+```dockerfile
+COPY src/ /app/src/
+```
+
+Copiar varios archivos concretos:
+```dockerfile
+COPY file1.txt file2.txt config.json /app/
+```
+
+Copiar archivos con comodines:
+```dockerfile
+COPY *.txt /app/
+```
+
+Ese último copia los archivos `.txt` coincidentes desde la raíz del contexto a `/app/`.
+
+Algo que debes tener claro: los patrones los evalúa Docker (`filepath.Match` de Go más `**`), no tu shell. No esperes el comportamiento del globbing de bash.
+
+## Copiar varios archivos en una sola instrucción COPY (una capa)
+
+Esta es la mecánica central: cada instrucción `COPY` produce una capa del sistema de archivos, ya copie un archivo o veinte. Puedes listar tantas fuentes como quieras y todas acaban en una única capa:
+
+```dockerfile
+COPY file1.txt file2.txt config.json /app/
+COPY *.csv /data/
+COPY src/ /code/
+```
+
+Lo importante aquí:
+
+- Cuando pasas varias fuentes, el destino debe ser un directorio (termina con `/`)
+- Agrupa los archivos que cambian juntos: configuraciones con configuraciones, scripts con scripts
+- Si un archivo de un `COPY` agrupado cambia, la caché de toda esa capa se invalida y todos los archivos se copian de nuevo
+- Menos líneas `COPY` significan menos capas, pero la verdadera ganancia es el comportamiento de la caché, no el número de capas. Las capas son metadatos baratos; una caché rota te cuesta tiempo de recompilación
+
+![Diagrama que compara 3 instrucciones COPY separadas, que producen 3 capas donde solo se recompila la capa modificada, frente a 1 instrucción COPY agrupada, que produce 1 capa que se recompila por completo cuando cambia cualquier archivo](@assets/images/23/07/docker-copy-one-layer-cache.svg)
+
+### Ojo: las colisiones de nombres de archivo se sobrescriben en silencio
+
+<Notice type="warning" title="Sobrescrituras silenciosas por colisión de nombres base">
+Con varias fuentes y sin <code>--parents</code>, los archivos que caen sobre el mismo nombre base en el destino son <strong>sobrescritos en silencio</strong> por BuildKit. Un <code>cp</code> normal daría error aquí; el compilador simplemente deja que la última fuente gane. <code>COPY a/*.conf b/*.conf /etc/app/</code> parece inofensivo hasta que el <code>app.conf</code> equivocado acaba en tu imagen.
+</Notice>
+
+Soluciones, en orden de preferencia:
+
+1. Usa `COPY --parents` para conservar las rutas relativas y que nada colisione por construcción
+2. Copia cada conjunto en su propio directorio de destino
+3. Lista los archivos explícitamente y renómbralos al copiar cuando dos nombres deban coexistir
+
+## Comodines con Docker COPY: `*`, `?`, `**` y `--exclude`
+
+Los comodines te permiten copiar todos los archivos que coinciden con un patrón en una sola instrucción. El globbing de Dockerfile se parece a lo que ya conoces, con algunas diferencias que vale la pena memorizar.
+
+### Patrones de comodines que funcionan
+
+| Patrón | Descripción | Ejemplo |
+|---------|-------------|---------|
+| `*` | Coincide con cualquier carácter dentro de un solo componente de ruta | `*.txt` copia todos los archivos de texto de la raíz del contexto |
+| `?` | Coincide con exactamente un carácter | `file?.txt` coincide con `file1.txt`, `fileA.txt` |
+| `[...]` | Coincide con un carácter de un conjunto o rango | `file[0-9].txt` coincide con `file0.txt` a `file9.txt` |
+| `**` | Coincide con cualquier número de componentes de ruta, incluido ninguno | `src/**/*.txt` coincide con `src/a.txt`, `src/x/b.txt`, `src/x/y/c.txt` |
+
+`**` existe de verdad. La referencia oficial del Dockerfile documenta la coincidencia recursiva entre niveles de directorios. El ejemplo canónico lo combina con `--parents` para que la estructura de directorios sobreviva a la copia:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+FROM scratch
+COPY --parents ./src/**/*.txt /parents/
+# /parents/src/a.txt
+# /parents/src/x/b.txt
+# /parents/src/x/y/c.txt
+```
+
+Una nota honesta: la documentación demuestra `**` dentro de los ejemplos de `--parents`. Un simple `COPY src/**/*.ts /out/` sin `--parents` se aplana, y yo lo verificaría con una compilación antes de confiar en el conjunto exacto de coincidencias. Si la estructura importa de todos modos, usa `--parents`.
+
+### COPY --exclude: omite archivos sin editar .dockerignore
+
+<Notice type="info" title="Estable desde la sintaxis de Dockerfile 1.19">
+<code>--exclude</code> es un flag repetible. Los patrones excluidos ganan incluso cuando el patrón de origen los incluye, y siguen las mismas reglas de <code>filepath.Match</code> que <code>&lt;src&gt;</code>.
+</Notice>
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# Everything matching hom* except *.txt
+COPY --exclude=*.txt hom* /mydir/
+
+# Stack exclusions
+COPY --exclude=*.txt --exclude=*.md hom* /mydir/
+
+# The precise answer to "copy my sources but skip tests"
+COPY --exclude=*.test.ts --exclude=fixtures/** src/**/*.ts /app/
+```
+
+Cuándo preferir `--exclude` frente a `.dockerignore`:
+
+- `--exclude` se aplica a una sola instrucción. Úsalo cuando solo un `COPY` deba omitir algo y el resto de la compilación siga necesitando esos archivos en el contexto.
+- `.dockerignore` se aplica a todo el contexto. Úsalo para mantener la basura fuera de la transferencia de compilación por completo (logs, `.git`, `node_modules`) y que cada paso sea más rápido.
+
+### Lo que todavía no está soportado
+
+<Notice type="info" title="La expansión de llaves es una función del shell">
+Los patrones como `*.{json,yml,yaml}` no funcionan en un Dockerfile. Solo se reconocen <code>*</code>, <code>?</code>, <code>[...]</code> y <code>**</code>. Lista los archivos explícitamente o copia el directorio completo.
+</Notice>
+
+<Tabs>
+<Tab name="Lista explícita">
+Ideal para un puñado de archivos conocidos y para manifiestos críticos para la caché:
+
+```dockerfile
+COPY config.json config.yml config.yaml /app/config/
+```
+</Tab>
+<Tab name="Comodín + --exclude">
+Ideal para «todo lo que hay aquí excepto estos patrones» sin tocar `.dockerignore`:
+
+```dockerfile
+COPY --exclude=*.test.ts --exclude=fixtures/** src/**/*.ts /app/
+```
+</Tab>
+<Tab name="Directorio + .dockerignore">
+La mejor opción por defecto cuando controlas el contenido del directorio. Comportamiento de caché predecible, sin sorpresas de globs:
+
+```dockerfile
+COPY config/ /app/config/
+```
+</Tab>
+</Tabs>
+
+En caso de duda, copia el directorio y deja que `.dockerignore` excluya lo que no quieras. Es más predecible para la caché que un glob ingenioso.
+
+## COPY --parents: conserva la estructura de directorios
+
+`COPY --parents` (estable desde la sintaxis de Dockerfile 1.20) copia las fuentes manteniendo su estructura de directorios relativa bajo el destino. Es el flag que quieres cuando los archivos de directorios anidados deben aterrizar en rutas anidadas equivalentes, y elimina las colisiones de nombres base por construcción.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+COPY --parents src/utils/*.ts src/components/*.ts /app/
+# /app/src/utils/...
+# /app/src/components/...
+```
+
+Dos comportamientos que conviene conocer:
+
+1. El marcador `./` limita qué padres se conservan (la misma idea que `rsync --relative`). Todo lo anterior al marcador se elimina de la ruta de destino:
+
+```dockerfile
+COPY --parents ./x/./y/*.txt /parents/
+# /parents/y/a.txt   (x/ is not preserved)
+```
+
+2. Combina con `--from` en compilaciones multi-etapa, donde las rutas de origen son absolutas y normalmente solo quieres la parte final de la ruta:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+FROM build AS build
+# ... produces /out/app/bin/ ...
+
+FROM gcr.io/distroless/static
+COPY --from=build --parents /out/./app/bin/ /app/
+# /app/bin/... only
+```
+
+![Diagrama del mapeo de rutas de COPY --parents: sin el marcador ./ se conserva la ruta relativa completa src/utils/a.ts bajo /parents/; con el marcador ./ solo se conservan los directorios posteriores al marcador](@assets/images/23/07/docker-copy-parents-mapping.svg)
+
+Comprueba después de recompilar: `docker history <imagen>` debería mostrar un paso COPY con el tamaño esperado, y `docker run --rm <imagen> ls -R /parents` (o `find`) debería mostrar las rutas que esperabas.
+
+## Flags de COPY en BuildKit y versiones de sintaxis del Dockerfile
+
+Verás consejos antiguos sobre «Docker Engine 25+» para algunos de estos flags. Ese es el eje equivocado. Lo que habilita una función del Dockerfile es la **versión de sintaxis del Dockerfile**, no la versión del Engine. La directiva de parser al inicio de tu Dockerfile es la que trae un frontend que entiende los flags nuevos:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+FROM node:22-alpine
+# ... rest of the Dockerfile
+```
+
+BuildKit es el compilador por defecto desde Docker Engine 23.0, y el compilador heredado está obsoleto. BuildKit es la única vía soportada a estas alturas.
+
+### Versiones mínimas de sintaxis
+
+| Flag | Sintaxis mínima de Dockerfile | Estado |
+|---|---|---|
+| `COPY --from` | cualquiera | estable |
+| `COPY --chown` | cualquiera | estable |
+| `COPY --chmod` | 1.2 | estable |
+| `COPY --link` | 1.4 | estable |
+| `ADD --unpack` | 1.17 | estable |
+| `COPY --exclude` / `ADD --exclude` | 1.19 | estable |
+| `COPY --parents` | 1.20 | estable |
+
+<Notice type="info" title="Añade esta línea al inicio de tu Dockerfile">
+<code># syntax=docker/dockerfile:1</code> apunta siempre al último frontend estable (1.27.x a fecha de 2026-09-30), así que todo lo de la tabla anterior funciona directamente en una instalación actual. Para CI reproducible o sin conexión, fija un tag exacto como <code># syntax=docker/dockerfile:1.20</code> y descarga la imagen del frontend por adelantado. El frontend se descarga como cualquier otra imagen, así que los compiladores sin conexión la necesitan en caché de antemano. El comportamiento exacto sin conexión con tags fijados depende del entorno; pruébalo en tus propios runners.
+</Notice>
+
+### COPY --link: capas independientes y advertencias
+
+`--link` copia las fuentes en un directorio de destino vacío y lo enlaza sobre el estado anterior de la imagen. En la práctica construye `FROM scratch; COPY ...` y fusiona el resultado. De ahí se derivan tres consecuencias.
+
+La capa de copia gana independencia de la caché: ya no depende de las capas padre, así que cambiar la imagen base o una instrucción anterior no la invalida. La documentación lo dice claramente: los archivos «remain independent on their own layer and don't get invalidated when commands on previous layers are changed» (permanecen independientes en su propia capa y no se invalidan cuando cambian los comandos de capas anteriores). Eso permite reconstruir una imagen sobre una base más nueva sin recompilar los pasos de copia. La contrapartida es el aplanado: varias fuentes caen planas en ese directorio vacío, así que combina `--link` con `--parents` cuando necesites estructura. La referencia también enumera algunas advertencias: al copiar a un subdirectorio, `--link` siempre copia desde la raíz del sistema de archivos; los permisos de directorio se sobrescriben (usa `--chmod` si necesitas un directorio permisivo como `/tmp`); y la documentación recomienda `--link` «unless you rely on symlink behavior in the destination» (a menos que dependas del comportamiento de los symlinks en el destino).
+
+Patrón seguro para la caché con los flags modernos:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+WORKDIR /app
+COPY --link package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY --link src/ ./src/
+```
+
+Nota de versiones para que esta sección envejezca bien: las versiones vigentes a fecha de 2026-09-30 son Docker Engine 29.8.x, BuildKit 0.33.x, Buildx 0.37.x y el frontend de sintaxis de Dockerfile 1.27.x.
+
+## Organización de archivos para mejorar la caché y el mantenimiento
+
+Un contexto de compilación bien organizado hace que el Dockerfile sea más fácil de mantener y la caché más fácil de razonar:
+
+```
+project/
+├── src/           # Application source code
+├── config/        # Configuration files
+├── scripts/       # Build and deployment scripts
+├── assets/        # Static assets
+└── Dockerfile
+```
+
+Reglas prácticas:
+
+1. Agrupa los archivos relacionados en el mismo directorio
+2. Nombra los directorios por lo que contienen, no por cuándo cambian
+3. Evita el anidamiento profundo
+4. Mantén el contexto pequeño para que la compilación arranque antes
+
+Ejemplo de Dockerfile con esa estructura:
+
+```dockerfile
+# Copy source code
+COPY src/ /app/src/
+
+# Copy configuration files
+COPY config/*.json /app/config/
+
+# Copy build scripts
+COPY scripts/build.sh /app/scripts/
+```
+
+## Cuándo no usar COPY en absoluto: bind mounts y cache mounts
+
+`COPY` graba los archivos en una capa. Es la herramienta correcta para los artefactos que tu imagen necesita en tiempo de ejecución, y la equivocada para todo lo demás. Los mounts de BuildKit cubren los demás casos.
+
+<Tabs>
+<Tab name="COPY">
+Artefactos finales que deben existir en el sistema de archivos de la imagen:
+
+```dockerfile
+COPY src/ /app/src/
+```
+</Tab>
+<Tab name="RUN --mount=type=bind">
+Entrada solo para la compilación. La fuente está disponible durante ese paso `RUN` y no se graba en una capa, así que no puede quedar obsoleta en la imagen:
+
+```dockerfile
+RUN --mount=type=bind,target=/src,rw \
+    cp /src/generated/config.json /app/config.json
+```
+</Tab>
+<Tab name="RUN --mount=type=cache">
+Cachés de dependencias que deben sobrevivir entre compilaciones sin añadir capas:
+
+```dockerfile
+RUN --mount=type=cache,target=/root/.npm npm ci
+```
+</Tab>
+</Tabs>
+
+Fallos y notas operativas:
+
+- Los bind mounts **no** persisten en la imagen final. Hay quien copia archivos con un bind mount y luego se pregunta por qué el directorio está vacío en tiempo de ejecución.
+- Los cache mounts viven en el almacenamiento del builder y crecen hasta que se purgan. `docker builder prune` los limpia. Si ejecutas compilaciones de CI en un VPS, vigila el disco.
+
+## Verifica tus capas y la caché de compilación
+
+No confíes en el texto del Dockerfile, confía en lo que produjo el compilador. Cuatro comandos cubren casi todo:
+
+```bash
+# Watch context transfer size and per-step CACHED markers
+docker build --progress=plain -t myimage .
+
+# Layer-by-layer view with sizes
+docker history myimage
+
+# Layer count sanity check (needs jq)
+docker image inspect myimage | jq '.RootFS.Layers | length'
+
+# Force-rebuild one stage only, leave the rest cached
+docker buildx build --no-cache-filter=deps -t myimage .
+```
+
+Cómo es un «buen» resultado:
+
+<ListCheck>
+<ul>
+<li>Una recompilación sin cambios en las fuentes muestra <code>CACHED</code> en cada paso COPY en la salida de <code>--progress=plain</code>.</li>
+<li>Un <code>COPY</code> agrupado de varios archivos aparece como una sola entrada en <code>docker history</code>.</li>
+<li>La transferencia del contexto es pequeña. Si Docker envía decenas de megabytes de contexto en cada compilación, arregla primero <code>.dockerignore</code>.</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="No te saltes la comprobación con history">
+Las promesas de caché en un Dockerfile solo son reales si <code>docker history</code> y la salida de la compilación las confirman. Un COPY agrupado que en realidad coincide con el doble de archivos de los que crees, o un comodín sobre un directorio que cambia constantemente, se recompilará en cada ejecución aunque el Dockerfile parezca correcto.
+</Notice>
+
+### Errores habituales de COPY y cómo solucionarlos
+
+| Síntoma | Causa probable | Solución |
+|---|---|---|
+| "Destination must be a directory" o un archivo suelto extraño en el destino | Varias fuentes sin `/` final en el destino | Termina el destino con `/` |
+| "file not found" durante la transferencia del contexto | Fuente fuera del contexto de compilación, o filtrada fuera de la compilación | Corrige la ruta, o revisa `.dockerignore` |
+| El script copiado falla con "permission denied" | Compilado desde un contexto de URL Git; los bits de permiso solo son 644/755 | `COPY --chmod=755`, un `RUN chmod`, o un contexto de compilación local |
+| La caché nunca acierta, todo se recompila | Comodín que coincide con un directorio que cambia constantemente, o basura/secretos en el contexto | Acota el patrón, recorta el contexto |
+| Número de capas mayor del esperado | Un COPY por instrucción es normal | No es un defecto; comprueba los tamaños con `docker history` |
+| Contenido de archivo equivocado en el destino | Colisión de nombres base, gana la última fuente | `--parents`, directorios de destino separados, o listas explícitas |
+
+Si las compilaciones dejan basura en el builder, [recupera espacio en disco de /var/lib/docker/overlay2](/es/limpiar-docker-overlay2/) y [limpia las imágenes de Docker antiguas y la caché de compilación](https://www.bitdoze.com/cleanup-all-docker-things/) antes de que el disco lo haga por ti a las 3 de la madrugada.
+
+## Buenas prácticas para copiar archivos de forma eficiente
+
+### Usa `.dockerignore` (y archivos ignore por Dockerfile)
+
+`.dockerignore` reduce el tamaño del contexto de compilación, acelera cada compilación y evita que copies por accidente secretos y basura en la imagen.
+
+```
+node_modules/
+*.log
+.git/
+.DS_Store
+.env
+.env.*
+```
+
+<Notice type="error" title="Nunca copies .env ni credenciales a una imagen">
+Un archivo <code>.env</code> grabado en una capa de imagen es un incidente real, no teórico. Las capas son fáciles de extraer, y los secretos «temporales» tienen la costumbre de acabar en registries. Consulta [Secretos de Docker Compose y alternativas seguras a copiar archivos .env](https://www.bitdoze.com/docker-compose-secrets/) para saber qué hacer en su lugar.
+</Notice>
+
+Las versiones más recientes de Docker también respetan archivos ignore por Dockerfile: un archivo llamado `<name>.Dockerfile.dockerignore` junto a `<name>.Dockerfile` tiene prioridad sobre el `.dockerignore` de la raíz. Es útil en repos con Dockerfiles separados de compilación, lint y pruebas que necesitan contextos distintos.
+
+### Ordena los pasos COPY por frecuencia de cambio
+
+Copia primero los manifiestos de dependencias, instala las dependencias y luego copia el resto. Así los cambios de código no rompen tus capas de dependencias.
+
+```dockerfile
+WORKDIR /app
+
+# Dependencies (change less often)
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# App source (changes often)
+COPY src/ ./src/
+```
+
+### La trampa de permisos con contextos Git
+
+<Notice type="warning" title="Los contextos de URL Git pierden los bits de permiso">
+Cuando compilas con un repositorio Git como contexto de compilación, los archivos copiados reciben permisos 644, o 755 si tenían el bit de ejecutable. Los directorios reciben 755. Los scripts que «funcionaban en local» fallan con <code>permission denied</code> en CI porque el bit nunca llegó. Arréglalo con <code>COPY --chmod=755 scripts/deploy.sh /app/</code>, un paso <code>RUN chmod +x</code>, o compila desde un contexto local. Para la gestión de usuarios y propietarios más allá del bit de ejecutable, consulta [Añadir usuarios a un contenedor Docker](https://www.bitdoze.com/add-users-to-docker-container/).
+</Notice>
+
+### Ten cuidado con los comodines
+
+Los comodines son útiles, pero pueden:
+
+- coincidir con archivos extra por accidente
+- romper tu caché más de lo que esperas, porque cualquier nueva coincidencia invalida la capa
+
+Usa copias explícitas para los archivos críticos de la caché (manifiestos de dependencias) y usa `.dockerignore` para mantener el contexto limpio.
+
+```dockerfile
+# Good when you control the directory contents (and .dockerignore is set)
+COPY config/ /app/config/
+
+# Best for dependency caching (explicit, stable)
+COPY package.json package-lock.json /app/
+```
+
+## Referencia rápida
+
+<Tabs>
+<Tab name="Multi-fuente básico">
+```dockerfile
+# Multiple specific files into a directory (dest must end with /)
+COPY file1.txt file2.txt config.json /app/
+
+# Simple wildcard at context root
+COPY *.conf /etc/app/
+```
+</Tab>
+<Tab name="Comodines + exclude">
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# Wildcard set minus exclusions (syntax >= 1.19)
+COPY --exclude=*.test.ts --exclude=fixtures/** src/**/*.ts /app/
+```
+</Tab>
+<Tab name="Conservar rutas (--parents)">
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# Recursive glob with preserved structure (syntax >= 1.20)
+COPY --parents src/**/*.ts /app/
+
+# Multi-stage: keep only what you need, preserving paths
+COPY --from=build --parents /out/./app/bin/ /app/
+```
+</Tab>
+<Tab name="Amigable con la caché (--link)">
+```dockerfile
+# syntax=docker/dockerfile:1
+
+WORKDIR /app
+COPY --link package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY --link src/ ./src/
+```
+</Tab>
+</Tabs>
+
+### La versión corta
+
+<ListCheck>
+<ul>
+<li>Una instrucción <code>COPY</code> es una capa, sin importar cuántos archivos mueva.</li>
+<li>Agrupa los archivos que cambian juntos; un cambio en cualquiera de ellos invalida toda la capa.</li>
+<li>Con varias fuentes, el destino debe ser un directorio terminado en <code>/</code>.</li>
+<li><code>--parents</code>, <code>--exclude</code> y <code>--link</code> son estables. Actívalos con <code># syntax=docker/dockerfile:1</code>.</li>
+<li>Mantén el contexto pequeño con <code>.dockerignore</code>, ordena los pasos COPY por frecuencia de cambio y verifica con <code>docker history</code>.</li>
+</ul>
+</ListCheck>
+
+## Preguntas frecuentes
+
+<Accordion label="¿Cómo copio varios archivos con un solo COPY de Docker?" group="faq">
+Lista las fuentes y termina el destino con una barra:
+
+```dockerfile
+COPY file1.txt file2.txt config.json /app/
+```
+
+Una instrucción, una capa. La `/` final en el destino es obligatoria siempre que pases más de una fuente.
+</Accordion>
+
+<Accordion label="¿Soporta COPY del Dockerfile los comodines recursivos **?" group="faq" expanded="true">
+Sí. `**` coincide con cualquier número de componentes de ruta, incluido ninguno, así que `src/**/*.txt` alcanza archivos en directorios anidados. La documentación oficial lo demuestra con `COPY --parents ./src/**/*.txt /parents/`, donde se conserva la estructura de directorios. Los patrones siguen las reglas de `filepath.Match` de Go más `**`; la expansión de llaves como `*.{json,yml}` no está soportada.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre COPY --link y un COPY normal?" group="faq">
+`--link` copia en un directorio de destino vacío y lo enlaza sobre el estado anterior, así que la copia vive en una capa independiente. Cambiar instrucciones anteriores o la imagen base ya no la invalida, lo que permite reconstruir imágenes sobre una base nueva sin recompilar los pasos de copia. Contrapartidas: varias fuentes se aplanan (combínalo con `--parents` para conservar la estructura), y hay advertencias sobre copias a subdirectorios y permisos de directorio.
+</Accordion>
+
+<Accordion label="¿Cómo copio un directorio excluyendo algunos archivos?" group="faq">
+Usa un flag `--exclude` repetible en la instrucción:
+
+```dockerfile
+COPY --exclude=*.test.ts --exclude=fixtures/** src/ /app/src/
+```
+
+Si la exclusión debe aplicarse a toda la compilación, no solo a un `COPY`, ponla en `.dockerignore`. Eso también mantiene los archivos fuera de la transferencia del contexto, lo que acelera cada paso. Y si pasas la configuración mediante variables de entorno en lugar de archivos, consulta [Variables ARG y ENV en Docker y Dockerfiles](/es/variables-entorno-docker/).
+</Accordion>
+
+<Accordion label="¿Por qué no funciona la caché de compilación de Docker después de COPY?" group="faq">
+Tres sospechosos habituales: un `COPY` agrupado donde cambió un archivo (toda la capa se recompila), un comodín que coincide con un directorio que cambia constantemente (las nuevas coincidencias invalidan la capa), o un contexto de compilación hinchado donde archivos ajenos hacen que el checksum de la instrucción se mueva. Acota los patrones, separa los grupos que no cambian juntos y recorta el contexto con `.dockerignore`. Después confirma con `docker build --progress=plain` y `docker history`.
+</Accordion>
+
+## Conclusión
+
+Dos movimientos cubren casi todo esto. Primero: un `COPY` para los archivos que cambian juntos sigue siendo el valor por defecto correcto, porque la caché invalida toda la capa cuando cambia cualquier miembro. Segundo: el número de flags es mayor que antes. `--parents`, `--exclude` y `--link` son estables, y `# syntax=docker/dockerfile:1` los activa sin importar lo antiguo que parezca el Dockerfile.
+
+La disciplina de caché sigue siendo la verdadera ganancia de rendimiento: contexto pequeño, COPY ordenado por frecuencia de cambio, manifiestos de dependencias antes del código. El golf de capas es ruido.
+
+Cuando termine la recompilación y vayas a desplegar la nueva imagen, consulta [cómo actualizar un contenedor con Docker Compose](https://www.bitdoze.com/updating-container-docker-compose/).
+
+<Button text="Cómo actualizar un contenedor con Docker Compose" link="https://www.bitdoze.com/updating-container-docker-compose/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+Si compilas y despliegas en un VPS o en un runner de CI autoalojado, una instancia pequeña de [Hetzner Cloud](https://go.bitdoze.com/hetzner) es suficiente para compilaciones de imágenes Docker de este tamaño.

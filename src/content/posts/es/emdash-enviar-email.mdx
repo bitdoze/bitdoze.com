@@ -1,0 +1,351 @@
+---
+date: 2026-10-05
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "emdash-send-email"
+title: "Envía Email desde un Sitio EmDash: Cloudflare Email Sending y SMTP"
+meta_title: "Envía Email desde un Sitio EmDash (Cloudflare + SMTP)"
+description: "Configura el email de EmDash en Cloudflare Workers: incorpora el dominio remitente, añade el binding send_email, activa cloudflareEmail, más la ruta emdash-smtp y Brevo gratis."
+image: "@assets/images/26/10/emdash-send-email-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["emdash", "cloudflare", "smtp"]
+series: ["EmDash CMS", "5"]
+canonical: "https://www.bitdoze.com/es/emdash-enviar-email/"
+---
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Un sitio EmDash envía correo saliente para sign-in con magic link, invitaciones de equipo, recuperación de cuenta y notificaciones de comentarios, más lo que un plugin necesite entregar (formularios de contacto, por ejemplo). Sin un proveedor configurado el admin sigue funcionando, pero cada flujo que envía correo devuelve `503 EMAIL_NOT_CONFIGURED`, y los enlaces de invitación hay que copiarlos a mano. La [guía de deploy en Cloudflare](/es/desplegar-emdash-cloudflare-workers/) marcó esto y se saltó deliberadamente el arreglo. Esta es esa guía; si aún no has desplegado, esa guía y el [tutorial de EmDash CMS](/emdash-cms-tutorial/) van primero.
+
+En Cloudflare Workers hay una ruta nativa sin cuenta externa y sin API key: el binding `send_email` respaldado por Cloudflare Email Sending, cableado a EmDash con el plugin oficial `cloudflareEmail()`. Es lo que corre en [emdashhq.com](https://emdashhq.com/), mi hub de EmDash para tutoriales, temas y plugins, y cada comando de abajo es uno que corrí ahí. También hay una segunda ruta, el plugin comunitario `emdash-smtp`, que es la respuesta real para cualquiera en Workers Free o fuera de Cloudflare por completo. Este artículo cubre ambas, y termina con el plugin de formularios de contacto que construí sobre el setup funcionando.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/HDhAKThf-1M"
+  label="How to Send Emails in EmDash CMS (Cloudflare & Free SMTP Guide)"
+/>
+
+<Button text="EmDash en GitHub" link="https://github.com/emdash-cms/emdash" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Email en Cloudflare en tres carriles
+
+Cloudflare tiene varias funciones con "email" en el nombre que hacen trabajos distintos. Separarlas primero ahorra una hora de confusión después.
+
+**Email Routing** recibe el correo dirigido a tu dominio y lo reenvía a otro sitio. `dragos@emdashhq.com` es una regla de routing: el correo enviado ahí aterriza en un buzón real detrás (una cuenta de Gmail, en mi caso). Routing es gratis, ilimitado, y disponible en cada plan. Cloudflare no aloja buzones, y el routing solo no puede enviar nada.
+
+**Email Sending a destinatarios arbitrarios** es el servicio transaccional de salida, lo que un CMS necesita para magic links e invitaciones. Requiere Workers Paid (5 $/mes). Cada cuenta obtiene 3.000 emails salientes al mes incluidos en el plan, luego 0,35 $ por 1.000 más allá. Los mensajes que rebotan duro siguen contando contra la cuota; los rechazados en la frontera de la API (payload malo, lista de supresión) no.
+
+**Envío a direcciones de destino verificadas** es la excepción que funciona en cada plan, Workers Free incluido. Una dirección de destino verificada es una que probaste poseer en los ajustes de Email Routing, las mismas direcciones a las que reenvían las reglas de routing. Antes de que cualquier dominio se incorpore a Email Sending, un binding `send_email` solo puede entregar a esas direcciones, y solo desde una dirección en un dominio de routing que poseas. Esos envíos siempre son gratis y nunca cuentan contra cuota ni límites diarios. Bien para pruebas y flujos de "envíame una copia", inútil para un CMS que envía a usuarios arbitrarios.
+
+|  | Workers Free | Workers Paid (5 $) |
+| --- | --- | --- |
+| Recibir + reenviar correo entrante (Email Routing) | Ilimitado | Ilimitado |
+| Enviar a direcciones de destino verificadas | Gratis | Gratis (no cuenta contra la cuota) |
+| Enviar a cualquier destinatario (Email Sending) | No disponible | 3.000/mes incluidos, luego 0,35 $ por 1.000 |
+| Cuota diaria | n/a | Empieza conservadora, escala con la reputación del remitente |
+
+<Notice type="warning" title="Los tutoriales de MailChannels están desactualizados">
+Los tutoriales viejos envían el email del Worker por MailChannels gratis. Esa integración terminó; MailChannels ya no es socio de Cloudflare y esas instrucciones fallan en silencio o con errores de binding hoy. Email Sending es el reemplazo, y en un plan de pago es más simple de lo que MailChannels jamás fue.
+</Notice>
+
+## Cómo entrega EmDash el email
+
+EmDash delega el envío a un plugin proveedor activo. El pipeline es corto: una función (auth, invitaciones, comentarios, un plugin) produce un mensaje, los hooks de email pueden transformarlo o cancelarlo, y el handler `email:deliver` del plugin proveedor hace el envío.
+
+- **Desarrollo.** `astro dev` auto-activa un proveedor de consola integrado cuando no hay otro seleccionado. No envía nada; loguea cada mensaje al terminal y guarda los últimos 100 en memoria. Puedes listarlos en `GET /_emdash/api/dev/emails` con sesión iniciada. Los magic links funcionan en dev copiando la URL del log.
+- **Producción.** El proveedor de consola se compila fuera. Si ningún plugin proveedor está activo, `Settings > Email` en el admin no muestra proveedor y los envíos fallan hasta que uno se instala, activa y selecciona.
+- **En Cloudflare.** `cloudflareEmail()` de `@emdash-cms/cloudflare/plugins` entrega por el binding `send_email` del Worker. Las credenciales son el binding más el dominio incorporado; no hay token que guardar o rotar.
+- **En cualquier otro sitio.** La familia de plugins comunitarios [`emdash-smtp`](https://github.com/masonjames/emdash-smtp) cubre SMTP genérico y proveedores alojados (SES, Brevo, Mailgun, Postmark, Resend, SendGrid, Zoho y más). Salta a la [Opción 2](#opción-2-smtp-y-proveedores-alojados-con-emdash-smtp).
+
+El admin tiene un botón **Send test email** bajo `Settings > Email` que ejercita el pipeline entero y saca los errores del proveedor directamente. Es el paso de verificación más rápido de este artículo. El mecanismo completo también está documentado en la [guía de email de EmDash](https://docs.emdashcms.com/guides/email/).
+
+## Configurando Cloudflare Email Sending en emdashhq.com
+
+### Paso 1: incorpora el dominio remitente
+
+Enviar requiere que el dominio del remitente esté incorporado a Email Service. La ruta del dashboard es **Compute > Email Service > Email Sending > Onboard Domain**. La CLI hace el mismo trabajo:
+
+```bash
+npx wrangler email sending enable emdashhq.com
+```
+
+La incorporación crea registros DNS automáticamente:
+
+| Registro | Nombre | Propósito |
+| --- | --- | --- |
+| MX x3 | `cf-bounce.emdashhq.com` | Devuelve los mensajes de rebote a Cloudflare |
+| TXT (SPF) | `cf-bounce.emdashhq.com` | Autoriza a Cloudflare a enviar por el dominio |
+| TXT (DKIM) | `cf-bounce._domainkey.emdashhq.com` | Firma el correo saliente |
+| TXT (DMARC) | `_dmarc.emdashhq.com` | Registro de política (`p=reject` aquí) |
+
+Verifica el estado y los registros exactos que Cloudflare espera:
+
+```bash
+npx wrangler email sending settings emdashhq.com
+npx wrangler email sending dns get emdashhq.com
+```
+
+Y verifica lo que realmente está vivo en DNS:
+
+```bash
+dig +short MX cf-bounce.emdashhq.com
+dig +short TXT cf-bounce.emdashhq.com
+dig +short TXT cf-bounce._domainkey.emdashhq.com
+dig +short TXT _dmarc.emdashhq.com
+```
+
+En emdashhq.com los cuatro ya estaban presentes antes del cambio de código. El DNS en el resolver propio de Cloudflare normalmente propaga en minutos. Cualquier dirección en el dominio incorporado es un remitente aceptado; no registras `hello@` ni `dragos@` individualmente.
+
+<Notice type="warning" title="Ojo con los registros SPF duplicados">
+Dos registros TXT `v=spf1` idénticos en el mismo hostname es una violación de RFC que produce un permerror en receptores estrictos. Email Routing añade un registro SPF al apex y Email Sending añade uno a `cf-bounce`. Si el apex acaba con un duplicado tras corridas de incorporación repetidas, borra el extra en el dashboard de DNS.
+</Notice>
+
+### Paso 2: añade el binding
+
+En `wrangler.jsonc`, junto a los bindings D1, R2 y KV existentes:
+
+```jsonc
+"send_email": [
+	{
+		"name": "EMAIL"
+	}
+],
+```
+
+El nombre es lo que el plugin busca en el entorno del Worker. `EMAIL` es el default; un nombre distinto hay que pasarlo al plugin como su opción `binding`. La API builder completa tras el binding (adjuntos, headers personalizados, tope de 50 destinatarios) está en los [docs de la Workers API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/).
+
+### Paso 3: registra el plugin
+
+En `astro.config.mjs`:
+
+```js
+import { cloudflareEmail } from "@emdash-cms/cloudflare/plugins";
+
+emdash({
+	// database, storage, objectCache, migrations...
+	plugins: [
+		siteScriptsPlugin(),
+		cloudflareEmail({
+			from: { email: "hello@emdashhq.com", name: "EmDash HQ" },
+			replyTo: "dragos@emdashhq.com",
+		}),
+	],
+});
+```
+
+Dos opciones importan:
+
+- `from` fija el remitente. Una cadena pelada o `{ email, name }`. El dominio debe estar incorporado o cada envío falla con `E_SENDER_NOT_VERIFIED`. Una dirección estilo `hello@` se lee mejor que un buzón personal en correo de sistema.
+- `replyTo` es a dónde van las respuestas humanas. Con un remitente `hello@` o `no-reply`, apúntalo a un buzón que exista para que las respuestas no se pierdan. Un `replyTo` a nivel de mensaje lo pisa.
+
+No hay paso `wrangler secret`. El binding es la credencial: solo tu Worker puede usarlo. Esto refleja la sección de email del [doc de despliegue de EmDash en Cloudflare](https://docs.emdashcms.com/deployment/cloudflare/).
+
+### Paso 4: despliega
+
+```bash
+npm run deploy
+```
+
+El script de deploy del sitio buildea, verifica el manifiesto de migración contra la D1 de producción, sube el Worker y calienta la caché de página. Un binding `send_email` no necesita aprovisionamiento; se adjunta a cualquier Worker que lo declare.
+
+Si el deploy está bloqueado por migraciones de núcleo pendientes (el caso justo tras subir `emdash`), aplícalas primero:
+
+```bash
+npx wrangler email sending settings emdashhq.com   # optional re-check
+npx emdash migrate --status --wrangler-config wrangler.jsonc
+npx emdash migrate --wrangler-config wrangler.jsonc
+npm run deploy
+```
+
+### Paso 5: activa y prueba en el admin
+
+El registro hace el plugin disponible; aún no está activo.
+
+1. Abre `https://emdashhq.com/_emdash/admin` y ve a **Extensions**. Activa el plugin de email de Cloudflare.
+2. Abre **Settings > Email**. Si es el único proveedor, EmDash lo selecciona automáticamente; si no, elígelo.
+3. Haz clic en **Send test email** a una dirección que puedas comprobar.
+
+Un resultado verde significa que todo el camino funciona: admin, pipeline de hooks, binding, Email Sending, DNS y los filtros del destinatario.
+
+También puedes probar el binding sin involucrar a EmDash en absoluto, lo que aísla los problemas del lado Cloudflare de los del lado CMS:
+
+```bash
+npx wrangler email sending send \
+	--from "hello@emdashhq.com" \
+	--to "dragos@emdashhq.com" \
+	--subject "Email Sending smoke test" \
+	--text "If you can read this, the binding and domain are fine."
+```
+
+### Paso 6 (opcional): verifica un flujo real
+
+Solicita un magic link para una segunda cuenta de admin, o dispara una invitación desde la página Users. El correo debería llegar firmado por `cf-bounce._domainkey.emdashhq.com` con `Reply-To` puesto a la dirección configurada.
+
+## Límites y comportamiento que vale conocer
+
+- 50 destinatarios máximo por mensaje entre `to`, `cc`, `bcc`. El correo de sistema de EmDash es de un destinatario por vez, muy por debajo del tope.
+- 5 MiB de tamaño total de mensaje incluyendo adjuntos (25 MiB cuando se envía solo a direcciones de destino verificadas).
+- Las cuentas nuevas empiezan con una cuota diaria conservadora que crece automáticamente con el historial de envío y la reputación. Existe un formulario de aumento de límite para saltarse la cola.
+- Una lista de supresión bloquea direcciones que rebotaron duro o se quejaron. Los envíos a direcciones suprimidas se rechazan en la frontera de la API (y no facturan), o se descartan en silencio para los destinatarios restantes si **Drop suppressed recipients** está activado.
+- Los envíos salientes aparecen como **dropped** en el resumen del dashboard de Email Routing aunque hayan llegado. Esa vista es para entrantes. Sigue los envíos bajo [observabilidad de Email Service](https://developers.cloudflare.com/email-service/observability/) en su lugar.
+- La entrega está a merced de que SPF/DKIM/DMARC pasen. La incorporación escribe los tres; si el correo aterriza en spam, comprueba esos registros primero, luego la reputación del remitente.
+- 30 dominios de Email Routing + Email Sending máximo por zona, 200 reglas de routing por dominio, 200 direcciones de destino verificadas por cuenta. Números completos en la [página de límites](https://developers.cloudflare.com/email-service/platform/limits/) y la [página de precios](https://developers.cloudflare.com/email-service/platform/pricing/).
+
+## Troubleshooting del email de EmDash
+
+Síntoma, causa, arreglo. Las dos primeras filas son las que golpean a la mayoría.
+
+| Síntoma | Causa probable | Arreglo |
+| --- | --- | --- |
+| `503 EMAIL_NOT_CONFIGURED` | Ningún proveedor activo | Activa el plugin en Extensions, selecciónalo en Settings > Email |
+| `E_SENDER_NOT_VERIFIED` / `E_SENDER_DOMAIN_NOT_AVAILABLE` | Dominio `from` no incorporado, o DNS aún propagando | `wrangler email sending enable <dominio>`; re-comprueba con `dns get` y `dig` |
+| `E_RECIPIENT_NOT_ALLOWED` | Dominio no incorporado y el destinatario no es una dirección verificada | Incorpora el dominio, o envía solo a direcciones verificadas |
+| `E_DAILY_LIMIT_EXCEEDED` / `E_RATE_LIMIT_EXCEEDED` | Cuota de cuenta nueva o límite de ráfaga | Espera a la ventana rodante; pide un aumento para volumen de producción |
+| `E_RECIPIENT_SUPPRESSED` | La dirección está en la lista de supresión (rebotó o se quejó antes) | Quítala de la lista de supresión en los ajustes de Email Service |
+| Envíos funcionan en dev, fallan en prod | Dev usó el proveedor de consola | El proveedor de consola nunca corre en producción; termina el Paso 5 |
+| El correo aterriza en spam | Problema de SPF/DKIM/DMARC o reputación de remitente fresca | `dig` los cuatro registros; calienta el dominio con correo real de bajo volumen |
+| Registros SPF duplicados en el apex | Corridas de incorporación repetidas | Borra el TXT extra en el dashboard de DNS |
+| Envíos de formulario guardados pero nunca enviados | El plugin guarda primero, envía por el proveedor después | Arregla el proveedor; reenvía desde la página de submissions |
+
+## Opción 2: SMTP y proveedores alojados con emdash-smtp
+
+El binding no es la única vía. La familia de plugins [`emdash-smtp`](https://github.com/masonjames/emdash-smtp) mantenida por la comunidad enruta el correo de EmDash por SMTP genérico o la API de un proveedor alojado. Necesita EmDash 1.0.1 o posterior y se envía en dos paquetes:
+
+- `emdash-smtp` es la instalación confiable. Cubre el catálogo completo de proveedores más SMTP genérico y sendmail local.
+- `emdash-smtp-marketplace` es la variante segura-para-sandbox para instalaciones de registro/marketplace. Corre bajo `sandboxed:` y necesita un `sandboxRunner` (`sandbox()` de `@emdash-cms/cloudflare`, más el binding `LOADER`) en la config de EmDash.
+
+### Proveedores
+
+La mayoría de proveedores corren sobre HTTPS, así que funcionan igual en Workers y Node: Amazon SES, Brevo, Elastic Email, Emailit, Mailchimp Transactional, MailerSend, Mailgun, Mailjet, Postmark, Resend, SendGrid, SMTP2GO, SparkPost. Google/Gmail, Microsoft 365 y Zoho Mail usan sus APIs con tokens OAuth (token directo, o client credential más refresh token, que el plugin refresca al enviar). SMTP genérico y sendmail local solo existen en el paquete confiable y corren sobre transports de Node, así que pertenecen a deploys VPS/autoalojados; no hay transport SMTP genérico en Workers, ni gratis ni de pago.
+
+### Setup
+
+```bash
+npm install emdash-smtp
+```
+
+```js
+import { emdashSmtp } from "emdash-smtp";
+
+emdash({
+	// database, storage...
+	plugins: [emdashSmtp()],
+});
+```
+
+Despliega, luego en el admin abre los ajustes del plugin (Plugins > SMTP Providers), elige un proveedor y pega sus credenciales. No se necesitan variables de entorno ni entradas `wrangler secret` para el propio proveedor: EmDash guarda las credenciales como ajustes de plugin en D1, así que rotar una clave es una edición en el admin, no un redeploy. El único secret que tiene que existir ya es `EMDASH_ENCRYPTION_KEY`, que cifra esos ajustes en reposo; cualquier deploy de plantilla lo tiene (la [guía de deploy](/es/desplegar-emdash-cloudflare-workers/) cubre `npx emdash secrets generate` y `wrangler secret put` si el tuyo no). Selecciona SMTP bajo **Settings > Email** y usa **Send test email** como antes.
+
+### La opción de SMTP gratis: Brevo
+
+Brevo es la elección pragmática cuando el coste importa más que quedarse dentro de Cloudflare. Su plan Free es gratis para siempre, sin tarjeta, e incluye email transaccional por SMTP y API a 300 envíos al día (unas 9.000/mes si se reparte parejo). Pasado el tope diario, el correo transaccional se encola en un buffer de reintento de hasta 1.000 en vez de fallar duro. Eso eclipsa la necesidad real de un CMS: magic links, invitaciones y avisos de comentarios son correos de un dígito al día en la mayoría de sitios. Los números actuales están en la [página de límites de Brevo](https://help.brevo.com/hc/en-us/articles/208580669).
+
+Como Brevo va por su API HTTP en `emdash-smtp`, también funciona en Workers Free. Ese es el desbloqueo real: un sitio en el plan de 0 $ no puede usar `send_email` a destinatarios arbitrarios en absoluto, pero el tier gratis de Brevo cubre toda la carga de correo del CMS sin tocar la factura de Workers.
+
+Esquema del setup:
+
+1. Crea una cuenta Brevo y añade `emdashhq.com` como dominio remitente. Brevo emite sus propios registros SPF/DKIM para añadir en Cloudflare DNS; coexisten con los registros de Email Sending ya que Brevo usa su propio selector DKIM y entradas de hostname.
+2. Genera una API key (SMTP & API > API Keys). En Workers usa siempre el proveedor Brevo, que habla con la API HTTP de Brevo; las credenciales crudas `smtp-relay.brevo.com:587` solo son usables por el transport Generic SMTP en Node.
+3. Pégala en los ajustes del proveedor Brevo del plugin, selecciona SMTP en Settings > Email, envía una prueba.
+
+## Ponlo a trabajar: formularios de contacto que sí envían
+
+Una vez hay un proveedor activo, cada función que llama a `ctx.email.send()` lo monta. El ejemplo concreto en emdashhq.com es [@bitdoze.com/emdashhq-contact-forms](https://plugins.emdashcms.com/plugins/@bitdoze.com/emdashhq-contact-forms), un plugin de formularios de contacto que publiqué al registro de EmDash. Nunca habla con un servicio de email él mismo; entrega los mensajes al proveedor que hayas configurado arriba, que es como un plugin de EmDash debería comportarse. El [código vive en el repo de emdashhq.com](https://github.com/bitdoze/emdashhq.com/tree/main/plugins/emdashhq-contact-forms).
+
+Lo que obtienes:
+
+- Una página de admin **Forms**: crea y edita formularios, gestiona campos (text, email, tel, url, number, textarea, select, checkbox), reordena, activa/desactiva.
+- Una página **Submissions**: cada entrada guardada con página, IP, país y user-agent; filtra por formulario/estado/resultado de email, marca leído o archiva, reenvía la notificación, copia como CSV.
+- Una página **Email log**: cada intento de envío con estado, duración y el mensaje de error del proveedor literal. Esto dobla como vista de depuración para todo lo de este artículo; los errores `E_*` de la tabla de troubleshooting aparecen aquí.
+- Un widget de dashboard (conteo de no leídos, formularios activos, submissions recientes), anti-spam (honeypot, trampa de tiempo-mínimo-de-relleno, límite de tasa por IP por hora) y poda de retención opcional vía el cron.
+
+Es un plugin **sandboxed**, así que corre en un Worker aislado y necesita el mismo sandbox runner que cualquier plugin de marketplace: `sandboxRunner: sandbox()` más el binding `LOADER` y una clase `PluginBridge` exportada, según los [docs de plugin sandbox](https://docs.emdashcms.com/deployment/plugin-sandbox/). Eso significa Workers Paid, el mismo muro que cubre la [guía de deploy](/es/desplegar-emdash-cloudflare-workers/). Si tomaste la ruta Brevo porque estás en Workers Free, este plugin tampoco es alcanzable; es un límite de sandboxing, no de email.
+
+<Tabs>
+<Tab name="Instalar desde el registro">
+
+La ruta recomendada. Con un sandbox runner configurado, abre **Registry** en el admin, busca `@bitdoze.com/emdashhq-contact-forms` y selecciona **Install**. El plugin declara la capacidad `email:send`, que EmDash te muestra para revisar antes de instalar nada.
+
+</Tab>
+<Tab name="Instalar desde npm">
+
+```bash
+npm install emdashhq-contact-forms
+```
+
+Registra el descriptor generado en `astro.config.mjs` bajo `sandboxed`, no `plugins`:
+
+```js
+import { sandbox } from "@emdash-cms/cloudflare";
+import contactForms from "emdashhq-contact-forms";
+
+emdash({
+	sandboxRunner: sandbox(),
+	sandboxed: [
+		contactForms, // descriptor object, not a factory call
+	],
+});
+```
+
+Actívalo bajo **Plugins**.
+
+</Tab>
+</Tabs>
+
+Luego cablea el bloque de página. Los tipos de bloque de EmDash viven en la semilla del sitio, un plugin no puede inyectar uno, así que dos archivos vienen en el directorio `site/` del paquete para copiar:
+
+1. `site/block-type.json` va a `blockTypes` en `seed/seed.json`, más `"contact_form"` en el `validation.allowedTypes` del campo de página (sáltate eso si el campo no tiene `allowedTypes`, todo está ya permitido).
+2. `site/ContactForm.astro` va a `src/components/blocks/`, mapeado en tu mapa de componentes de bloque como `contact_form: ContactForm`.
+
+Resiembra para que el tipo de bloque llegue a la base de datos:
+
+```bash
+npx emdash seed seed/seed.json --database <dev-db> --no-content --on-conflict=update
+```
+
+En el admin: pon un email de notificación por defecto en Plugins > Contact forms > Settings, crea un formulario con un slug (`contact`), luego añade un bloque **Contact form** en el editor de página y teclea el slug. Las plantillas de asunto aceptan `{form}`, `{site}` y cualquier `{field_key}` enviado; las respuestas al correo de notificación van al primer campo `email` del visitante vía `replyTo`. Sin proveedor configurado, los submissions igualmente se guardan, solo que no se envían, que es el modo de fallo correcto.
+
+<Button text="Contact Forms en el registro de EmDash" link="https://plugins.emdashcms.com/plugins/@bitdoze.com/emdashhq-contact-forms" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Código del plugin en GitHub" link="https://github.com/bitdoze/emdashhq.com/tree/main/plugins/emdashhq-contact-forms" variant="outline" color="gray" size="md" icon="arrow-right" />
+
+## Qué ruta de email elegir
+
+- **En Workers Paid, bajo volumen, quieres cero terceros.** Binding `send_email` más `cloudflareEmail()`. Un binding, una llamada de plugin, nada que rotar.
+- **En Workers Free, o quieres tracking de entrega, plantillas, o una asignación gratis mayor.** `emdash-smtp` con Brevo (gratis, 300/día) u otro proveedor HTTP.
+- **Alto volumen.** Compara 0,35 $ por 1.000 sobre los 3.000/mes incluidos de Cloudflare contra los tiers de proveedores. IPs dedicadas y warmup son una cuestión de procurement aparte en cualquier caso.
+- **Fuera de Cloudflare.** `emdash-smtp` es la única ruta; no hay binding `send_email` en Node.
+
+## FAQ: email de EmDash
+
+<Accordion label="¿Puede EmDash enviar email en Workers Free?" group="faq" expanded="true">
+Solo a direcciones de destino verificadas, que cubre pruebas y flujos de "envíame una copia", no magic links a usuarios arbitrarios. La ruta gratis usable es `emdash-smtp` apuntado a un proveedor HTTP como Brevo, cuyo tier gratis (300 envíos/día) cubre la carga de correo real de un CMS sin tocar la factura de Workers.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre Email Routing y Email Sending?" group="faq">
+Routing es entrante: recibe correo en tu dominio y lo reenvía a un buzón que posees. Sending es saliente: entrega correo transaccional desde un Worker a destinatarios arbitrarios. Se configuran en sitios distintos y se cobran distinto. Routing es gratis en cada plan; Sending a cualquiera necesita Workers Paid.
+</Accordion>
+
+<Accordion label="¿Por qué los magic links devuelven 'Email is not configured'?" group="faq">
+Los Workers de producción no tienen entrega de email por defecto, así que los flujos de auth devuelven `503 EMAIL_NOT_CONFIGURED` hasta que un plugin proveedor está instalado, activado y seleccionado en Settings > Email. En dev el proveedor de consola lo maneja en silencio, por eso solo se rompe tras el deploy. Los passkeys y los copy-links de invitación funcionan mientras tanto.
+</Accordion>
+
+<Accordion label="¿Puedo seguir usando MailChannels para email gratis del Worker?" group="faq">
+No. La integración de MailChannels terminó cuando lo hizo la asociación, y los tutoriales construidos sobre ella ahora fallan en silencio o con errores de binding. Cloudflare Email Sending es el reemplazo en pago; un proveedor HTTP gratis por `emdash-smtp` es el reemplazo en gratis.
+</Accordion>
+
+<Accordion label="¿El plugin Contact Forms funciona en Workers Free?" group="faq">
+No, por una razón distinta a la del email. Es un plugin sandboxed, así que necesita el binding `LOADER` y `sandboxRunner`, y Dynamic Workers es solo Workers Paid. En un plan gratis la ruta npm `emdash-smtp` igualmente arregla tu correo de sistema (magic links, invitaciones); el plugin de formularios específicamente es una función del plan de pago.
+</Accordion>
+
+<Accordion label="Mi envío aparece como 'dropped' en el dashboard de Email Routing. ¿Falló?" group="faq">
+Probablemente no. Ese resumen es la vista de entrantes, y los envíos salientes se cuentan como dropped ahí aunque hayan llegado bien. Sigue los envíos reales bajo la observabilidad de Email Service en el dashboard, o en el email log del plugin si usas Contact Forms.
+</Accordion>
+
+## Cierre
+
+En Workers Paid, el email de EmDash es un trabajo de tres partes: incorpora el dominio, añade `send_email` a `wrangler.jsonc`, registra `cloudflareEmail()` y actívalo en el admin. Sin secrets, sin cuenta de terceros, y 3.000 envíos al mes antes de pagar un céntimo sobre el plan de 5 $. En Workers Free o fuera de Cloudflare, `emdash-smtp` más el tier gratis de Brevo cubre la misma carga de correo del CMS por 0 $. En cualquier caso la prueba es la misma: instala Contact Forms, envía el formulario, mira el email log.
+
+Esa es la parte 5 de la serie EmDash CMS: email saliente, de las dos formas.
+
+<Button text="Vuelve a la guía de deploy en Cloudflare" link="/es/desplegar-emdash-cloudflare-workers/" variant="outline" color="gray" size="md" />

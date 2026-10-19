@@ -1,0 +1,463 @@
+---
+date: 2026-10-02T00:00:00Z
+lastmod: 2026-10-02T00:00:00Z
+translationKey: "redirect-docker-logs-to-a-single-file"
+title: "Cómo Redirigir los Logs de Docker a un Solo Archivo (3 Métodos)"
+meta_title: "Redirigir Logs de Docker a un Solo Archivo: 3 Métodos (2026)"
+description: "Cómo redirigir los logs de Docker a un solo archivo con docker logs, rotación json-file, el driver local y forwarding de logs. Actualizado para Engine 29."
+image: "@assets/images/23/07/redirect_docker_logs_single_file.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "logging", "devops"]
+canonical: "https://www.bitdoze.com/es/redirigir-logs-docker-un-solo-archivo"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Docker guarda los logs de cada contenedor en un archivo separado bajo `/var/lib/docker/containers/`. En cuanto corres más de un par de contenedores, hacer grep por archivos dispersos por contenedor se hace viejo rápido. Esta guía cubre tres formas de redirigir los logs de Docker a un solo archivo: un one-liner rápido con `docker logs`, rotación a través del driver `json-file`, y el driver `local` que recomiendo para la mayoría de setups autoalojados.
+
+Todo lo de aquí se re-comprobó contra Docker Engine 29.x en oct de 2026 (última estable 29.8.2). Donde el comportamiento depende de la versión del Engine, lo señalo inline. Nada de esto necesita tooling de pago. Y si estás montando una máquina nueva, echa un vistazo a los [mejores contenedores Docker para un servidor casero](https://www.bitdoze.com/docker-containers-home-server/) una vez resuelto el logging.
+
+<Notice type="info" title="Verificado contra Docker Engine 29.x">
+Re-comprobado contra los docs de Docker y las release notes de moby en oct de 2026. Las funciones específicas de versión (como las opciones `tag`/`labels` del driver local) están marcadas inline para que sepas qué aplica a tu flota.
+</Notice>
+
+**Otras guías de Docker que pueden serte útiles:**
+
+- [Añadir usuarios a un contenedor Docker](https://www.bitdoze.com/add-users-to-docker-container/)
+- [Copiar múltiples archivos en una capa usando un Dockerfile](https://www.bitdoze.com/copy-multiple-files-in-one-layer-using-a-dockerfile/)
+- [Instalar Docker y Docker-compose para Ubuntu ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/)
+- [Variables de entorno ARG y ENV en Docker](/es/variables-entorno-docker/)
+
+## Lo que necesitas
+
+<ListCheck>
+<ul>
+<li>Docker Engine instalado y corriendo (19.03+; esta guía verificada en 29.x). Si aún no está instalado, [instala Docker en Ubuntu o ARM](https://www.bitdoze.com/install-docker-ubuntu-arm/).</li>
+<li>Acceso sudo o pertenencia al grupo `docker`.</li>
+<li>Un editor de texto para `/etc/docker/daemon.json`. En Docker Desktop lo editas vía Settings → Docker Engine, no como archivo en una VM.</li>
+<li>Docker Compose, si quieres seguir los ejemplos de Compose.</li>
+</ul>
+</ListCheck>
+
+## Método 1: Redirigir logs de Docker a un archivo con el comando `docker logs`
+
+La forma más simple de volcar los logs de un contenedor a un archivo es redirigir la salida del CLI. Si el CLI te queda oxidado, ten mis [comandos esenciales de Docker](https://www.bitdoze.com/docker-commands/) abiertos en otra pestaña.
+
+```bash
+docker logs my-container > container.log 2>&1
+```
+
+La parte `2>&1` importa. Sin ella solo capturas stdout, y stderr se pierde. Esto fusiona ambos streams en un archivo.
+
+**Verifica** que la exportación funcionó:
+
+```bash
+ls -lh container.log && tail -n 20 container.log
+```
+
+Si el archivo tiene cero bytes, el contenedor está silencioso o soltaste el `2>&1` mientras la app loguea a stderr.
+
+### Exportaciones dirigidas con --since y --until
+
+La mayoría de las veces no quieres el historial completo, solo la ventana alrededor de un incidente. Los filtros de tiempo de `docker logs` son la forma más limpia de guardar logs a un archivo para un periodo concreto:
+
+```bash
+# solo las últimas 24 horas
+docker logs --since 24h my-container > last24h.log 2>&1
+
+# una ventana exacta (timestamps ISO)
+docker logs --since 2026-10-01T00:00:00Z --until 2026-10-02T00:00:00Z my-container > window.log 2>&1
+```
+
+Añade `--timestamps` si necesitas los timestamps horneados en la exportación en vez de reconstruirlos después.
+
+### Seguir logs continuamente
+
+Para seguir logs en tiempo real y escribirlos continuamente:
+
+```bash
+docker logs -f my-container > container.log 2>&1 &
+```
+
+El flag `-f` sigue la salida nueva y `&` lo corre en segundo plano. La limitación: el proceso muere cuando tu sesión de shell termina. Para cualquier cosa más larga que una sesión de debug, córrelo dentro de `tmux` o envuélvelo en `nohup`:
+
+```bash
+nohup docker logs -f my-container >> container.log 2>&1 &
+```
+
+### Capturar múltiples contenedores en un archivo
+
+```bash
+for container in $(docker ps --format '{{.Names}}'); do
+  echo "=== $container ===" >> all-logs.log
+  docker logs "$container" >> all-logs.log 2>&1
+done
+```
+
+Los modos de fallo son predecibles: un archivo vacío casi siempre significa un `2>&1` que falta en una app que loguea a stderr, o un contenedor que aún no ha escrito nada (comprueba `docker ps`). Un `docker logs -f` en segundo plano que "dejó de loguear" normalmente significa que la sesión SSH terminó y se llevó el trabajo con ella.
+
+Usa este método para debug rápido, exportaciones puntuales de logs, o cuando necesitas una foto de lo que está pasando ahora mismo. Para acceso persistente a un solo archivo en un host corriendo, pasa al Método 2.
+
+## Método 2: Configurar el driver `json-file` con rotación de logs
+
+Docker usa el driver de logging `json-file` por defecto. Escribe logs como JSON a `/var/lib/docker/containers/<id>/<id>-json.log`. La trampa: no hay rotación activada por defecto. Un contenedor parlanchín llenará tu disco. Este es el problema de disco en Docker más común en hosts longevos.
+
+El driver `json-file` también tiene una opción `compress` para archivos rotados, y por defecto es `false`. La rotación sola no encoge archivos viejos a menos que actives compresión (el driver `local` del Método 3 comprime por defecto).
+
+### Configuración por contenedor
+
+Pon el driver de logging al arrancar un contenedor:
+
+```bash
+docker run -d \
+  --name my-app \
+  --log-driver json-file \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  my-app:latest
+```
+
+- `max-size=10m` capa cada archivo de log a 10 MB
+- `max-file=3` conserva 3 archivos rotados (el más viejo se borra)
+
+Con estos ajustes el contenedor usa como máximo 30 MB para logs. Los archivos rotados obtienen sufijos numéricos (`<id>-json.log.1`, `<id>-json.log.2`, y así).
+
+![Diagram of json-file log rotation with max-size and max-file showing the active log file, rotated files, and deletion of the oldest file](@assets/images/23/07/rotation-max-size-max-file.svg)
+
+**Verifica** que las opciones se aplicaron:
+
+```bash
+docker inspect -f '{{.HostConfig.LogConfig}}' my-app
+```
+
+Deberías ver el driver más las opciones `max-size`/`max-file` que pasaste.
+
+### Configuración a nivel de daemon (`daemon.json`)
+
+Para aplicar rotación a cada contenedor nuevo, edita `/etc/docker/daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+```
+
+Antes de reiniciar el daemon, valida la config:
+
+```bash
+sudo dockerd --validate --config-file /etc/docker/daemon.json
+```
+
+Luego reinicia Docker:
+
+```bash
+sudo systemctl restart docker
+```
+
+<Notice type="warning" title="Los valores de daemon.json deben ser strings">
+Cada valor en `log-opts` debe ser un string entrecomillado: `"max-file": "3"`. Escribir `"max-file": 3` (número, sin comillas) rompe el daemon. Además nota que los contenedores existentes conservan su config de logging original hasta que los recrees. Reiniciar Docker no reescribe lo que los contenedores viejos ya están usando.
+</Notice>
+
+En Docker Desktop no hay `/etc/docker/daemon.json` que editar en una VM. Usa Settings → Docker Engine, que edita la config del daemon para el engine gestionado por Desktop.
+
+### Modo no-bloqueante para contenedores parlanchines
+
+Por defecto Docker usa entrega directa y bloqueante al driver de logging. Si el driver se atasca (disco lleno, endpoint remoto caído), el backpressure puede bloquear las escrituras de tu aplicación a stdout y stderr. Para servicios parlanchines donde perder una línea de log es mejor que atascar la app, cambia a modo no-bloqueante:
+
+```bash
+docker run -d \
+  --name my-app \
+  --log-driver json-file \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  --log-opt mode=non-blocking \
+  --log-opt max-buffer-size=4m \
+  my-app:latest
+```
+
+Lo mismo en `daemon.json`:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3",
+    "mode": "non-blocking",
+    "max-buffer-size": "4m"
+  }
+}
+```
+
+<Notice type="warning" title="El modo no-bloqueante descarta mensajes de log">
+Cuando el buffer está lleno, los mensajes se descartan, no se encolan. El buffer por defecto es `1m` por contenedor. Bien para logs de app parlanchines o telemetría, mal para logs de auditoría que no puedes permitirte perder. Recuerda que el buffer es por contenedor: dimensionar `max-buffer-size` en unas docenas de contenedores suma en RAM.
+</Notice>
+
+### Verifica la configuración
+
+Comprueba el default del daemon:
+
+```bash
+docker info --format '{{.LoggingDriver}}'
+```
+
+Comprueba el driver de un contenedor concreto (el formato de inspect estrecho que recomiendan los docs):
+
+```bash
+docker inspect -f '{{.HostConfig.LogConfig.Type}}' my-app
+```
+
+Comprueba dónde vive el archivo de log:
+
+```bash
+docker inspect --format='{{.LogPath}}' my-app
+```
+
+## Método 3: Usa el driver `local` (Recomendado para producción)
+
+El driver `local` es el reemplazo recomendado por Docker para `json-file` en la mayoría de situaciones. Usa un formato binario eficiente, comprime archivos rotados por defecto, y tiene buenos defaults: 20 MB por archivo, 5 archivos conservados, lo que capa cada contenedor en unos 100 MB de logs (5 x 20 MB antes de compresión). `docker logs` funciona exactamente igual con ambos drivers.
+
+Un contraste práctico con el Método 2: `local` comprime por defecto, mientras que `json-file` deja `compress` apagado a menos que lo actives.
+
+Aquí está la misma config del driver `local` en las tres superficies:
+
+<Tabs>
+<Tab name="daemon.json">
+```json
+{
+  "log-driver": "local"
+}
+```
+Aplican los defaults: `max-size=20m`, `max-file=5`, `compress=true`. Reinicia el daemon después con `sudo systemctl restart docker`.
+</Tab>
+<Tab name="docker run">
+```bash
+docker run -d \
+  --name my-app \
+  --log-driver local \
+  my-app:latest
+```
+</Tab>
+<Tab name="Docker Compose">
+```yaml
+services:
+  api:
+    image: my-app:latest
+    logging:
+      driver: local
+```
+</Tab>
+</Tabs>
+
+<Notice type="info" title="Nuevo en Engine 29.5.0: tag, labels, env en el driver local">
+Desde Docker Engine 29.5.0 (moby#52348) el driver `local` acepta las opciones de log `label`, `label-regex`, `env`, `env-regex` y `tag`, igualando lo que `json-file` ya soportaba. Ojo: la tabla de opciones de los docs del driver local aún no se ha puesto al día con las release notes, así que prueba en tu flota antes de desplegarlo por todas partes. Esto elimina la última razón común para preferir `json-file` sobre `local`.
+</Notice>
+
+Docker mantiene `json-file` como default porque cambiarlo rompería herramientas que leen el layout json-file, siendo Kubernetes la principal. Si no corres Kubernetes (ni nada que parsee esos archivos directamente), usa `local`.
+
+Una nota sobre la vieja advertencia de "leer logs rotados de local cuesta disco temp y CPU": desde Engine 27.4.0 (moby#48842), los archivos rotados y comprimidos se descomprimen perezosamente (solo al leerse), y un error de parseo salta al siguiente archivo rotado en vez de abortar el stream entero. Leer logs en un host con driver `local` es menos doloroso que antes.
+
+### Configuración de Docker Compose
+
+Para stacks de Compose, usa la clave `logging`:
+
+```yaml
+services:
+  api:
+    image: my-app:latest
+    logging:
+      driver: local
+
+  worker:
+    image: my-worker:latest
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+```
+
+Para aplicar la misma config de logging a todos los servicios con un ancla YAML:
+
+```yaml
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  api:
+    image: my-app:latest
+    logging: *default-logging
+
+  worker:
+    image: my-worker:latest
+    logging: *default-logging
+```
+
+Entrecomilla los valores de las opciones en YAML (`"20m"`, no `20m`) por la misma razón que en `daemon.json`: son strings. Ya que estás en el archivo compose, los [secretos de Docker Compose](https://www.bitdoze.com/docker-compose-secrets/) merecen un vistazo si aún pasas credenciales como variables de entorno planas.
+
+**Verifica** tras `docker compose up -d`:
+
+```bash
+docker inspect -f '{{.HostConfig.LogConfig.Type}}' my-app
+```
+
+Salida esperada: `local` (o `json-file`, según lo que pusiste). Si obtienes el default del daemon en vez de tu valor por servicio, el bloque `logging:` no está bajo el servicio, u olvidaste recrear los contenedores tras editar.
+
+## Dónde guarda Docker los archivos de log por defecto
+
+Antes de redirigir logs, ayuda entender qué hace Docker por su cuenta:
+
+![Diagram of Docker log routing from container stdout and stderr through the logging driver to files on disk, including the dual logging cache for remote drivers](@assets/images/23/07/docker-log-routing.svg)
+
+- Docker captura stdout y stderr de cada contenedor.
+- Cada contenedor obtiene su propio archivo de log bajo `/var/lib/docker/containers/<id>/`.
+- Con `json-file`, cada línea es un objeto JSON con timestamp y tipo de stream.
+- No hay rotación activada por defecto. Este es el problema principal.
+
+Encuentra el archivo de log de un contenedor concreto:
+
+```bash
+docker inspect --format='{{.LogPath}}' my-container
+```
+
+La salida se ve así:
+
+```
+/var/lib/docker/containers/a4f8c9e1.../a4f8c9e1...-json.log
+```
+
+Cada línea es un objeto JSON:
+
+```json
+{"log":"Listening on port 8080\n","stream":"stdout","time":"2023-07-03T10:14:02.123456789Z"}
+```
+
+### Triage de disco: qué se está comiendo realmente el espacio
+
+`docker system df` no desglosa logs por contenedor. Para ver qué contenedores son los peores infractores:
+
+```bash
+du -sh /var/lib/docker/containers/*/*-json.log | sort -h | tail
+```
+
+Para archivos rotados, amplía el glob a `*-json.log*`. `docker ps -s` muestra una columna de tamaño por contenedor, pero mezcla capa escribible y datos de log, así que la línea `du` es la honesta para logs.
+
+Cálculo de huella para planificar: `json-file` sin rotar es ilimitado. Los defaults de `local` te capan en unos 100 MB por contenedor (5 x 20 MB antes de compresión). En un host de 20 contenedores es la diferencia entre "sin techo" y unos 2 GB de datos de log predecibles.
+
+Cuando los logs legítimamente superan el disco, el arreglo correcto suele ser más disco: [añade un disco nuevo y móntalo permanentemente con LVM](https://www.bitdoze.com/add-new-drive-lvm/). Y para pillar un disco llenándose antes de que los logs lo hagan por ti, [monitoriza el uso de disco del servidor con Beszel y Uptime Kuma](https://www.bitdoze.com/beszel-uptime-kuma/).
+
+<Notice type="error" title="No corras logrotate sobre los archivos de log de Docker">
+Los docs de los drivers json-file y local son explícitos sobre esto: los archivos de log están diseñados para ser accedidos exclusivamente por el daemon de Docker, y debe evitarse interactuar con ellos con herramientas externas. La rotación o truncado externo puede corromper el estado de los logs o interferir con el logging del daemon de formas impredecibles. Usa la rotación propia del driver con `max-size`/`max-file` en su lugar.
+</Notice>
+
+## Forwarding de logs de Docker a un sistema central
+
+Para setups de producción con múltiples hosts, considera reenviar logs a un sistema central en vez de (o además de) archivos locales.
+
+### Driver syslog
+
+```bash
+docker run -d \
+  --log-driver syslog \
+  --log-opt syslog-address=tcp://logs.example.com:514 \
+  --log-opt tag="{{.Name}}" \
+  my-app:latest
+```
+
+### Driver fluentd
+
+```bash
+docker run -d \
+  --log-driver fluentd \
+  --log-opt fluentd-address=localhost:24224 \
+  --log-opt tag="docker.{{.Name}}" \
+  my-app:latest
+```
+
+<Notice type="warning" title="fluentd-async-connect se eliminó en Docker 28.0">
+La opción `fluentd-async-connect` (deprecada desde 20.10) se eliminó en Docker 28.0. Tutoriales viejos aún la recomiendan, y pegarla en una config 28+ da error. Simplemente quita la opción. Si necesitas timeouts, usa `fluentd-write-timeout` (añadido en 28.2.0) y `fluentd-read-timeout` (añadido en 29.0.0).
+</Notice>
+
+Otra eliminación que vale conocer: el driver `logentries` ya no existe. Se eliminó en Docker 25.0, y su código de migración en 28.0. Si lo ves en contenido viejo, no existe en Engines actuales.
+
+Desde Docker 20.10, los drivers remotos (syslog, fluentd, splunk y amigos) mantienen una caché local junto al forwarding. Docker llama a esto **dual logging**, y ahora tiene su propia página de docs: [Dual logging](https://docs.docker.com/engine/logging/dual-logging/). `docker logs` sigue funcionando. La caché usa el driver `local` internamente con 5 archivos de 20 MB cada uno (antes de compresión), por contenedor. Para desactivar la caché de un driver remoto, añade `"cache-disabled": "true"` a sus `log-opts`.
+
+Lista actual de drivers en la [visión general de logging](https://docs.docker.com/engine/logging/): `none`, `local`, `json-file`, `syslog`, `journald`, `gelf`, `fluentd`, `awslogs`, `splunk`, `etwlogs` (Windows), `gcplogs`.
+
+Un modo de fallo que vale conocer: si el colector remoto (fluentd, syslog) es inalcanzable, la entrega bloqueante por defecto puede atascar las escrituras de tu aplicación a stdout y stderr. Cruza con el modo no-bloqueante del Método 2 para ese caso.
+
+## Problemas comunes de logging en Docker (y arreglos)
+
+**Los logs del contenedor llenan el disco.** Activa rotación con `max-size` y `max-file` (Método 2). Sin rotación, `json-file` no tiene límite superior. Si el disco ya está lleno y necesitas aire ahora mismo, el movimiento de último recurso es truncar el archivo de log in situ:
+
+```bash
+truncate -s 0 "$(docker inspect --format '{{.LogPath}}' my-container)"
+```
+
+<Notice type="warning" title="Truncar es un último recurso">
+Los docs de Docker advierten contra herramientas externas tocando archivos de log gestionados por el daemon. Esto es para el momento "el disco está al 100% y la máquina está a punto de ponerse read-only", no una estrategia de rotación, y no he validado el comportamiento en 29.x. Confirma en tu versión de Docker. Recrear el contenedor es más limpio. Luego arregla la causa real: activa rotación, y mira [cómo limpiar todas las imágenes Docker y recuperar espacio](https://www.bitdoze.com/cleanup-all-docker-things/) más [cómo recuperar espacio de /var/lib/docker/overlay2](/es/limpiar-docker-overlay2/), el otro grande consumidor de disco en hosts Docker.
+</Notice>
+
+**`docker logs` no muestra salida tras cambiar el driver.** El contenedor debe crearse después del cambio de configuración del daemon. Los contenedores existentes conservan sus ajustes originales. Recréalos (o pon el driver por contenedor y reinicia ese contenedor).
+
+**El daemon no arranca tras editar `daemon.json`.** Valida el JSON primero:
+
+```bash
+sudo dockerd --validate --config-file /etc/docker/daemon.json
+```
+
+Si el daemon ya está caído, comprueba `journalctl -u docker` para el error de parseo exacto. El culpable habitual es un valor numérico sin comillas en `log-opts`.
+
+**El stream de logs aborta a mitad de archivo o un archivo rotado corrupto mata el tail.** Arreglado en Engine 27.4.0: los errores de parseo al leer logs `json-file`/`local` ahora saltan al siguiente archivo rotado en vez de abortar el stream entero, y los archivos comprimidos se descomprimen perezosamente. Si estás en un Engine más viejo y ves medios tails, actualiza en vez de luchar con el formato de archivo.
+
+**Quieres desactivar la caché local para drivers remotos.** Añade `"cache-disabled": "true"` a los `log-opts` del driver. Compromiso: `docker logs` deja de funcionar para esos contenedores.
+
+## ¿Qué método deberías usar?
+
+| Método | Mejor para | Persistencia | Soporta `tag`/`labels` |
+|--------|----------|-------------|-------------------------|
+| `docker logs > file` | Debug rápido, exportaciones puntuales | No (corre en shell) | n/a |
+| `json-file` con rotación | Setups de un host, Kubernetes | Sí (gestionado por Docker) | Sí |
+| driver `local` | Setups de producción de un host | Sí (más eficiente) | Sí, desde 29.5.0 |
+| `syslog`/`fluentd` | Multi-host, logging centralizado | Sí (sistema externo) | Depende del driver |
+
+Para la mayoría de setups autoalojados el driver `local` con ajustes por defecto es la elección correcta. Rota y comprime automáticamente, y capa cada contenedor en una huella predecible en vez de apostar a una app silenciosa. Elijas el driver que elijas, mantén la rotación activada y vigila el uso de disco con el comando `du` de triage de la sección de arriba.
+
+<Button text="Comandos Esenciales de Docker" link="https://www.bitdoze.com/docker-commands/" variant="outline" color="blue" size="md" icon="arrow-right" />
+
+Si despliegas stacks de compose en una máquina pequeña, un [VPS asequible de Hetzner Cloud](https://go.bitdoze.com/hetzner) corre una docena de contenedores con logging de sobra. Para un home lab en vez de un VPS, un [mini PC ASUS compacto para servidor casero](https://go.bitdoze.com/asus-dc510) basta para alojar el stack y sus logs. Y cuando quieras una UI delante de todo, mira cómo [desplegar una app Docker Compose en Dokploy](https://www.bitdoze.com/dokploy-docker-compose-app/).
+
+## FAQ
+
+<Accordion label="¿Puedo usar logrotate con los logs de Docker?" group="faq" expanded="true">
+No. Los docs de los drivers json-file y local establecen que los archivos de log están diseñados para ser accedidos exclusivamente por el daemon de Docker, y debe evitarse interactuar con ellos con herramientas externas. La rotación o truncado externo puede corromper el estado de los logs o interferir con el logging del daemon de formas impredecibles. Usa la rotación propia del driver con `max-size`/`max-file` en su lugar.
+</Accordion>
+
+<Accordion label="¿Por qué json-file sigue siendo el driver por defecto?" group="faq">
+Compatibilidad hacia atrás. Herramientas que leen el layout json-file se romperían si Docker cambiara el default, siendo Kubernetes la principal. Si no estás en ese grupo, nada te impide poner `local` en `daemon.json` y seguir adelante.
+</Accordion>
+
+<Accordion label="¿Se comportan local y json-file igual con docker logs?" group="faq">
+Sí. Mismo CLI, mismos flags (`-f`, `--since`, `--until`, `--tail`). La diferencia es el almacenamiento: `local` usa un formato binario y comprime archivos rotados por defecto, mientras que `json-file` guarda JSON plano y deja la compresión apagada a menos que actives la opción `compress`.
+</Accordion>
+
+<Accordion label="¿Qué pasó con fluentd-async-connect y el driver logentries?" group="faq">
+`fluentd-async-connect` se deprecó en 20.10 y se eliminó en Docker 28.0. Quítalo de tu config. El driver `logentries` se eliminó en Docker 25.0. Las opciones fluentd más nuevas son `fluentd-write-timeout` (28.2.0) y `fluentd-read-timeout` (29.0.0).
+</Accordion>
+
+<Accordion label="¿Cómo compruebo qué driver de logging usa un contenedor?" group="faq">
+Para un contenedor: `docker inspect -f '{{.HostConfig.LogConfig.Type}}' my-app`. Para el default del daemon que heredan los contenedores nuevos: `docker info --format '{{.LoggingDriver}}'`. Si discrepan, el contenedor se creó con un override por contenedor o antes de un cambio en `daemon.json`.
+</Accordion>

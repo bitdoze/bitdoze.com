@@ -1,0 +1,463 @@
+---
+date: 2026-10-09T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "clean-docker-overlay2-dir"
+title: "Limpieza de Overlay2 de Docker: Recupera Espacio en Disco con Seguridad (2026)"
+meta_title: "Limpieza de Overlay2 de Docker: Libera Espacio en Disco de Docker (2026)"
+description: "Limpieza de overlay2 de Docker: recupera espacio en disco con docker system prune, límites de logs y comprobaciones del store de containerd. Evita que /var/lib/docker/overlay2 llene tu disco."
+image: "@assets/images/24/05/free-disk-space-docker-overlay2.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "linux", "disk-cleanup"]
+canonical: "https://www.bitdoze.com/es/limpiar-docker-overlay2/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+<Notice type="warning" title="No borres carpetas de overlay2 a mano">
+Nunca borres nada dentro de `/var/lib/docker/overlay2` o `/var/lib/containerd` manualmente. Esas carpetas con nombres hash son los metadatos vivos de Docker. Borrarlas a mano corrompe imágenes y rompe contenedores en ejecución. Si te preguntas "¿es seguro borrar /var/lib/docker/overlay2?", la respuesta es no. Usa los comandos de limpieza de Docker soportados en esta guía, y solo toma acciones de "resetear el directorio de datos de Docker" si entiendes por completo el radio de explosión.
+</Notice>
+
+La limpieza de overlay2 de Docker es lo que necesitas cuando `/var/lib/docker/overlay2` se come el disco y Docker empieza a fallar en las escrituras. Esta guía muestra cómo recuperar espacio en disco de forma segura: la familia `docker system prune`, límites de logs de contenedores, y un checkpoint del backend de almacenamiento que no deberías saltarte. Desde Docker Engine 29, las instalaciones nuevas guardan las imágenes en `/var/lib/containerd`, así que puede que el directorio que llena tu disco ni siquiera sea overlay2. Abajo está el camino completo: identifica el backend, mide, poda, arregla los logs, diagnostica restos, previene que vuelva a crecer.
+
+## Paso 0: ¿Qué backend de almacenamiento? (overlay2 vs store de imágenes containerd)
+
+Antes de cualquier limpieza, averigua dónde guarda Docker sus datos realmente. Es una comprobación de solo lectura:
+
+```sh
+docker info -f '{{ .DriverStatus }}'
+```
+
+Dos resultados posibles:
+
+- La salida contiene `[[driver-type io.containerd.snapshotter.v1]]` → estás en el **store de imágenes containerd**. Tus datos viven bajo `/var/lib/containerd`.
+- La salida muestra un estado de driver overlay2 normal → estás en el **store overlay2 heredado**. Tus datos viven bajo `/var/lib/docker/overlay2`.
+
+![Flujo de decisión de limpieza overlay2 de Docker: ejecuta el comando docker info driver status, luego bifurca al store de imágenes containerd o al store overlay2 heredado y vigila el directorio correspondiente](@assets/images/24/05/storage-backend-decision.svg)
+
+<Notice type="info" title="Docker Engine 29 cambió el almacenamiento por defecto">
+Docker Engine 29.0 (octubre de 2025) convirtió el store de imágenes containerd en el default en instalaciones nuevas. Los daemons actualizados mantienen el graphdriver overlay2 heredado hasta que cambies explícitamente. Los hosts con `userns-remap` están excluidos del nuevo default. Últimas versiones al escribir: Engine v29.9.0 (08-10-2026), buildx v0.38.0 (07-10-2026).
+</Notice>
+
+Si estás a punto de montar una máquina nueva y quieres los defaults actuales documentados de principio a fin, [instala Docker y Docker Compose en Ubuntu ARM](/install-docker-ubuntu-arm/) primero, luego vuelve aquí.
+
+<Tabs>
+<Tab name="Store overlay2 heredado">
+```sh
+# what to watch
+du -sh /var/lib/docker/overlay2
+
+# what Docker reports
+docker system df
+```
+
+La mayor parte de esta guía apunta a este store. Los comandos de poda de abajo funcionan igual, pero los nombres de directorio en overlay2 son los que mapearás después.
+</Tab>
+<Tab name="Store de imágenes containerd">
+```sh
+# what to watch
+du -sh /var/lib/containerd
+
+# what Docker reports (still authoritative)
+docker system df
+```
+
+`docker system df` sigue siendo la fuente de verdad para las categorías. containerd mantiene tanto blobs comprimidos como snapshots desempaquetados, así que las mismas imágenes cuestan más disco que en el store heredado. Los docs de Docker dicen "usa más espacio en disco" sin un multiplicador, y no voy a inventarme uno.
+</Tab>
+</Tabs>
+
+**Verifica:** pega la salida real de `docker info -f '{{ .DriverStatus }}'` en tus notas antes de podar. Quieres una línea base de qué store está activo.
+
+**Modo de fallo:** "Podé overlay2 y no se recuperó nada." En un host con store containerd estabas mirando el store inactivo. Los comandos de poda del store activo no tocan los datos del otro backend (mira la sección del store oculto más abajo).
+
+**Contexto de versiones, corto:** el mundo viejo se ha ido. AuFS y el driver `overlay` heredado se eliminaron en Engine v24, devicemapper en v25, los plugins de graphdriver en v28 (consejo oficial de reemplazo: usa el store de imágenes containerd). Engine v29 requiere API v1.44 o más nueva. Si tus notas de limpieza son anteriores a 2023, reléelas antes de ejecutar nada.
+
+## Qué hay dentro de /var/lib/docker/overlay2
+
+`overlay2` es el filesystem copy-on-write de Docker para Linux. El directorio contiene:
+
+- Directorios de capas: carpetas direccionadas por contenido con los diffs reales del filesystem
+- Datos "upperdir" de contenedores: las capas escribibles donde los contenedores escriben archivos. Esto es normalmente lo que crece
+- Metadatos y enlaces: estructuras que Docker usa para rastrear qué capas pertenecen a qué imágenes
+
+Los nombres de las carpetas son hashes aleatorios, no identificadores legibles. No puedes mirar el nombre de una carpeta y saber a qué imagen pertenece. Usa comandos Docker en vez de adivinar por nombres de directorio. Docker mantiene este layout deliberadamente sin documentar.
+
+En hosts con store containerd los internos equivalentes viven bajo `/var/lib/containerd` como un content store más snapshots overlayfs. Misma regla: mide con comandos Docker y `du`, no navegando carpetas hash.
+
+![Diagrama de dónde vive realmente el espacio en disco de Docker: capas overlay2 y capas escribibles, logs json de contenedores, volúmenes, caché de BuildKit bajo /var/lib/docker, más blobs y snapshots bajo /var/lib/containerd](@assets/images/24/05/docker-disk-map.svg)
+
+Ese mapa vale la pena tenerlo en la cabeza. El resto de esta guía recorre cada caja: mídela, límpiala, y luego evita que vuelva.
+
+## Por qué /var/lib/docker/overlay2 crece tanto
+
+El directorio crece por un puñado de razones predecibles:
+
+1. Imágenes y contenedores sin usar: los contenedores parados y las imágenes viejas siguen ocupando espacio si no los eliminas.
+2. Caché de build: Docker cachea capas para hacer los builds más rápidos. En una máquina que construye a menudo, esta caché es el principal culpable.
+3. Imágenes y contenedores grandes: algunas imágenes traen binarios o archivos de datos grandes. Cuatro copias de una imagen base de 1,5 GB suman.
+4. Capas de imagen ineficientes: imágenes con demasiadas capas o basura de build sobrante desperdician espacio. Si controlas el Dockerfile, [copia múltiples archivos en una capa con un Docker COPY](/copy-multiple-files-in-one-layer-using-a-dockerfile/) en vez de apilar un `COPY` por archivo.
+5. Logs de contenedores sin límite: este es el escurridizo. El driver de logs json-file crece sin límite por defecto, y los archivos **no** están en overlay2. Viven en `/var/lib/docker/containers/`. Hay una sección dedicada abajo.
+
+En hosts con store containerd, añade una más: los blobs más los snapshots desempaquetados hacen que el mismo conjunto de imágenes cueste más disco que el store heredado.
+
+Si quieres ver qué categoría crece realmente con el tiempo, [monitoriza recursos del servidor y Docker (CPU, memoria, disco)](/sever-monitoring/) en vez de correr `du` a mano cada semana.
+
+**Nota de ops:** un filesystem lleno no solo rompe los pulls de Docker. Los contenedores de bases de datos también pierden escrituras, y algunos de esos fallos son silenciosos hasta que la app da error. Apunta a un 15-20% de espacio libre en cualquier host que corra contenedores con estado.
+
+## Comprueba primero el uso de disco de Docker
+
+Haz esto antes de tocar nada. Es de solo lectura.
+
+```sh
+docker system df
+docker system df -v
+```
+
+`docker system df` muestra el uso de espacio para imágenes, contenedores, volúmenes y caché de build. El flag `-v` añade detalle por objeto. Para scripts de monitorización, añade `--format json` (o una plantilla Go) para parsear en vez de raspar tablas.
+
+Luego comprueba el filesystem real:
+
+```sh
+df -h /var/lib/docker
+du -sh /var/lib/docker/overlay2 /var/lib/docker/containers /var/lib/containerd 2>/dev/null
+```
+
+Para ver qué subdirectorios de overlay2 son los más grandes, solo para investigación, nunca para borrado:
+
+```sh
+du -sh /var/lib/docker/overlay2/* 2>/dev/null | sort -hr | head -10
+```
+
+Cómo leer la salida:
+
+- Un uso grande de `overlay2` suele significar escrituras de contenedores o caché de build, no solo imágenes sin usar.
+- Céntrate en la categoría que crece en `docker system df -v` (imágenes, contenedores, volúmenes, caché de build), no en IDs específicos.
+- Guarda la salida de `docker system df -v` antes de limpiar. Esa es tu línea base; compararás contra ella después.
+
+### Síntoma → causa probable → primer comando
+
+| Síntoma | Causa probable | Primer comando |
+|---|---|---|
+| overlay2 enorme en un host Docker 29 | store heredado oculto tras un cambio de backend | `docker info -f '{{ .DriverStatus }}'`, luego evalúa o mueve el store viejo |
+| Archivos `*-json.log` enormes | logging json-file sin límite | `du -sh /var/lib/docker/containers/* \| sort -hr \| head` |
+| `docker system df` muestra 0% recuperable | capas escribibles activas e imágenes en uso | `docker ps -s`: escala el disco, no podes más fuerte |
+| la poda corrió, poco recuperado | volúmenes nombrados; caché viviendo en buildx | `docker system df -v`, luego apunta a las filas de volúmenes y caché de build |
+| builder prune: flag desconocido `--keep-storage` | tutoriales viejos vs buildx nuevo | `docker builder prune --help`, luego usa `--max-used-space` |
+
+## Limpieza de Overlay2 de Docker: el playbook de poda
+
+Esta es la limpieza ordenada, de más segura primero. Cada comando dice qué elimina. Ejecuta uno, comprueba `docker system df`, luego decide si necesitas el siguiente. Es más lento que lanzarlo todo a la vez y mucho más fácil de explicar cuando desaparece algo que querías.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/29RUDkQI6pc"
+  label="Docker Overlay2 Cleanup: Reclaim Disk Space Safely"
+/>
+
+### Victoria rápida: docker system prune (y -a)
+
+Empieza con el informe de solo lectura otra vez para tener números frescos:
+
+```sh
+docker system df -v
+```
+
+Elimina contenedores parados, redes sin usar, imágenes colgantes y caché de build:
+
+```sh
+docker system prune -f
+```
+
+Qué hace: limpia objetos que nada referencia. Qué no hace: tocar volúmenes nombrados, y mantiene imágenes a las que algún contenedor (incluso parado) todavía apunta.
+
+Si también quieres eliminar todas las imágenes no usadas por ningún contenedor, que es el paso más agresivo:
+
+```sh
+docker system prune -a -f
+```
+
+**Modo de fallo:** `-a` elimina imágenes que un contenedor parado-pero-deseado necesita en su próximo arranque. Nada se corrompe, pero pagas el tiempo de re-pull en el peor momento. En hosts con contenedores que guardas para rollback, sáltate `-a` o córrelo dentro de una ventana de mantenimiento.
+
+Para mantenimiento programado en máquinas de build, los filtros mantienen la poda honesta:
+
+```sh
+docker system prune -af --filter until=168h
+```
+
+`until=` acepta timestamps RFC3339, fechas, o duraciones Go como `10m` y `24h`. `label=` selecciona por etiqueta. Múltiples filtros entre claves distintas se combinan con AND. Un cron semanal con `until=168h` es un default aburrido y fiable para runners de CI.
+
+Si quieres el playbook de demolición completo para imágenes, volúmenes, redes y discos, mira [cómo limpiar todas las imágenes Docker con discos y todo](/cleanup-all-docker-things/).
+
+**Verifica:** `docker system df` tras cada comando. En hosts con store containerd, ten en cuenta que builds viejos de Engine 29 sub-reportaban el espacio recuperado porque ignoraban los datos de imagen desempaquetados (moby#52905, corregido en un patch posterior de v29). Los números confusos ahí eran un bug, no un error tuyo.
+
+### Volúmenes: anónimos vs nombrados (docker volume prune -a)
+
+Esta es la parte que las guías viejas hacen mal, y es por lo que la gente busca "docker volume prune no recupera espacio".
+
+Desde Docker Engine 23.0 / API 1.42, `docker volume prune` elimina **solo volúmenes anónimos**. Los volúmenes nombrados necesitan el flag `-a`:
+
+```sh
+docker volume prune -f        # anonymous volumes only
+docker volume prune -a -f     # ALSO unused named volumes, check first!
+```
+
+Misma advertencia para `docker system prune --volumes`: el aviso oficial dice que elimina "todos los volúmenes anónimos no usados por al menos un contenedor". Los volúmenes nombrados sobreviven.
+
+Comprueba antes de borrar nada:
+
+```sh
+docker volume ls
+docker system df -v
+```
+
+<Notice type="warning" title="Los volúmenes nombrados contienen datos reales">
+`docker volume prune -a` elimina volúmenes nombrados sin usar. Bases de datos, subidas y estado viven ahí. Si un proyecto compose está parado y podas volúmenes nombrados, esos datos se han ido. **Haz backup del volumen o confirma que es desechable antes de correr `-a`.** Esta es la clásica historia de "borramos datos de producción".
+</Notice>
+
+**Verifica:** `docker volume ls` antes, `docker system df` después. Si la fila de volúmenes apenas se movió tras `docker volume prune -f`, es esperado: tu espacio está en volúmenes nombrados, y solo `-a` los recuperará.
+
+### Caché de build: docker builder prune con topes de capacidad
+
+Si construyes imágenes en el host, la caché de BuildKit es a menudo la categoría individual más grande. Pódala directamente:
+
+```sh
+docker builder prune -f       # dangling cache
+docker builder prune -af      # all unused cache
+```
+
+El buildx más nuevo (v0.38.0 a 10-2026) añade topes de capacidad, que son mejores que esperar a las alarmas de disco lleno:
+
+```sh
+docker builder prune -f --max-used-space 10gb    # LRU-evict down to 10 GB
+docker builder prune -f --min-free-space 20gb    # keep 20 GB free on the filesystem
+docker builder prune -f --reserved-space 5gb     # never evict the last 5 GB of cache
+docker builder prune -f --filter until=168h      # cache older than 7 days
+docker buildx prune -a --max-used-space 10gb     # also internal/frontend images
+```
+
+Los tamaños son legibles y no distinguen mayúsculas (`10gb`, `500MB`). Los filtros incluyen `type=`, `type!=exec.cachemount` (mantén cache mounts, normalmente lo que quieres), `until=`, `description=`, y `parent=`. Múltiples flags `--filter` se combinan con AND.
+
+Si self-hosteas CI, [self-hostea tu Git y CI/CD con Forgejo y Woodpecker CI](/es/forgejo-woodpecker-ci-cicd/) y pon la poda `--max-used-space` en un timer semanal en el runner. Ahí es donde la caché de build se vuelve salvaje.
+
+**Modo de fallo:** `unknown flag: --keep-storage`. Los tutoriales viejos lo usan; la tabla actual de opciones de buildx prune no lo lista. Ejecuta `docker builder prune --help` en tu host y usa el flag de capacidad que tu versión tenga realmente (`--max-used-space` en buildx reciente). No recuperar nada en una máquina fresca es normal, no un bug.
+
+**Verifica:**
+
+```sh
+docker builder prune --help | grep -E 'max-used|keep-storage'
+```
+
+Luego re-ejecuta `docker system df` y compara la fila de Build Cache contra tu línea base.
+
+## El verdadero asesino de disco: los logs de contenedores Docker
+
+Los logs de contenedores son el problema de disco que ninguna limpieza de overlay2 arreglará. El driver de logs json-file por defecto escribe en `/var/lib/docker/containers/<id>/<id>-json.log` y crece **sin límite** (`max-size` va por defecto a `-1`, `max-file` a `1`). Una app habladora en un VPS pequeño puede llenar el disco en días mientras `docker system df` parece casi limpio.
+
+Encuentra a los culpables:
+
+```sh
+du -sh /var/lib/docker/containers/* 2>/dev/null | sort -hr | head
+docker ps -s
+```
+
+`docker ps -s` muestra el tamaño de la capa escribible de cada contenedor, lo que te dice si el bulto son logs o escrituras de la app.
+
+<Tabs>
+<Tab name="Emergencia (ahora)">
+Trunca, no borres. Borrar el archivo rompe el file handle y el espacio no se libera hasta que el contenedor se reinicia. Truncar es práctica común en el campo (no está en los docs oficiales, así que prueba en tu host primero):
+
+```sh
+truncate -s 0 /var/lib/docker/containers/*/*-json.log
+```
+
+La recuperación es inmediata. El contenedor sigue escribiendo al mismo handle.
+</Tab>
+<Tab name="Permanente (daemon.json)">
+Pon rotación de logs en `/etc/docker/daemon.json`. Los valores deben ser strings:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+```
+
+Luego reinicia Docker:
+
+```sh
+sudo systemctl restart docker
+```
+
+Cada contenedor mantiene como máximo 3 archivos de 10 MB. Cambia los números a tu gusto; solo pónles un tope.
+</Tab>
+</Tabs>
+
+<Notice type="info" title="los log-opts aplican solo a contenedores nuevos">
+Reiniciar el daemon aplica las nuevas opciones de logs solo a contenedores **recién creados**. Los contenedores existentes mantienen logging ilimitado hasta que los recrees. Para apps Compose, [actualiza un contenedor con Docker Compose](/updating-container-docker-compose/) (`docker compose up -d --force-recreate`) para que los nuevos `log-opts` hagan efecto.
+</Notice>
+
+Si prefieres enviar los logs a un sitio central en vez de rotarlos localmente, [redirige los logs de Docker a un único archivo](/redirect-docker-logs-to-a-single-file/) con un driver de logs distinto.
+
+**Verifica:**
+
+```sh
+du -sh /var/lib/docker/containers
+docker inspect <container> --format '{{ json .HostConfig.LogConfig }}'
+```
+
+Un contenedor nuevo debería mostrar `"max-size":"10m"` y `"max-file":"3"`.
+
+**Modo de fallo:** editaste `daemon.json`, reiniciaste Docker, y los logs siguen creciendo. Los contenedores viejos nunca fueron recreados. Comprueba `docker inspect` en uno de ellos; si la config de logs sigue vacía, el archivo no se re-leyó para ese contenedor.
+
+## Mapear directorios overlay2 a objetos Docker
+
+A veces necesitas saber qué contenedor posee una capa escribible gigante. Usa la propia salida de Docker antes de cualquier scripting:
+
+```sh
+docker ps -s
+docker inspect -f '{{ .Name }} {{ .GraphDriver.Data.UpperDir }}' $(docker ps -aq)
+```
+
+`GraphDriver.Data.UpperDir` es la ruta de la capa escribible directamente de `docker inspect`. Es un mapeo soportado, y la forma más rápida de casar un directorio enorme con un nombre de contenedor.
+
+Para imágenes versus directorios de capas, tengo un script auxiliar que visualiza el uso de disco de `overlay2`:
+
+```sh
+curl -sSL https://utils.bitdoze.com/scripts/docker-overlay2-view.sh | bash
+```
+
+Todos los scripts están en [utils.bitdoze.com](https://utils.bitdoze.com/).
+
+<Notice type="warning" title="Guía, no una lista de borrado">
+Este mapeo es best-effort. `overlay2` es una estructura interna, y no todo directorio tiene una relación limpia de "esto pertenece a la imagen X". El script cubre **solo el store overlay2 heredado**. En un host con store containerd `docker inspect` no devuelve rutas overlay2, así que una salida vacía ahí es esperada, no rota. Usa la salida como guía de qué investigar vía comandos Docker, nunca como una lista de directorios a borrar.
+</Notice>
+
+## Por qué los subdirectorios overlay2 no coinciden con los IDs de imagen
+
+Podaste todo y todavía hay directorios hash que no coinciden con ninguna imagen. Normal. He aquí por qué:
+
+1. Capas escribibles de contenedores: los contenedores corriendo o parados tienen cada uno una capa escribible en `overlay2`. Si tienes contenedores, tienes datos overlay.
+2. Caché de build: los builds modernos (BuildKit) crean datos de caché. `docker system prune -a` no siempre lo elimina todo. Apúntale con `docker builder prune`.
+3. Capas compartidas o referenciadas: las imágenes comparten capas, y Docker no eliminará nada aún referenciado. El nombre del directorio no coincidirá con lo que ves en `docker image ls`.
+4. Capas init y metadatos internos: los directorios `*-init` y las estructuras de metadatos son parte de cómo Docker prepara los contenedores.
+5. Datos filtrados u huérfanos (raro): cortes de luz, crashes del daemon o corrupción de almacenamiento pueden dejar restos. Comprueba `docker system df -v` y los logs del daemon antes de asumir que es tu caso.
+6. Store heredado oculto tras un cambio de backend: este es nuevo. Si te moviste al store de imágenes containerd (o al revés), los datos del store inactivo se quedan en disco pero son invisibles para los comandos de poda del store activo. La poda no reporta nada que recuperar mientras `df` muestra un disco lleno. Detéctalo con `docker info -f '{{ .DriverStatus }}'` y compara contra `du -sh /var/lib/docker/overlay2 /var/lib/containerd`.
+
+Incluso si un directorio parece sin usar, borrar directorios overlay2 a mano puede corromper el estado de Docker. Si de verdad necesitas un comienzo fresco, haz el reset controlado de abajo con Docker parado y tus datos respaldados.
+
+## Evita que /var/lib/docker/overlay2 vuelva a llenarse
+
+La limpieza es una victoria única. Estos cinco hábitos mantienen el disco sano:
+
+1. **Pon tope al tamaño de logs.** Los `log-opts` de `daemon.json` de la sección de logs son el cambio de mayor palanca en cualquier host que corra contenedores habladores.
+2. **Programa mantenimiento en máquinas de build.** Un timer semanal gana a una alarma de disco lleno:
+
+```sh
+docker system prune -af --filter until=168h
+docker builder prune -af --max-used-space 10gb
+```
+
+3. **Mueve el data dir de Docker a un volumen más grande.** Los discos raíz pequeños son la razón habitual por la que Docker llena la partición del SO. En `/etc/docker/daemon.json`:
+
+```json
+{
+  "data-root": "/mnt/volume/docker"
+}
+```
+
+El flag también es `--data-root` en la línea de comandos de dockerd (los viejos flags `-g`/`--graph` se eliminaron en Engine v23). Si la máquina necesita el hardware, [añade un nuevo disco a Ubuntu LVM y móntalo permanentemente](/add-new-drive-lvm/) primero. En máquinas VPS estilo Hetzner donde el disco raíz es pequeño y un volumen separado es barato, los [planes cloud optimizados en coste de Hetzner](/hetzner-cloud-cost-optimized-plans/) combinan bien con este montaje, y un [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) con un volumen montado resuelve el problema de "Docker se comió el disco del SO" sin mover datos después. Un [VPS de Hostinger con almacenamiento NVMe](https://go.bitdoze.com/hostinger-vps) es la alternativa si quieres un único disco local grande en su lugar. El margen de almacenamiento es más barato que el downtime.
+
+**Aviso:** `data-root` **no** migra datos existentes. Planea una copia o movimiento con el daemon parado, luego verifica con `docker info | grep 'Docker Root Dir'` antes de borrar nada de la ruta vieja.
+
+4. **Alerta sobre uso de filesystem.** Mantén un 15-20% libre y que te pagen antes del 80%, no después de que fallen las escrituras. [Monta Beszel y Uptime Kuma para monitorización de servidor y alertas de disco](/beszel-uptime-kuma/) si quieres una ruta self-hosted.
+5. **Mantente parcheado.** Los patches de Engine 29.x han incluido tanto la corrección de sub-reporte de poda como una corrección de envenenamiento de caché de BuildKit (GHSA-p3rc-w3hc-pqvv, febrero de 2026): una imagen de caché maliciosa o caché remota puede inyectar caché de build falsa en tus builds. Esa golpea a cualquiera que importe caché de build, no solo a usuarios del store containerd. Las correcciones de seguridad aterrizan en releases de patch; ejecútalas.
+
+<ListCheck>
+<ul>
+<li>`log-opts` de json-file puestos con `max-size` y `max-file`</li>
+<li>Poda semanal programada en máquinas de build y runners de CI</li>
+<li>`data-root` en un filesystem dimensionado para tu churn de imágenes</li>
+<li>Alertas de uso de disco disparando antes del 80%</li>
+<li>15-20% de margen libre en el filesystem de Docker</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="Cambiar al store de imágenes containerd">
+Activar `"features": { "containerd-snapshotter": true }` en `daemon.json` cambia el store activo, pero no limpia. Espera que el uso de disco crezca un tiempo: containerd mantiene blobs comprimidos y snapshots desempaquetados, y los datos overlay2 heredados se quedan congelados en disco. `userns-remap` no está disponible con el store de imágenes containerd (moby#47377). Docker documenta una auto-migración experimental (`containerd-migration` más un umbral de snapshotter), y el propio Docker la llama no fiable. Prefiere un comienzo fresco en un host que puedas reconstruir.
+</Notice>
+
+**Verifica tras cualquier cambio de `data-root`:**
+
+```sh
+systemctl status docker
+docker info | grep 'Docker Root Dir'
+```
+
+**Modo de fallo:** una errata en `daemon.json` (un número donde se requiere un string, una coma que falta) impide que dockerd arranque. `journalctl -u docker` muestra el error de parseo. Guarda una copia del último archivo que funcionaba antes de editar.
+
+## Último recurso: reset controlado de Docker (ambos stores)
+
+<Notice type="error" title="Último recurso">
+Esto es disruptivo. Cada imagen se re-descarga, cada contenedor parado está efectivamente eliminado. Más seguro que borrar directorios hash al azar, pero hazlo solo tras backups y solo cuando el playbook de poda ya no tiene nada que recuperar.
+</Notice>
+
+<Tabs>
+<Tab name="Host overlay2 heredado">
+1. Para o elimina los contenedores que no necesitas.
+2. Haz backup de todo lo importante: volúmenes nombrados y datos en bind-mount especialmente.
+3. Para el daemon Docker: `sudo systemctl stop docker`.
+4. Mueve el data dir: `sudo mv /var/lib/docker /var/lib/docker.bak`.
+5. Arranca Docker de nuevo: `sudo systemctl start docker`. Recrea `/var/lib/docker` vacío.
+
+Luego re-descarga imágenes y restaura solo lo que necesitas. Una vez que todo corre y has recuperado el espacio, borra `/var/lib/docker.bak` en un segundo paso deliberado. No en la misma sesión de comandos.
+</Tab>
+<Tab name="Host con store de imágenes containerd">
+1. Para o elimina los contenedores que no necesitas.
+2. Haz backup de volúmenes nombrados y datos en bind-mount.
+3. Para el daemon Docker: `sudo systemctl stop docker` (y containerd si corre como una unidad separada que gestionas).
+4. Mueve **ambos** data dirs: `sudo mv /var/lib/docker /var/lib/docker.bak` y `sudo mv /var/lib/containerd /var/lib/containerd.bak`.
+5. Arranca Docker y confirma que está limpio antes de tocar los directorios `.bak`.
+
+Si solo mueves `/var/lib/docker` en un host containerd, el reset parece no hacer nada: los datos visibles estaban en `/var/lib/containerd` todo el tiempo. Si previamente cambiaste de backend, los restos del store inactivo también viven en el directorio que no esté activo. Por eso ambos movimientos están en los pasos.
+</Tab>
+</Tabs>
+
+**Verifica:** `df -h` antes y después, `docker info` muestra un root dir fresco, y un contenedor de prueba arranca (`docker run --rm alpine echo ok`). Solo entonces programa la limpieza de `.bak`.
+
+## FAQ: preguntas sobre limpieza de overlay2 de Docker
+
+<Accordion label="¿Es seguro borrar /var/lib/docker/overlay2 manualmente?" group="faq">
+No. Los directorios hash son estructuras vivas de capas y metadatos. Borrarlos corrompe el grafo de Docker y puede romper contenedores e imágenes en ejecución incluso si el directorio "parece" sin usar. Usa `docker system prune`, `docker builder prune` y los otros comandos soportados de esta guía. La única eliminación masiva sancionada es un reset controlado de todo el data dir con el daemon parado.
+</Accordion>
+
+<Accordion label="¿Por qué docker volume prune no recupera espacio?" group="faq">
+Porque desde Docker Engine 23.0 / API 1.42, `docker volume prune` elimina solo volúmenes anónimos. Tu espacio probablemente está en volúmenes nombrados (bases de datos, subidas), que necesitan `docker volume prune -a`. Comprueba con `docker volume ls` y `docker system df -v` primero. Los volúmenes nombrados contienen datos reales, así que haz backup antes de `-a`.
+</Accordion>
+
+<Accordion label="¿Por qué /var/lib/docker/overlay2 es tan grande en un servidor Docker 29?" group="faq">
+Dos razones probables. Primero, Engine 29 activa el store de imágenes containerd en instalaciones nuevas, así que puedes estar mirando restos del store heredado que los comandos de poda nunca tocarán. Detéctalo con `docker info -f '{{ .DriverStatus }}'`. Segundo, overlay2 contiene capas escribibles de contenedores y caché de build, que crecen incluso cuando todas las imágenes están en uso. Lee el desglose de categorías en `docker system df -v` antes de asumir que el problema son imágenes sin usar.
+</Accordion>
+
+<Accordion label="¿Los logs de contenedores Docker realmente ocupan espacio en disco?" group="faq">
+Sí. El driver de logs json-file va por defecto a tamaño ilimitado (`max-size` es `-1`) y los archivos viven en `/var/lib/docker/containers/`, no en overlay2. Trúncalos para un arreglo inmediato (`truncate -s 0` sobre los archivos `*-json.log`, no los borres), luego pon `log-opts` con `max-size` y `max-file` en `/etc/docker/daemon.json` y recrea los contenedores para que la rotación aplique.
+</Accordion>
+
+<Accordion label="¿Cuál es la forma más rápida de recuperar espacio en disco de Docker esta noche?" group="faq">
+En orden: `docker system df -v` para ver la categoría más grande, `docker system prune -f` para la victoria segura, `docker builder prune -af --max-used-space 10gb` si la caché de build es grande, luego comprueba `du -sh /var/lib/docker/containers/*` por logs desbocados y trúncalos. Guarda la línea base de `docker system df -v` primero para poder demostrar lo que recuperaste. Para la versión en profundidad, mira [cómo limpiar todas las imágenes Docker con discos y todo](/cleanup-all-docker-things/).
+</Accordion>
+
+## Resumen
+
+Un `/var/lib/docker/overlay2` que crece (o `/var/lib/containerd` en hosts Engine 29) se reduce a cuatro cosas: objetos sin usar, caché de build, escrituras de capas escribibles, y logs de contenedores sin límite. Haz la limpieza de overlay2 de Docker en ese orden de culpables: corre `docker system df -v`, poda con los comandos soportados (recuerda que los volúmenes nombrados necesitan `docker volume prune -a`), pon tope a tus logs con `log-opts`, y programa mantenimiento en vez de esperar a la alarma de disco lleno.
+
+No borres nada dentro de esos directorios a mano. Si llegas al punto en que la poda ya no tiene nada que dar y el disco sigue lleno, haz el reset controlado con el daemon parado y los backups en su sitio.
+
+<Button text="Todos los comandos de limpieza Docker" link="/cleanup-all-docker-things/" variant="solid" color="blue" />

@@ -1,0 +1,299 @@
+---
+date: 2026-09-21T00:00:00Z
+translationKey: "astro-link-shortener"
+title: "Cómo Crear un Acortador de Enlaces en Astro (Páginas de Redirección Estáticas)"
+meta_title: "Acortador de Enlaces en Astro: Redirecciones Estáticas con Seguimiento de Clics"
+description: "Crea un acortador de enlaces propio en Astro sin servidor: un mapa JSON de productos, páginas de redirección generadas, meta refresh + respaldo JS y seguimiento de clics con Plausible."
+image: "@assets/images/26/09/astro-link-shortener.webp"
+imageAlt: "Acortador de enlaces en Astro — páginas de redirección bitdoze.com/go/x con seguimiento de clics"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["astro", "link-shortener", "cloudflare"]
+canonical: "https://www.bitdoze.com/es/acortador-enlaces-astro/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Uso enlaces de afiliado en este sitio, y las URLs `amzn.to` repartidas por los artículos se estaban convirtiendo en un problema de mantenimiento. Cuando un producto se descataloga o quiero cambiar un enlace, no debería tener que hacer un grep por toda la carpeta de contenido. Y no tenía ni idea de en qué enlaces hacía clic la gente realmente.
+
+Así que construí un acortador propio: URLs `bitdoze.com/go/<product>/` que redirigen al destino de afiliado, disparan un evento de clic de Plausible al salir y viven en un único archivo JSON. Este sitio es totalmente estático y está alojado en Cloudflare Pages, que admite redirecciones HTTP reales mediante `_redirects`. Aquí uso páginas HTML generadas para que el navegador pueda enviar un evento de Plausible antes de salir.
+
+## Lo que vamos a construir
+
+<ListCheck>
+- Un archivo JSON que mapea slugs a URLs de destino: el único archivo que editas para añadir o cambiar un enlace
+- Una ruta `[product].astro` que emite una página de redirección por slug en tiempo de compilación (`/go/dock-name/` → página del producto)
+- Un evento personalizado `affiliate_click` de Plausible disparado antes de la redirección, para que los clics salientes sean medibles por producto
+- Páginas `noindex` que se mantienen fuera de los buscadores y de la búsqueda del sitio
+- Respaldos para visitantes sin JS o con la analítica bloqueada, para que nadie se quede tirado en la página de redirección
+</ListCheck>
+
+Si quieres un panel alojado, edición de enlaces sin despliegues o registros por clic con marcas de tiempo y referrers, eso es un servicio de acortador de enlaces de verdad: yo uso [Sink en Cloudflare Workers](https://www.bitdoze.com/sink-install/) para eso en otro sitio. La versión estática de abajo cubre el caso de uso de afiliados con cero infraestructura.
+
+## Tres formas de redirigir en un sitio Astro estático
+
+Astro te da tres mecanismos que parecen similares pero se comportan de forma muy diferente. Elegir el equivocado te cuesta silenciosamente analítica o fiabilidad:
+
+| Mecanismo | Tipo de redirección | ¿Carga la página? | ¿Analítica? | Usar para |
+|-----------|---------------------|-------------------|-------------|-----------|
+| `redirects:` en `astro.config.mjs` | Stub HTML estático (meta refresh) | Brevemente | Posible pero feo | Cambios internos de URL, páginas renombradas |
+| `public/_redirects` | 301/302 HTTP real en el edge de Cloudflare | Nunca | No — ninguna página llega a cargarse | Migraciones de URLs heredadas, cambios de dominio |
+| Páginas generadas (`getStaticPaths`) | Página HTML completa → redirección JS | Sí | Sí — evento de Plausible en el mejor esfuerzo | **Enlaces de afiliado** |
+
+El compromiso está en la columna central. Una regla `_redirects` en el edge es lo más rápido pero invisible para la analítica: el navegador nunca renderiza nada, así que Plausible no puede disparar un evento. Una página generada añade una carga de página y hasta unos 400 ms de espera de JavaScript, lo que permite un evento de clic en el mejor esfuerzo y un destino visible (algo que los programas de afiliados quieren de todos modos). Como los datos de clics son el objetivo, `/go/` usa la tercera opción.
+
+<Notice type="info" title="¿Ya Usas Cloudflare?">
+El archivo `public/_redirects` es la herramienta adecuada cuando *no* necesitas seguimiento: produce 301 HTTP reales en el edge. Yo lo uso para las URLs de categorías retiradas. Convive con este sistema sin conflicto. Para la parte del despliegue, consulta [desplegar Astro en Cloudflare](https://www.bitdoze.com/deploy-astrojs-cloudflare/).
+</Notice>
+
+## Paso 1: El mapa de productos
+
+Todo vive en `src/data/affiliate-links.json`. Una entrada por producto enlazable:
+
+```json
+{
+  "anker-prime-tb5": {
+    "name": "Anker Prime TB5 Docking Station",
+    "url": "https://amzn.to/42cJK4L"
+  },
+  "gmktec-evo-x2": {
+    "name": "GMKtec EVO-X2",
+    "url": "https://amzn.to/3UrrKiE"
+  }
+}
+```
+
+El `name` es lo que los visitantes ven en la página de redirección («Redirigiendo a Anker Prime TB5 Docking Station en Amazon…»), lo que mantiene el destino sin enmascarar: los ToS de afiliados esperan que los lectores sepan a dónde van. El slug se convierte a la vez en la URL (`/go/anker-prime-tb5/`) y en la propiedad de analítica, así que mantenlo estable una vez publicado.
+
+## Paso 2: La página de redirección
+
+`src/pages/go/[product].astro` — un solo archivo genera todas las páginas de redirección:
+
+```astro
+---
+import links from "../../data/affiliate-links.json";
+
+export function getStaticPaths() {
+  return Object.entries(links).map(([slug, l]) => ({
+    params: { product: slug },
+    props: { slug, name: l.name, url: l.url },
+  }));
+}
+
+const { slug, name, url } = Astro.props;
+// Show the real retailer name even when the link is Amazon's amzn.to shortener.
+const hostMap: Record<string, string> = {
+  "amzn.to": "Amazon",
+  "amazon.com": "Amazon",
+};
+const rawHost = new URL(url).hostname.replace(/^www\./, "");
+const host = hostMap[rawHost] ?? rawHost;
+---
+
+<!doctype html>
+<html lang="en" data-pagefind-ignore>
+  <head>
+    <meta charset="utf-8" />
+    <title>Redirecting to {name}…</title>
+    <meta name="robots" content="noindex,nofollow" />
+    <meta http-equiv="refresh" content={`3;url=${url}`} />
+    <script is:inline>
+      window.plausible =
+        window.plausible ||
+        function () {
+          (plausible.q = plausible.q || []).push(arguments);
+        };
+      plausible.init =
+        plausible.init ||
+        function (i) {
+          plausible.o = i || {};
+        };
+      plausible.init({ autoCapturePageviews: false });
+    </script>
+    <script is:inline async src="https://an3.bitdoze.com/js/pa-kQauNXzAlLDQqncIWm6Op.js"></script>
+  </head>
+  <body data-pagefind-ignore>
+    <p>Redirecting to {name} on {host}…</p>
+    <p><a href={url} rel="nofollow sponsored">Continue to {host}</a></p>
+    <script is:inline define:vars={{ slug, url }}>
+      (function () {
+        var done = false;
+        function go() {
+          if (done) return;
+          done = true;
+          window.location.replace(url);
+        }
+        // Only record a same-origin pathname, never query strings or fragments.
+        var props = { product: slug };
+        try {
+          var source = new URLSearchParams(window.location.search).get("article");
+          var article = new URL(source || document.referrer, window.location.origin);
+          if ((source || document.referrer) && article.origin === window.location.origin && !article.pathname.startsWith("/go/")) {
+            props.article = article.pathname;
+          }
+        } catch (e) { /* Direct visits may have no article attribution. */ }
+        // Start the bound before analytics: tracking must never block navigation.
+        setTimeout(go, 400);
+        try {
+          plausible("affiliate_click", {
+            props: props,
+            callback: go,
+          });
+        } catch (e) {
+          /* analytics blocked or script missing — still redirect */
+        }
+      })();
+    </script>
+  </body>
+</html>
+```
+
+Seis detalles de ese código son fundamentales:
+
+- **`getStaticPaths` + `Astro.props`** — la pareja estándar de generación estática: cada entrada del JSON se convierte en un archivo `dist/go/<slug>/index.html` en tiempo de compilación. Los slugs que no están en el JSON no producen página, así que las erratas devuelven 404 de forma natural.
+- **El stub de cola de Plausible** — el mismo patrón que el `Layout.astro` del sitio: la función `window.plausible` encola eventos hasta que carga el script real. El mío es el mismo script de dominio personalizado (`an3.bitdoze.com`); usa el snippet de instalación y la URL del script de la configuración de tu propio sitio en Plausible. El stub se inicializa antes de que cargue el script asíncrono. `autoCapturePageviews: false` mantiene estas páginas intermedias fuera del recuento normal de páginas vistas conservando el evento personalizado. Los detalles de configuración están en el artículo [Plausible en Astro con Cloudflare Workers](https://www.bitdoze.com/astro-plausible-cloudflare-workers/).
+- **`callback: go` + `setTimeout(go, 400)`** — este es el truco de fiabilidad. Plausible llama al callback una vez enviado el evento, así que la redirección espera al seguimiento. El temporizador de 400 ms arranca antes de la llamada al evento y acota la espera. Si el tracker está bloqueado o tarda más en cargarse y enviarse, la navegación continúa igualmente y el clic puede no quedar registrado. `done` evita que se dispare dos veces.
+- **`location.replace` en lugar de `location.href`** — la página de redirección nunca entra en el historial del navegador, así que el botón Atrás no hace rebotar a los usuarios por `/go/` otra vez.
+- **`noindex,nofollow` + `data-pagefind-ignore`** — mantiene los stubs de redirección fuera de Google y del índice de búsqueda del propio sitio (Pagefind solo indexa páginas con `data-pagefind-body`, y el atributo las bloquea de todas formas).
+- **Meta refresh a los 3 s** — el respaldo sin JS. Más lento que la vía JS, pero garantiza que todo el mundo acabe en el destino.
+
+<Notice type="warning" title="Por qué .astro y no un endpoint .ts">
+Mi primera versión era `[product].ts` devolviendo un `new Response(html)`. Funciona, pero un endpoint `.ts` emite un archivo *sin extensión* (`dist/go/anker-prime-tb5`) que Cloudflare Pages sirve como `application/octet-stream`: el navegador lo descarga en lugar de renderizarlo. Una página `.astro` con `trailingSlash: "always"` produce `dist/go/<slug>/index.html`, que se sirve correctamente en `/go/<slug>/`. Usa una página, no un endpoint.
+</Notice>
+
+## Paso 3 (opcional): Un índice de todos los enlaces
+
+Útil durante las pruebas, y facilita auditar el JSON. `src/pages/go/index.astro`:
+
+```astro
+---
+import links from "../../data/affiliate-links.json";
+const entries = Object.entries(links).sort(([a], [b]) => a.localeCompare(b));
+---
+
+<!doctype html>
+<html lang="en" data-pagefind-ignore>
+  <head>
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Affiliate redirect links</title>
+  </head>
+  <body data-pagefind-ignore>
+    <h1>/go/ redirects ({entries.length})</h1>
+    <ul>
+      {
+        entries.map(([slug, l]) => (
+          <li>
+            <a href={`/go/${slug}/`}>/go/{slug}/</a> — {l.name}
+          </li>
+        ))
+      }
+    </ul>
+  </body>
+</html>
+```
+
+## Paso 4: Enlazar desde los artículos
+
+Dondequiera que vaya un enlace de producto, apunta a la URL `/go/` en lugar del enlace de afiliado directo:
+
+```mdx
+<Button text="Check Anker Prime TB5 Price" link="/go/anker-prime-tb5/" />
+
+<!-- or a plain markdown link -->
+[Check current price](/go/anker-prime-tb5/)
+```
+
+Actualizar la URL de destino de un mismo producto es una edición de una línea en el JSON, aplicada en todas partes en la siguiente compilación. Dale a cada producto distinto su propio slug para que las recomendaciones de los artículos existentes sigan siendo correctas.
+
+<Notice type="info" title="Recordatorio de cumplimiento">
+Los programas de afiliados (Amazon Associates especialmente) exigen una declaración cerca de los enlaces y no quieren que el destino quede disfrazado. La página de redirección cubre la segunda parte mostrando el nombre de la tienda; la primera depende de ti: mantén un aviso de `Affiliate Disclosure` encima del primer enlace de afiliado en cada artículo que lo tenga.
+</Notice>
+
+## Atribución del artículo y comprobaciones de compilación
+
+El evento siempre incluye `product`. En este sitio, el layout compartido también añade un parámetro de consulta `article` a los enlaces `/go/<slug>/` del mismo origen antes de la interacción, usando solo el pathname actual. Esto funciona para clics normales, nuevas pestañas y widgets que usan `rel="noreferrer"`. La página de redirección acepta una fuente del mismo origen, elimina cualquier query string o fragmento y envía solo el pathname como propiedad `article` opcional. Sin el parámetro, intenta usar `document.referrer`; las visitas directas pueden no tener propiedad de artículo. El parámetro nunca se reenvía a la tienda.
+
+Para el mismo comportamiento, añade este script a tu layout compartido de Astro:
+
+```astro
+<script>
+  function annotateAffiliateLinks() {
+    document.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((link) => {
+      const target = new URL(link.href, window.location.href);
+      if (target.origin !== window.location.origin || !/^\/go\/[^/]+\/$/.test(target.pathname)) return;
+      target.searchParams.set("article", window.location.pathname);
+      link.href = target.pathname + target.search + target.hash;
+    });
+  }
+  annotateAffiliateLinks();
+  document.addEventListener("astro:page-load", annotateAffiliateLinks);
+</script>
+```
+
+Nuestra compilación ejecuta `scripts/validate-affiliate-links.mjs` antes de Astro para comprobar slugs en kebab-case, nombres de producto no vacíos y destinos HTTPS sin credenciales incrustadas. Después de que Astro emita las páginas, el mismo script con `--dist` comprueba los anclajes renderizados contra el mapa. Comprobar la salida cubre tanto los enlaces Markdown como los widgets MDX sin tratar los ejemplos de código del tutorial como enlaces reales. Los slugs desconocidos hacen fallar la compilación antes del despliegue. Estas comprobaciones validan la configuración y las referencias; no comprueban la disponibilidad del producto en la tienda.
+
+## Comprobando que funciona
+
+Ejecuta `bun run build:ci` para la compilación y las comprobaciones de afiliados. Luego verifica las redirecciones:
+
+```sh
+# Pages were emitted
+ls dist/go/ | head
+
+# Redirect target baked into the HTML
+grep -o 'url=https[^"]*' dist/go/anker-prime-tb5/index.html
+
+# Unknown slugs 404
+curl -o /dev/null -w '%{http_code}' http://localhost:4321/go/does-not-exist/
+```
+
+Después haz clic en uno en un navegador con el panel de Plausible abierto: deberías ver un evento `affiliate_click` con la prop `product`. Si el evento no aparece, la causa habitual es que el evento personalizado no esté registrado como objetivo en la configuración del sitio en Plausible; añade `affiliate_click` en *Goals → Custom Events*.
+
+## Costes y límites
+
+Cada producto cuesta una página estática: trivial a esta escala, y el impacto en el tiempo de compilación es despreciable incluso para un sitio de este tamaño (el enfoque convive bien con los trucos de [optimización de la velocidad de compilación de Astro](https://www.bitdoze.com/astro-ssg-build-optimization/)).
+
+Lo que pierdes frente a un acortador de verdad:
+
+<ListCheck>
+- Sin registro por clic con marcas de tiempo/referrers: obtienes recuentos agregados por producto, no registros de clics individuales
+- Los enlaces solo cambian al desplegar: no hay panel para editar en vivo
+- Sin paso de query strings, sin destinos A/B, sin enrutado geográfico de serie
+- Una carga de página más hasta unos 400 ms de espera de JavaScript, frente a una redirección en el edge
+</ListCheck>
+
+Si alguna de esas se convierte en un requisito real —especialmente el enrutado geográfico, la edición en vivo o la analítica del lado del servidor—, mueve el mismo esquema de URLs a un Cloudflare Worker o a [Sink](https://www.bitdoze.com/sink-install/) y mantén `/go/` como ruta para que ningún artículo cambie nunca.
+
+## Conclusión
+
+Esta implementación usa páginas generadas en lugar de las redirecciones HTTP también disponibles en Cloudflare Pages. Una vez aceptado eso, la implementación es pequeña: un archivo JSON, una ruta `[product].astro` y una llamada de evento con un callback protegido por temporizador. Lo que obtienes a cambio es un único lugar para gestionar todas las URLs de afiliado del sitio y datos de clics que te dicen qué productos les importan de verdad a tus lectores.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Por qué no usar simplemente las redirecciones de astro.config.mjs?" group="faq" expanded="true">
+La config `redirects` de Astro genera el mismo tipo de páginas stub con meta refresh, pero es un mapa plano sin props por entrada: no puedes colgarle limpiamente un nombre de producto ni un evento de Plausible. Está pensada para páginas movidas, no para un catálogo de enlaces gestionado. Resérvala para cambios internos de URL.
+</Accordion>
+
+<Accordion label="¿Puedo usar public/_redirects en Cloudflare Pages en su lugar?" group="faq">
+Puedes, y es más rápido (un 301 HTTP real en el edge, sin carga de página alguna). El compromiso es la analítica: como ninguna página se renderiza, no se ejecuta JavaScript y no puede dispararse ningún evento de Plausible. Usa `_redirects` para migraciones de URLs heredadas donde no te importe el seguimiento de clics; usa páginas generadas donde sí te importe.
+</Accordion>
+
+<Accordion label="¿El evento de Plausible se dispara de forma fiable antes de la redirección?" group="faq">
+Dos mecanismos lo cubren: la API de eventos personalizados de Plausible acepta un `callback` que se ejecuta después de enviar el evento, y un `setTimeout` de 400 ms redirige de todos modos si la analítica está bloqueada por un bloqueador de anuncios. La bandera `done` evita una doble redirección cuando ambos se disparan. El seguimiento es de mejor esfuerzo: la analítica bloqueada y una carga o petición lenta del tracker pueden provocar eventos perdidos. Prueba con limitación de red y el tracker bloqueado; la navegación debe continuar sin esperar a la analítica.
+</Accordion>
+
+<Accordion label="¿Cómo mantengo estas páginas fuera de Google y de la búsqueda del sitio?" group="faq">
+La página emite `meta name="robots" content="noindex,nofollow"` para los buscadores. Para la búsqueda del sitio, Pagefind solo indexa páginas marcadas con `data-pagefind-body`, y estas páginas además llevan `data-pagefind-ignore`. El sitemap personalizado se genera desde las colecciones de contenido, así que las páginas `/go/` tampoco entran nunca en el sitemap.
+</Accordion>
+
+<Accordion label="¿Y los visitantes sin JavaScript?" group="faq">
+La etiqueta `<meta http-equiv="refresh">` redirige a los 3 segundos sin necesidad de JavaScript, y hay un enlace visible «Continuar a Amazon» con `rel="nofollow sponsored"` por si incluso eso falla o el usuario quiere inspeccionar el destino primero.
+</Accordion>
+
+<Accordion label="¿Cuándo debería pasarme a un servicio de acortador de verdad?" group="faq">
+Cuando necesites registros por clic, edición de enlaces en vivo sin desplegar, paso de query strings, enrutado geográfico o analítica del lado del servidor. Unos cientos de páginas estáticas pequeñas no son por sí solas razón para migrar. En ese punto ejecuta algo como Sink en Cloudflare Workers: puedes mantener las mismas rutas `/go/` para que los enlaces de los artículos existentes sigan funcionando.
+</Accordion>

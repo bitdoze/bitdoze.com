@@ -1,0 +1,434 @@
+---
+date: 2026-05-20T00:00:00Z
+translationKey: "headscale-self-hosted-tailscale-setup"
+title: "Guía de configuración de Headscale: autoaloja tu servidor de control de Tailscale"
+meta_title: "Guía de Headscale: autoaloja tu servidor de control"
+description: "Aprende a desplegar Headscale con Docker en un VPS como servidor de control de Tailscale autoalojado. VPN de malla completa con WireGuard, ACLs y sin dependencia del proveedor."
+image: "@assets/images/26/05/headscale-self-hosted-tailscale.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["self-hosted", "docker", "networking"]
+canonical: "https://www.bitdoze.com/es/headscale-tailscale-autoalojado/"
+---
+
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Tailscale hace que las VPN de malla parezcan sencillas. Instalas el cliente, inicias sesión y todos los dispositivos de tu cuenta pueden comunicarse entre sí. Sin archivos de configuración, sin redirección de puertos, sin servidor VPN que mantener. Está construido sobre WireGuard, lo que significa túneles cifrados y rápidos con una sobrecarga mínima.
+
+El inconveniente: el servidor de control de Tailscale funciona en su infraestructura. La topología de tu red, los datos de autenticación y el plano de coordinación residen en los servidores de Tailscale. Para la mayoría de la gente está bien. Pero si autoalojas porque quieres ser dueño de tu infraestructura de principio a fin —la misma razón por la que cambiarías de [Cloudflare Tunnels a Pangolin](/pangolin-cloudflare-tunnels-alternative/)— entonces el plano de control de Tailscale es la única pieza que aún no controlas.
+
+Headscale soluciona eso. Es una implementación de código abierto y autoalojada del servidor de control de Tailscale. Lo ejecutas en tu VPS y los clientes estándar de Tailscale se conectan a él en lugar de a la nube de Tailscale. La misma experiencia de cliente, los mismos túneles WireGuard, pero el servidor de coordinación lo controlas tú.
+
+Llevo unos seis meses usando Headscale en mi homelab. Aquí tienes una guía de configuración completa.
+
+## ¿Por qué autoalojar tu servidor de control de Tailscale?
+
+Por qué la gente cambia a Headscale:
+
+- **Propiedad de los datos**: el servidor de coordinación de Tailscale conoce cada dispositivo de tu red, su IP, su estado de conexión y quién puede acceder a él. Con Headscale, esos datos permanecen en tu servidor.
+- **Sin dependencia de la cuenta**: el plan gratuito de Tailscale te da 6 puestos de usuario ahora, pero si necesitas más o cambian los precios, estás atado. Headscale no tiene límites de usuarios: es tu servidor.
+- **Autenticación personalizada**: Tailscale usa su propio proveedor de identidad. Headscale te permite conectar cualquier proveedor OIDC: Authentik, Keycloak, Google, el que ya uses.
+- **Soberanía de datos en la UE**: si necesitas que los datos de coordinación de la red permanezcan dentro de una jurisdicción concreta, Tailscale no puede garantizarlo. Headscale en un VPS de Hetzner en Falkenstein sí puede.
+- **Sin vendor lock-in**: si Tailscale cambia sus condiciones, precios o funciones, no tienes alternativa. Headscale te da una vía de migración.
+
+Tailscale sigue siendo la mejor opción si quieres una red sin mantenimiento y no te importa quién posee el plano de control. Headscale es para quienes quieren la experiencia de Tailscale pero necesitan ser dueños de toda la pila.
+
+## Headscale vs Tailscale
+
+| Característica | Headscale | Tailscale |
+|---|---|---|
+| Servidor de control | Tu VPS | La nube de Tailscale |
+| Código abierto | Sí (BSD-3) | El servidor es propietario |
+| Límite de usuarios | Ilimitado | 6 (plan gratuito) |
+| Cliente | Clientes de Tailscale (no oficial) | Clientes de Tailscale (oficial) |
+| Autenticación | Cualquier proveedor OIDC | La identidad de Tailscale |
+| MagicDNS | Básico | Implementación completa |
+| ACLs | Sí (configuración JSON) | Sí (interfaz web) |
+| Nodos de salida | Sí | Sí |
+| Funnel (endpoints públicos) | No | Sí |
+| Relés DERP | Propios o los de Tailscale | Red global de Tailscale |
+| Coste | VPS (3-5 $/mes) | Plan gratuito / planes de pago |
+| Complejidad de instalación | Moderada | Casi nula |
+
+<Notice type="warning" title="Soporte de clientes no oficial">
+Headscale no está desarrollado por Tailscale. Los clientes de Tailscale funcionan con él, pero de forma no oficial. Tailscale podría cambiar el protocolo de su cliente en cualquier momento. En la práctica, esto no ha causado problemas, pero conviene saberlo antes de comprometerte.
+</Notice>
+
+## Qué necesitas
+
+Antes de configurar Headscale:
+
+<ListCheck>
+- Un **VPS con IP pública** (Ubuntu 22.04+ o Debian 12+). [Hetzner](https://go.bitdoze.com/hetzner) o [Hostinger](https://go.bitdoze.com/hostinger-vps) funcionan bien.
+- Un **nombre de dominio** que apunte a tu VPS (para el servidor de control y, opcionalmente, una interfaz web)
+- **Docker y Docker Compose** instalados en el VPS
+- **Puerto 443** (TCP) abierto para el servidor de control y, opcionalmente, el puerto 3478 (UDP) para el relé DERP
+- Clientes de Tailscale instalados en los dispositivos que quieras conectar
+</ListCheck>
+
+_Los precios de los VPS subieron en general en 2026: si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+## Instala Headscale con Docker
+
+La forma más sencilla de ejecutar Headscale es con Docker Compose. Así obtienes el servidor de control más interfaces web opcionales de administración.
+
+### Paso 1: Crea la estructura de directorios
+
+```bash
+mkdir -p /opt/headscale/{config,data}
+cd /opt/headscale
+```
+
+### Paso 2: Descarga el archivo de configuración
+
+```bash
+wget -O config/config.yaml \
+  https://raw.githubusercontent.com/juanfont/headscale/main/config-example.yaml
+```
+
+### Paso 3: Edita la configuración
+
+Abre `config/config.yaml` y ajusta estos parámetros clave:
+
+```yaml
+# The URL your clients will connect to
+server_url: https://headscale.example.com
+
+# Listen address (inside container, 0.0.0.0)
+listen_addr: 0.0.0.0:8080
+
+# Metrics endpoint
+metrics_listen_addr: 0.0.0.0:9090
+
+# SQLite database path (inside container)
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+
+# DERP configuration (use Tailscale's relays or set up your own)
+derp:
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+
+# DNS configuration
+dns_config:
+  base_domain: example.com
+
+# Random key for WireGuard (generate one)
+private_key_path: /var/lib/headscale/private.key
+```
+
+Genera una clave privada de WireGuard:
+
+```bash
+docker run --rm docker.io/headscale/headscale:0.24 \
+  headscale generatekey
+```
+
+Guarda la clave generada y añádela a tu configuración, o deja que Headscale la genere automáticamente en el primer arranque.
+
+### Paso 4: Crea el archivo de Docker Compose
+
+Crea `/opt/headscale/docker-compose.yml`:
+
+```yml
+services:
+  headscale:
+    image: docker.io/headscale/headscale:0.24
+    restart: unless-stopped
+    container_name: headscale
+    command: serve
+    read_only: true
+    tmpfs:
+      - /var/run/headscale
+    volumes:
+      - ./config:/etc/headscale:ro
+      - ./data:/var/lib/headscale
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  headplane:
+    image: ghcr.io/tale/headplane:0.3
+    restart: unless-stopped
+    container_name: headplane
+    volumes:
+      - ./config:/etc/headscale
+      - ./data:/var/lib/headscale
+    ports:
+      - "127.0.0.1:3003:3003"
+    environment:
+      - HEADSCALE_URL=http://headscale:8080
+```
+
+Headplane es una interfaz web ligera para administrar Headscale. Te permite ver usuarios, dispositivos y rutas sin tener que conectarte por SSH al servidor cada vez.
+
+### Paso 5: Inicia los contenedores
+
+```bash
+docker compose up -d
+```
+
+Verifica que Headscale esté en funcionamiento:
+
+```bash
+docker compose exec headscale headscale health
+```
+
+Deberías ver una salida que confirma que el servidor está en buen estado.
+
+### Paso 6: Configura el proxy inverso
+
+Necesitas un proxy inverso para exponer Headscale por HTTPS. Si ya usas Traefik o Caddy, añade Headscale como backend. Aquí tienes una configuración rápida con Caddy:
+
+```bash
+# Install Caddy
+apt install caddy
+
+# Edit /etc/caddy/Caddyfile
+headscale.example.com {
+    reverse_proxy localhost:8080
+}
+
+headplane.example.com {
+    reverse_proxy localhost:3003
+}
+```
+
+Recarga Caddy:
+
+```bash
+systemctl reload caddy
+```
+
+Caddy provisiona automáticamente certificados de Let's Encrypt para ambos dominios.
+
+## Crea tu primer usuario y registra dispositivos
+
+Headscale organiza los dispositivos en «usuarios» (similares a los tailnets de Tailscale). Cada usuario obtiene su propia red privada.
+
+### Crea un usuario
+
+```bash
+docker compose exec headscale headscale users create myuser
+```
+
+### Registra un dispositivo
+
+En cada dispositivo que quieras conectar, primero configura el cliente de Tailscale para que use tu servidor Headscale en lugar del de Tailscale:
+
+<Tabs>
+<Tab name="Linux">
+
+```bash
+# Install Tailscale client
+curl -fsSL https://tailscale.com/install.sh | sh
+
+# Point it to your Headscale server
+tailscale up --login-server=https://headscale.example.com
+```
+
+Esto muestra una URL de registro. Ábrela en tu navegador para completar la autenticación.
+
+</Tab>
+<Tab name="macOS">
+
+Instala Tailscale desde la Mac App Store y luego:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale up \
+  --login-server=https://headscale.example.com
+```
+
+</Tab>
+<Tab name="Windows">
+
+Instala Tailscale para Windows. Luego edita el servidor de inicio de sesión en los ajustes de la interfaz de Tailscale, o ejecuta desde el símbolo del sistema:
+
+```
+tailscale up --login-server=https://headscale.example.com
+```
+
+</Tab>
+</Tabs>
+
+Como alternativa, genera una clave previa desde el servidor y úsala en el cliente:
+
+```bash
+# On the server: create a pre-auth key
+docker compose exec headscale headscale preauthkeys create \
+  --user myuser --reusable
+
+# On the client: use the key
+tailscale up --login-server=https://headscale.example.com --authkey=tskey-xxxxx
+```
+
+Este es el método preferido para servidores y despliegues automatizados.
+
+### Verifica la conexión
+
+Comprueba los dispositivos registrados:
+
+```bash
+docker compose exec headscale headscale nodes list
+```
+
+Desde cualquier dispositivo conectado, verifica que puedes alcanzar a los demás:
+
+```bash
+tailscale status
+tailscale ping other-device-name
+```
+
+## Configura las ACLs (listas de control de acceso)
+
+Las ACLs definen qué dispositivos pueden comunicarse con cuáles. En Tailscale las configuras a través de la interfaz web. En Headscale las escribes en JSON.
+
+Crea `/opt/headscale/config/acls.json`:
+
+```json
+{
+  "groups": {
+    "group:admin": ["myuser@example.com"],
+    "group:devices": ["myuser@example.com"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["group:admin"],
+      "dst": ["*:*"]
+    },
+    {
+      "action": "accept",
+      "src": ["group:devices"],
+      "dst": ["group:devices:*"]
+    }
+  ]
+}
+```
+
+Esto da a los usuarios admin acceso a todo y a los usuarios de dispositivos acceso a los demás dispositivos de su grupo. Actualiza tu `config.yaml` para referenciar el archivo de ACLs:
+
+```yaml
+acl_file_path: /etc/headscale/acls.json
+```
+
+Reinicia Headscale para cargar las ACLs:
+
+```bash
+docker compose restart headscale
+```
+
+## Configura los nodos de salida
+
+Los nodos de salida te permiten enrutar todo tu tráfico a través de un dispositivo concreto, como un túnel VPN hacia tu red doméstica. Cualquier dispositivo de tu red Headscale puede ser un nodo de salida.
+
+En el dispositivo que actuará como nodo de salida:
+
+```bash
+tailscale up --login-server=https://headscale.example.com --advertise-exit-node
+```
+
+Aprueba el nodo de salida en el servidor:
+
+```bash
+docker compose exec headscale headscale nodes approve-routes \
+  --node <node-id> --routes 0.0.0.0/0
+```
+
+En los demás dispositivos, usa el nodo de salida:
+
+```bash
+tailscale up --login-server=https://headscale.example.com --exit-node=<exit-node-name>
+```
+
+Ahora todo el tráfico se enruta a través del dispositivo nodo de salida.
+
+## Opcional: conecta un proveedor de identidad OIDC
+
+Headscale admite cualquier proveedor de identidad compatible con OIDC. Si usas Authentik, Keycloak o Google Workspace, puedes utilizarlo para la autenticación en lugar del sistema integrado de Headscale.
+
+En tu `config.yaml`:
+
+```yaml
+oidc:
+  issuer: "https://authentik.example.com/application/o/headscale/"
+  client_id: "your-client-id"
+  client_secret: "your-client-secret"
+  scope: ["openid", "profile", "email"]
+  allowed_domains:
+    - example.com
+```
+
+Los usuarios se autentican a través de tu proveedor de identidad al ejecutar `tailscale up`. El filtro de dominio de correo garantiza que solo los usuarios autorizados puedan unirse.
+
+## Opcional: configura relés DERP propios
+
+Los relés DERP gestionan el tráfico cuando no se pueden establecer conexiones directas de WireGuard (ambos dispositivos detrás de NAT, ISPs con CGNAT distintos). Tailscale opera una red DERP global. Headscale la usa por defecto, pero puedes añadir tu propio relé por motivos de fiabilidad o latencia.
+
+Añade tu servidor DERP propio a la configuración de Headscale:
+
+```yaml
+derp:
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths:
+    - /etc/headscale/derp.yaml
+  auto_update: true
+```
+
+Crea `/opt/headscale/config/derp.yaml` con la configuración de tu relé. El servidor DERP de Tailscale es de código abierto y se puede autoalojar.
+
+## Comparación con otras VPN de malla autoalojadas
+
+Para una comparación detallada, consulta nuestra [guía comparativa de VPN de malla](/netbird-vs-headscale-vs-tailscale/) que analiza NetBird, Headscale y Tailscale uno junto a otro. Aquí va un resumen rápido:
+
+- **Headscale**: la mejor opción si ya conoces Tailscale y quieres la misma experiencia de cliente con control autoalojado. Requiere entender el modelo de Tailscale.
+- **NetBird**: la mejor si quieres una VPN de malla totalmente autoalojada con una interfaz web limpia, SSO integrado y sin depender de los clientes de Tailscale. Consulta nuestra [comparativa NetBird vs Headscale vs Tailscale](/netbird-vs-headscale-vs-tailscale/).
+- **Pangolin**: la mejor si quieres exponer servicios concretos a través de un túnel de proxy inverso, no una VPN de malla completa. Consulta nuestra [guía de configuración de Pangolin](/pangolin-cloudflare-tunnels-alternative/).
+
+## Rendimiento y fiabilidad en la práctica
+
+Tras seis meses ejecutando Headscale en un Hetzner CX22 (5 $/mes):
+
+Lo bueno: los dispositivos se conectan y autentican en segundos. Los túneles WireGuard entre dispositivos del mismo ISP alcanzan velocidades casi nativas (80-100 Mbps en una conexión de 100 Mbps). Las conexiones entre ISPs distintos pasan por relés DERP con la latencia esperada. Las ACLs funcionan de forma fiable una vez que aciertas con el formato JSON. La interfaz web de Headplane es sencilla pero funcional para la administración diaria.
+
+Las desventajas: pierdes el conjunto completo de funciones de MagicDNS: Headscale admite DNS básico pero no la resolución de nombres que Tailscale ofrece de serie. Tailscale Funnel (exponer endpoints públicos) no funciona con Headscale. La configuración se gestiona con archivos YAML en lugar de una interfaz web pulida. El rendimiento del relé DERP depende de dónde lo despliegues: la red global de relés de Tailscale es difícil de igualar con un solo VPS.
+
+## ¿Deberías autoalojar tu VPN de malla?
+
+Merece la pena configurar Headscale si te importa la propiedad de tus datos, necesitas autenticación personalizada o quieres evitar los límites de usuarios de Tailscale. La instalación lleva entre 30 y 45 minutos y, a partir de ahí, añadir dispositivos es la misma experiencia que con el Tailscale habitual.
+
+Si solo quieres que tus dispositivos se comuniquen entre sí con el mínimo esfuerzo, el servicio gestionado de Tailscale sigue siendo la mejor opción. Headscale añade trabajo de mantenimiento (actualizaciones, cambios de configuración, gestión de relés DERP) que no tienes con la nube de Tailscale.
+
+Si ya autoalojas otra infraestructura —tu propia [PaaS con Coolify](/coolify-v5-self-hosted-paas-review/), servicios gestionados con [Docker en tu servidor doméstico](/es/contenedores-docker-servidor-casa/)— entonces Headscale encaja de forma natural en esa pila. El coste de mantenimiento es pequeño comparado con el control que ganas.
+
+El [repositorio de Headscale en GitHub](https://github.com/juanfont/headscale) tiene documentación detallada y la comunidad está activa en su servidor de Discord.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Puedo migrar de Tailscale a Headscale?" group="headscale-faq" expanded="true">
+Sí, pero requiere volver a registrar cada dispositivo. No hay migración automática. Tendrás que ejecutar `tailscale down` en cada dispositivo y luego `tailscale up --login-server=https://headscale.example.com` para registrarlo de nuevo en tu servidor Headscale. Planifica la migración en un momento en que puedas tolerar una breve interrupción de la red.
+</Accordion>
+
+<Accordion label="¿Funciona Headscale con las apps oficiales de Tailscale para Android/iOS?" group="headscale-faq">
+No directamente. Las apps móviles no permiten cambiar el servidor de inicio de sesión desde la interfaz. Hay que usar métodos alternativos: en Android puedes cambiar el servidor de inicio de sesión desde los ajustes de depuración de la app. En iOS es más complicado y puede requerir una compilación personalizada. Este es un aspecto en el que Headscale resulta menos cómodo que Tailscale.
+</Accordion>
+
+<Accordion label="¿Puedo usar Headscale y Tailscale al mismo tiempo?" group="headscale-faq">
+No en el mismo dispositivo. Un cliente de Tailscale se conecta a un solo servidor de control a la vez. Pero puedes tener unos dispositivos en Headscale y otros en Tailscale: estarán en redes separadas y no se verán entre sí.
+</Accordion>
+
+<Accordion label="¿Qué pasa si mi VPS de Headscale se cae?" group="headscale-faq">
+Los túneles WireGuard existentes entre dispositivos ya conectados siguen activos. El servidor de control solo se necesita para nuevas conexiones, rotaciones de claves y cambios de ACLs. Pero los dispositivos no pueden autenticar nuevos pares ni actualizar sus mapas de red hasta que el servidor vuelva. Configura monitorización con [Uptime Kuma](/es/desplegar-uptime-kuma/) o [Beszel](/beszel-uptime-kuma/) para detectar caídas rápidamente.
+</Accordion>

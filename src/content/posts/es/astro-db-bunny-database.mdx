@@ -1,0 +1,379 @@
+---
+date: 2026-06-19T00:00:00Z
+translationKey: "astro-db-bunny-database"
+title: "Astro DB con Bunny Database: Desarrollo Local-First, libSQL en Producción"
+meta_title: "Astro DB + Bunny Database: Conecta @astrojs/db a libSQL en Bunny.net"
+description: "Usa Astro DB para desarrollo local-first y aloja la base de datos de producción en el libSQL gestionado de Bunny.net en lugar de Turso."
+image: "@assets/images/26/06/astro-db-bunny-database.webp"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["astro", "bunny-net", "self-hosted"]
+canonical: "https://www.bitdoze.com/es/astro-db-bunny-database/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Astro DB es una de esas funciones que te hace preguntarte por qué no todos los frameworks incluyen algo así. Defines tablas en TypeScript, obtienes un archivo SQLite local para desarrollo sin configuración alguna, y consultas todo a través de un cliente Drizzle integrado con seguridad de tipos completa. El problema es que la documentación oficial te lleva directamente a Turso para la base de datos de producción, y Turso es la opción obvia por defecto ya que mantienen libSQL.
+
+Pero Astro DB se conecta a *cualquier* servidor libSQL, no solo a Turso. Y [Bunny.net](https://go.bitdoze.com/bunny) ahora ofrece una base de datos libSQL gestionada que te da la misma URL `libsql://` y un token de acceso, está ubicada en la UE, se detiene cuando nadie la consulta y factura por uso. Así que puedes mantener todo el flujo de trabajo local-first de Astro DB y simplemente apuntar la producción a Bunny. Eso es lo que hace esta guía.
+
+<Notice type="success" title="Prueba Bunny.net gratis durante 14 días">
+  Necesitarás una cuenta de Bunny para el paso de producción. [Regístrate en Bunny.net](https://go.bitdoze.com/bunny) sin tarjeta de crédito y obtén una prueba de 14 días. Mi [reseña completa de Bunny.net](/es/resena-bunny-net/) cubre el resto de la plataforma.
+</Notice>
+
+## Cómo encajan Astro DB y Bunny
+
+Aquí está el modelo mental, porque a mí me confundió al principio. Astro DB tiene dos mitades:
+
+<ListCheck>
+- **Desarrollo local**: `astro dev` crea un archivo SQLite en `.astro/content.db`, regenera tus tipos desde `db/config.ts` y lo vuelve a sembrar desde `db/seed.ts` en cada cambio. Sin Docker, sin red, sin credenciales
+- **Producción**: cuando compilas o ejecutas con el flag `--remote`, Astro se comunica con un servidor libSQL real definido por dos variables de entorno, `ASTRO_DB_REMOTE_URL` y `ASTRO_DB_APP_TOKEN`
+</ListCheck>
+
+La documentación rellena esas dos variables con valores de Turso. Nosotros las vamos a rellenar con valores de Bunny. Todo lo demás de Astro DB, el esquema, el archivo seed, las consultas Drizzle, permanece exactamente igual.
+
+<Notice type="info" title="Por qué funciona esto">
+  Bunny Database está construido sobre libSQL, el mismo fork de SQLite que Turso mantiene y el mismo motor que Astro DB usa internamente. Bunny expone el protocolo remoto de libSQL, así que para Astro es simplemente otro endpoint libSQL. La combinación no es una integración oficial de Astro, simplemente surge de que ambos lados hablan libSQL.
+</Notice>
+
+## Requisitos previos
+
+- Un proyecto Astro existente, o uno nuevo (`npm create astro@latest`)
+- Node.js instalado
+- Una [cuenta de Bunny.net](https://go.bitdoze.com/bunny) con acceso a Bunny Database (actualmente en vista previa pública)
+
+Si aún no tienes un sitio Astro, tengo una guía sobre [cómo crear un blog gratis con Astro](/es/crear-blog-astro-gratis/) que te da un proyecto funcional al que añadir una base de datos.
+
+## Paso 1: Instala la integración de Astro DB
+
+Desde la raíz de tu proyecto, deja que Astro lo configure todo:
+
+```bash
+npx astro add db
+```
+
+Esto instala `@astrojs/db`, lo añade a tu `astro.config.mjs` y crea un `db/config.ts` inicial:
+
+```ts
+// db/config.ts
+import { defineDb } from 'astro:db';
+
+export default defineDb({
+  tables: {},
+})
+```
+
+## Paso 2: Define tus tablas
+
+Las tablas viven en `db/config.ts`. Astro lee este archivo para generar una interfaz TypeScript para cada tabla, que es lo que te da autocompletado y errores en tiempo de compilación al consultar.
+
+Aquí hay una tabla `Comment` con un `Author` al que referencia, la misma estructura que usan los docs de Astro, para que sea fácil de comparar:
+
+```ts
+// db/config.ts
+import { defineDb, defineTable, column } from 'astro:db';
+
+const Author = defineTable({
+  columns: {
+    id: column.number({ primaryKey: true }),
+    name: column.text(),
+  },
+});
+
+const Comment = defineTable({
+  columns: {
+    id: column.number({ primaryKey: true }),
+    authorId: column.number({ references: () => Author.columns.id }),
+    body: column.text(),
+    published: column.date({ default: new Date() }),
+  },
+});
+
+export default defineDb({
+  tables: { Author, Comment },
+})
+```
+
+Los tipos de columna se traducen limpiamente a SQLite: `column.text()`, `column.number()`, `column.boolean()`, `column.date()` (consultada como un `Date` de JavaScript) y `column.json()` para un blob sin tipo. La propiedad `references` en `authorId` establece la relación de clave foránea con `Author.id`.
+
+## Paso 3: Carga datos de desarrollo local
+
+En desarrollo no tocas los datos de producción. Astro vuelve a sembrar una base de datos local nueva desde `db/seed.ts` cada vez que el archivo cambia, lo que mantiene tu entorno de desarrollo predecible.
+
+```ts
+// db/seed.ts
+import { db, Author, Comment } from 'astro:db';
+
+export default async function () {
+  await db.insert(Author).values([
+    { id: 1, name: 'Kasim' },
+    { id: 2, name: 'Mina' },
+  ]);
+
+  await db.insert(Comment).values([
+    { authorId: 1, body: 'Hope you like Astro DB!' },
+    { authorId: 2, body: 'Enjoy!' },
+  ]);
+}
+```
+
+Arranca el servidor de desarrollo y la tabla ya está activa en local:
+
+```bash
+npm run dev
+```
+
+## Paso 4: Consulta la base de datos en una página
+
+Puedes consultar desde cualquier página, endpoint o acción de Astro usando el cliente `db` exportado desde `astro:db`. Es Drizzle por dentro, ya configurado, sin necesidad de configurar el cliente.
+
+```astro
+---
+// src/pages/index.astro
+import { db, Comment, Author, eq } from 'astro:db';
+
+const comments = await db
+  .select()
+  .from(Comment)
+  .innerJoin(Author, eq(Comment.authorId, Author.id));
+---
+
+<h2>Comments</h2>
+{
+  comments.map(({ Author, Comment }) => (
+    <article>
+      <p>Author: {Author.name}</p>
+      <p>{Comment.body}</p>
+    </article>
+  ))
+}
+```
+
+Todos los helpers de consulta de Drizzle, `eq()`, `gt()`, `like()`, `count()` y la etiqueta `sql` cruda, vienen directamente de `astro:db`:
+
+```ts
+import { eq, gt, count, sql } from 'astro:db';
+```
+
+En este punto todo se ejecuta contra el archivo local. Ahora vamos a darle un hogar real en Bunny.
+
+## Paso 5: Crea tu Bunny Database
+
+1. Inicia sesión en el [panel de Bunny.net](https://go.bitdoze.com/bunny)
+2. En la barra lateral, haz clic en **+ Add**, luego en **Database**
+3. Dale un nombre (por ejemplo `astro-comments`). El nombre aparece en tu URL de conexión
+4. Elige un modo de despliegue. **Single region** es lo más barato y suficiente para la mayoría de sitios, **Automatic** deja que Bunny elija las regiones por ti, y **Manual** te da control sobre el primario y las réplicas
+5. Haz clic en **Add Database**
+
+Abre la base de datos y ve a la pestaña **Access**. Necesitas dos cosas aquí:
+
+- **Database URL**: tiene el formato `libsql://<your-database-id>.lite.bunnydb.net`
+- **Access Token**: haz clic en **Generate Tokens** y copia el token **Full Access** (Astro necesita acceso de escritura para enviar el esquema y persistir datos)
+
+<Notice type="warning" title="Copia el token ahora">
+  Bunny muestra los tokens una sola vez. Si lo pierdes, genera uno nuevo, lo que invalida el anterior. Nunca lo subas a git.
+</Notice>
+
+## Paso 6: Apunta Astro DB a Bunny
+
+Este es el único paso realmente específico de Bunny, y son solo dos variables de entorno. Mapea los valores de Bunny a las variables que Astro espera:
+
+| Variable de Astro | Valor de Bunny |
+|---|---|
+| `ASTRO_DB_REMOTE_URL` | La URL de tu base de datos Bunny (`libsql://...lite.bunnydb.net`) |
+| `ASTRO_DB_APP_TOKEN` | Tu token Full Access |
+
+Colócalas en un archivo `.env` en la raíz del proyecto:
+
+```bash
+# .env
+ASTRO_DB_REMOTE_URL="libsql://your-database-id.lite.bunnydb.net"
+ASTRO_DB_APP_TOKEN="your-full-access-token"
+```
+
+Asegúrate de que `.env` está en el gitignore. Ese es todo el cambio. Donde los docs de Astro dicen "establece esto a tu URL de Turso", tú lo estableces a tu URL de Bunny.
+
+<Notice type="info" title="Si el esquema libsql:// te da problemas">
+  Astro DB acepta los esquemas `libsql:`, `https:` y `wss:`. El libSQL de Bunny habla el protocolo remoto sobre HTTPS, así que si una URL `libsql://` llega a fallar al conectar desde un runtime concreto, cambia el esquema a `https://` en el mismo host (`https://your-database-id.lite.bunnydb.net`) y mantén el mismo token.
+</Notice>
+
+## Paso 7: Envía tu esquema a Bunny
+
+Por ahora tu esquema local solo existe en `db/config.ts`. Envíalo a la base de datos Bunny con el flag `--remote`:
+
+```bash
+npx astro db push --remote
+```
+
+Esto crea las tablas `Author` y `Comment` en Bunny y verifica que el cambio no perderá datos existentes. Si más adelante haces un cambio de esquema incompatible y no te importa borrar la producción, añade `--force-reset`:
+
+```bash
+npx astro db push --remote --force-reset
+```
+
+Para cargar datos reales en la base de datos remota (no solo los datos seed locales), ejecuta un archivo seed o de migración contra ella con `execute`:
+
+```bash
+npx astro db execute db/seed.ts --remote
+```
+
+## Paso 8: Compila y despliega contra Bunny
+
+En local, `dev` y `build` usan el archivo local por defecto. Para que producción lea y escriba en Bunny, añade `--remote` a tu comando de build en `package.json`:
+
+```json
+{
+  "scripts": {
+    "build": "astro build --remote"
+  }
+}
+```
+
+También puedes pasarlo directamente cuando quieras una sesión de desarrollo conectada al remoto:
+
+```bash
+# Build against the Bunny database
+astro build --remote
+
+# Develop against the Bunny database
+astro dev --remote
+```
+
+Define `ASTRO_DB_REMOTE_URL` y `ASTRO_DB_APP_TOKEN` también en el entorno de tu plataforma de despliegue, no solo en local. El flag `--remote` usa la conexión durante el build y en el servidor, así que ambos entornos necesitan las credenciales.
+
+<Notice type="warning" title="Las escrituras necesitan renderizado bajo demanda">
+  Leer datos en tiempo de compilación funciona con un sitio estático. Pero para *escribir* (aceptar un formulario de comentarios, por ejemplo) necesitas [renderizado bajo demanda](https://docs.astro.build/en/guides/on-demand-rendering/) con un adaptador para tu hosting (Node, un VPS, Cloudflare, etc.). Un build puramente estático puede leer de Bunny en tiempo de compilación pero no puede persistir filas nuevas en tiempo de ejecución.
+</Notice>
+
+## Aceptar datos de usuarios: un formulario de comentarios
+
+Aquí está la ruta de escritura, usando una acción de Astro para obtener validación con Zod gratis. Esto asume que has añadido un adaptador y habilitado el renderizado bajo demanda.
+
+```ts
+// src/actions/index.ts
+import { db, Comment } from 'astro:db';
+import { defineAction } from 'astro:actions';
+import { z } from 'astro/zod';
+
+export const server = {
+  addComment: defineAction({
+    input: z.object({
+      authorId: z.number(),
+      body: z.string(),
+    }),
+    handler: async (input) => {
+      const created = await db.insert(Comment).values(input).returning();
+      return created;
+    },
+  }),
+};
+```
+
+Como la acción se ejecuta en el servidor, tu token de Bunny nunca llega al navegador. El insert va directamente a la base de datos libSQL remota y `returning()` devuelve la fila nueva.
+
+## Réplicas embebidas para lecturas más rápidas
+
+Una función de libSQL que vale la pena conocer: las réplicas embebidas. Puedes mantener una copia local sincronizada de la base de datos Bunny para lecturas muy rápidas, con las escrituras reenviadas a Bunny. Astro lo configura mediante parámetros de consulta en la URL remota:
+
+```bash
+# In-memory replica synced from Bunny, refreshing every 60s
+ASTRO_DB_REMOTE_URL="memory:?syncUrl=libsql%3A%2F%2Fyour-database-id.lite.bunnydb.net&syncInterval=60"
+ASTRO_DB_APP_TOKEN="your-full-access-token"
+```
+
+El valor de `syncUrl` debe estar codificado para URL. Esto es exagerado para un blog pequeño, pero si ejecutas un sitio con muchas lecturas en un solo servidor, convierte la mayoría de lecturas en consultas locales mientras Bunny sigue siendo la fuente de verdad.
+
+## Por qué combinar Astro DB con Bunny en lugar de Turso
+
+Ambos son sólidos. Así es como yo planteo la elección:
+
+| | Bunny Database | Turso |
+|---|---|---|
+| Motor | libSQL | libSQL |
+| Funciona con Astro DB | Sí (define las dos variables de entorno) | Sí (ejemplo oficial) |
+| Facturación en reposo | Se detiene cuando está inactivo | Nivel gratuito, luego por uso |
+| Mismo panel que CDN/almacenamiento | Sí | No |
+| Región | Empresa de la UE (Eslovenia) | Con sede en EE. UU. |
+| Estado | Vista previa pública | GA |
+
+Si ya ejecutas tu CDN, almacenamiento o vídeo en Bunny, mantener la base de datos en el mismo panel y en la misma factura es la ventaja obvia. Si quieres el host libSQL más maduro, en GA y con las herramientas más profundas, Turso sigue siendo la opción segura. Como ambos son libSQL, puedes cambiar entre ellos más adelante modificando dos variables de entorno y reenviando el esquema, así que no es una puerta de un solo sentido.
+
+## Solución de problemas
+
+<Accordion label="astro db push --remote falla al conectar" group="troubleshoot" expanded="true">
+
+Comprueba que `ASTRO_DB_REMOTE_URL` apunta al host exacto de tu base de datos Bunny y que `ASTRO_DB_APP_TOKEN` es el token Full Access, no Read Only. Si una URL `libsql://` no conecta desde tu runtime, prueba el esquema `https://` en el mismo host.
+
+</Accordion>
+
+<Accordion label="Las lecturas funcionan pero las escrituras fallan en producción" group="troubleshoot">
+
+Un build estático puede leer en tiempo de compilación pero no puede escribir en tiempo de ejecución. Añade un adaptador y habilita el renderizado bajo demanda para que tus formularios y acciones puedan persistir datos en Bunny.
+
+</Accordion>
+
+<Accordion label="Los cambios locales no aparecen en producción" group="troubleshoot">
+
+`dev` y `build` locales usan el archivo local a menos que pases `--remote`. Envía los cambios de esquema con `astro db push --remote`, y asegúrate de que tu comando de build de despliegue incluye el flag `--remote`.
+
+</Accordion>
+
+<Accordion label="Errores de permisos o de solo lectura" group="troubleshoot">
+
+Probablemente estás usando un token de solo lectura. Genera un token Full Access en la pestaña **Access** de la base de datos Bunny y actualiza `ASTRO_DB_APP_TOKEN` en todas partes.
+
+</Accordion>
+
+## Preguntas frecuentes
+
+<Accordion label="¿Es una integración oficial de Astro?" group="faq">
+
+No. No hay un plugin de Astro específico para Bunny. Funciona porque Astro DB se conecta a cualquier servidor libSQL mediante `ASTRO_DB_REMOTE_URL` y `ASTRO_DB_APP_TOKEN`, y Bunny Database es libSQL. Estás usando el mismo mecanismo de base de datos remota que los docs demuestran con Turso.
+
+</Accordion>
+
+<Accordion label="¿Puedo seguir desarrollando en local sin tocar Bunny?" group="faq">
+
+Sí, y ese es todo el atractivo. El `npm run dev` del día a día usa el archivo SQLite local y tus datos seed. Solo tocas Bunny cuando envías el esquema o compilas con `--remote`. Mantiene los datos de producción seguros mientras trabajas.
+
+</Accordion>
+
+<Accordion label="¿Bunny cobra por consulta?" group="faq">
+
+Bunny Database factura por uso (lecturas, escrituras y almacenamiento por región activa) y se detiene cuando nada lo consulta, así que un sitio Astro con poco tráfico cuesta muy poco. Consulta la página de [precios de Bunny](https://go.bitdoze.com/bunny) para las tarifas actuales de la vista previa.
+
+</Accordion>
+
+<Accordion label="¿Y si prefiero usar Drizzle directamente sin Astro DB?" group="faq">
+
+Puedes. Astro DB envuelve Drizzle con un flujo de configuración y seed más agradable, pero si quieres Drizzle en crudo contra una base de datos libSQL, escribí una [guía de TanStack Start + Bunny Database + Drizzle](/tanstack-start-bunny-database-drizzle/) que usa `@libsql/client` y Drizzle directamente. Misma base de datos, framework diferente y una configuración ORM más manual.
+
+</Accordion>
+
+<Accordion label="¿Puedo migrar a Turso más adelante, o viceversa?" group="faq">
+
+Sí. Ambos son libSQL, así que cambiar de host significa cambiar `ASTRO_DB_REMOTE_URL` y `ASTRO_DB_APP_TOKEN` y ejecutar `astro db push --remote` contra la nueva base de datos. También puedes volcar e importar datos con las CLI respectivas.
+
+</Accordion>
+
+## Conclusión
+
+Astro DB te da un flujo de trabajo local-first realmente agradable: tablas tipadas, SQLite local instantáneo y un cliente Drizzle que no necesita cableado. Los docs te dirigen a Turso para producción, pero la conexión remota es simplemente libSQL, así que apuntarla a Bunny es un cambio de dos variables. Obtienes una base de datos que vive en el mismo panel que tu CDN y almacenamiento, se detiene cuando el tráfico está quieto y sigue siendo portable porque es libSQL puro por debajo.
+
+Si tu sitio ya funciona estático en Bunny, esto cierra el círculo: páginas estáticas desde el CDN, datos dinámicos desde Bunny Database, todo en una factura.
+
+<Button text="Prueba Bunny.net Gratis durante 14 Días" link="https://go.bitdoze.com/bunny" variant="solid" color="blue" size="lg" />
+
+## Artículos relacionados
+
+- [Reseña de Bunny.net](/es/resena-bunny-net/) - la plataforma completa tras un año en producción
+- [TanStack Start + Bunny Database + Drizzle](/tanstack-start-bunny-database-drizzle/) - la misma base de datos con Drizzle en crudo en una app React
+- [Despliega un sitio Astro en Bunny.net](/deploy-astro-bunny-net/) - hosting estático en Bunny Storage y CDN
+- [Crea un blog gratis con Astro](/es/crear-blog-astro-gratis/) - consigue un proyecto inicial al que añadir una base de datos
+- [Bunny Storage vs S3 vs Backblaze](/es/bunny-storage-vs-s3-vs-backblaze/) - comparativa de precios de almacenamiento en la nube
+- [Montar un bucket S3 como sistema de archivos](/es/montar-bucket-s3-sistema-archivos-vps/) - ZeroFS y JuiceFS en Bunny Storage

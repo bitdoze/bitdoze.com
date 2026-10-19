@@ -1,0 +1,613 @@
+---
+date: 2026-07-27
+translationKey: "buzz-block-docker-setup"
+title: "Buzz de Block: Autoaloja tu Espacio de Trabajo de IA con Docker"
+meta_title: "Buzz de Block con Docker: Guía de Autoalojamiento (2026)"
+description: "Autoaloja Buzz de Block con Docker Compose en tu VPS. Guía paso a paso: generación de claves, configuración del relay, TLS con Caddy y conexión de la app de escritorio."
+image: "@assets/images/26/07/buzz-block-docker-setup-cover.webp"
+categories:
+  - self-hosting
+authors:
+  - "Dragos"
+tags:
+  - buzz
+  - docker
+  - ai-agents
+canonical: "https://www.bitdoze.com/es/configuracion-buzz-block-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Buzz de Block es un espacio de trabajo de código abierto y autoalojable donde humanos y agentes de IA comparten los mismos canales, hilos, DMs, repos git y flujos de trabajo automatizados. Lo desarrolla Block, Inc. (la empresa detrás de Square y Cash App), se publicó bajo Apache 2.0 en julio de 2026 y tiene más de 13.700 estrellas en GitHub.
+
+Esta guía te lleva paso a paso para ejecutar Buzz en tu propio VPS con Docker Compose. Todos los comandos se pueden copiar y pegar. Te aviso de las trampas antes de que pises encima.
+
+## ¿Qué es Buzz de Block?
+
+Si alguna vez has hecho malabares con Slack para el chat, GitHub para el código, Linear para las tareas y un montón de código pegamento para que se hablen entre sí, Buzz intenta reemplazar todo eso con un solo espacio de trabajo. Un registro de eventos. Un modelo de identidad. Un índice de búsqueda.
+
+Esto es lo que reemplaza en la práctica:
+
+- **Slack/Teams**: canales, hilos, DMs, reacciones, compartir archivos multimedia
+- **GitHub/GitLab**: alojamiento git, revisión de PRs, discusiones de ramas, integración con CI
+- **Linear/Jira**: automatización de flujos de trabajo con triggers YAML y puertas de aprobación
+- **Discord**: salas de voz (huddles) vía relay Opus sobre WebSocket (sin SFU externo)
+
+La diferencia con los bots de Slack: los agentes en Buzz son miembros de pleno derecho. Cada agente tiene su propio par de claves Nostr, sus propias membresías de canales y su propio rastro de auditoría. Delimitado por identidad, no por flags de permisos. Puedes conectar Claude Code, Codex, Goose o cualquier agente que hable ACP (Agent Communication Protocol). Trae tus propias claves de LLM. Buzz no proporciona inferencia.
+
+Por dentro, cada mensaje, reacción, commit, revisión y paso de flujo de trabajo es un evento Nostr firmado criptográficamente en un relay que te pertenece. Esto no es blockchain, no hay token, no hay minería. Son eventos firmados para la identidad y la integridad de los mensajes, almacenados en tu base de datos Postgres.
+
+![Diagrama de la arquitectura del relay de Buzz de Block mostrando la app de escritorio conectándose al relay en Rust, que habla con Postgres, Redis y MinIO](@assets/images/26/07/buzz-architecture.svg)
+
+Si ya has probado [plataformas de chat de equipo autoalojadas](https://www.bitdoze.com/chatto-self-hosted/), Buzz es diferente. Combina chat, git, flujos de trabajo y agentes en un solo registro de eventos.
+
+<Notice type="info" title="Software previo al lanzamiento">
+Buzz está en pre-1.0 con releases diarias (v0.4.26 a 25 de julio de 2026). Funciona. El relay, los canales, los hilos, los DMs, los canvas, la búsqueda, los flujos de trabajo, el alojamiento git, la app de escritorio y las salas de voz están todos operativos. Pero espera bordes ásperos. Consulta la página de [releases en GitHub](https://github.com/block/buzz/releases) para la última versión.
+</Notice>
+
+## Qué necesitas para autoalojar Buzz
+
+<ListCheck>
+
+- Un VPS con Docker y Docker Compose v2.24.4+ instalados
+- 2 vCPU mínimo, 4 GB de RAM recomendados, 20-40 GB de SSD
+- Un dominio apuntando a tu servidor (necesario para TLS/producción)
+- Puertos 3000 (relay), 80 y 443 (si usas Caddy para TLS)
+- 15-30 minutos
+- Soltura básica con la terminal. No hace falta saber Nostr.
+
+</ListCheck>
+
+**Dimensionado del VPS:** El stack completo ejecuta Postgres 17, Redis 7, MinIO y el relay en Rust. En reposo estás mirando aproximadamente 1,5-2 GB de RAM. Postgres consumirá toda la RAM que le des para la búsqueda de texto completo y la caché. Un [Hetzner Cloud](https://go.bitdoze.com/hetzner) CX22 (2 vCPU, 4 GB de RAM, 3,99 €/mes) o un CX32 (4 vCPU, 8 GB, 7,99 €/mes) funcionan bien. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) es otra opción económica.
+
+_Los precios de los VPS subieron en 2026 en todos los proveedores — si estás replanteándote una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="warning" title="La versión de Docker Compose importa">
+Ubuntu 22.04 trae Docker Compose v2.5 vía apt. Es demasiado vieja. El override de TLS de Buzz usa la etiqueta YAML `!reset`, que requiere v2.24.4+. Instala Docker desde el [repo oficial de Docker](https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository), no desde las fuentes apt por defecto de Ubuntu. Verifica con `docker compose version` antes de seguir.
+</Notice>
+
+Si ya has hecho setups con Docker Compose, como [instalar Umami Analytics](https://www.bitdoze.com/umami-analytics-install/) o [montar Outline Wiki](https://www.bitdoze.com/outline-install/), el flujo aquí es similar, solo que con más piezas móviles. Si prefieres un enfoque gestionado, [los paneles de servidores autoalojados como Coolify o Dokploy](https://www.bitdoze.com/best-self-hosted-panels/) pueden simplificar el despliegue.
+
+## Cómo autoalojar Buzz de Block con Docker Compose
+
+### Paso 1: Clona el repositorio y prepara tu directorio
+
+Los archivos de Docker Compose de producción viven en `deploy/compose/`, no en la raíz del repo. El `docker-compose.yml` de la raíz es solo para desarrollo. No lo uses en tu VPS.
+
+```bash
+git clone https://github.com/block/buzz.git
+cd buzz/deploy/compose
+ls -la
+```
+
+Deberías ver estos archivos:
+
+```
+compose.yml          # relay + postgres + redis + minio + minio-init
+compose.caddy.yml    # optional: Caddy reverse proxy with auto TLS
+compose.dev.yml      # optional: exposes dev ports (Adminer, MinIO console)
+.env.example         # template for your configuration
+run.sh               # management script (start/stop/upgrade/backup/add-member)
+```
+
+<Notice type="info" title="Archivos compose de producción vs. desarrollo">
+Usa `deploy/compose/` para tu despliegue en el VPS. El `docker-compose.yml` en la raíz del repo está pensado para desarrollo local y tiene una configuración diferente. El script `run.sh` en `deploy/compose/` se encarga de todo lo que necesitas.
+</Notice>
+
+### Paso 2: Genera los secretos y las claves de cifrado
+
+Buzz necesita varios secretos. Si pierdes la clave privada del relay o la clave privada del propietario, tu espacio de trabajo desaparece. Hazles una copia de seguridad inmediatamente después de generarlas.
+
+Ejecuta este bloque para generar todos los secretos de una vez:
+
+```bash
+# Generate all secrets at once
+echo "BUZZ_RELAY_PRIVATE_KEY=$(openssl rand -hex 32)"
+echo "BUZZ_GIT_HOOK_HMAC_SECRET=$(openssl rand -hex 32)"
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+echo "REDIS_PASSWORD=$(openssl rand -hex 16)"
+echo "BUZZ_S3_ACCESS_KEY=$(openssl rand -hex 16)"
+echo "BUZZ_S3_SECRET_KEY=$(openssl rand -hex 16)"
+```
+
+Copia la salida — la pegarás en `.env` en el siguiente paso.
+
+<Notice type="error" title="Haz copia de seguridad de tus claves de inmediato">
+Tu archivo `.env` contiene TODAS tus claves. Si lo pierdes y no tienes copia, pierdes el espacio de trabajo. Guárdalo en un gestor de contraseñas o en una copia cifrada justo después de generar los secretos. La clave privada del relay (`BUZZ_RELAY_PRIVATE_KEY`) nunca debe cambiar — si la regeneras, los datos existentes se vuelven inaccesibles.
+</Notice>
+
+Ahora necesitas un **par de claves Nostr de propietario**. El propietario es el administrador del espacio de trabajo. Aquí tienes dos formas de generarlo:
+
+<Tabs>
+<Tab name="App de escritorio (recomendado)">
+
+Este método mantiene la clave privada en tu dispositivo — nunca toca el servidor.
+
+1. Descarga la [app de escritorio de Buzz](https://github.com/block/buzz/releases/latest)
+2. En el primer arranque, haz clic en **"Create a new identity key"**
+3. La app genera un par de claves Nostr y lo guarda localmente
+4. Copia tu **clave pública** (empieza por `npub1...`)
+5. Convierte el `npub` a hex — puedes usar este one-liner:
+
+```bash
+npx @cmdcode/nip19 decode npub1yourkeyhere
+```
+
+6. La salida en hex es lo que pones como `RELAY_OWNER_PUBKEY` (64 caracteres hex, sin el prefijo `npub`)
+
+</Tab>
+<Tab name="CLI buzz-admin">
+
+Si prefieres generar la clave en el servidor:
+
+```bash
+# Run inside the relay container after first start
+docker compose exec relay buzz-admin generate-key
+```
+
+Esto te da un pubkey hex y una clave privada. Guarda la clave privada en un lugar seguro — la necesitarás para la app de escritorio.
+
+</Tab>
+</Tabs>
+
+### Paso 3: Configura el archivo `.env`
+
+Copia el ejemplo y rellena tus valores:
+
+```bash
+cp .env.example .env
+```
+
+Aquí tienes cada variable explicada, agrupada por categoría:
+
+```bash
+# ── Image tag ─────────────────────────────────────────────────
+# Pin to a SHA tag for production (ghcr.io/block/buzz:sha-abc1234)
+# Using :main pulls the latest build, which changes frequently
+BUZZ_IMAGE=ghcr.io/block/buzz:main
+
+# ── Domain config ─────────────────────────────────────────────
+# Replace buzz.example.com with your actual domain
+BUZZ_DOMAIN=buzz.example.com
+RELAY_URL=wss://buzz.example.com
+BUZZ_MEDIA_BASE_URL=https://buzz.example.com/media
+BUZZ_MEDIA_SERVER_DOMAIN=buzz.example.com
+BUZZ_CORS_ORIGINS=https://buzz.example.com
+
+# ── Security ──────────────────────────────────────────────────
+BUZZ_REQUIRE_AUTH_TOKEN=true          # require auth for connections
+BUZZ_REQUIRE_RELAY_MEMBERSHIP=true    # only whitelisted members can join
+BUZZ_ALLOW_NIP_OA_AUTH=true           # allow NIP-OA auth
+BUZZ_AUTO_MIGRATE=true                # MUST be true for fresh databases
+BUZZ_GIT_CONFORMANCE_PROBE=true
+
+# ── Owner pubkey ──────────────────────────────────────────────
+# Your hex pubkey from Step 2 (64 chars, no 0x prefix)
+# ⚠️  NOTE: NO "BUZZ_" prefix on this variable!
+RELAY_OWNER_PUBKEY=your_64_char_hex_owner_pubkey
+
+# ── Relay signing key ─────────────────────────────────────────
+# Generated in Step 2. NEVER rotate this.
+BUZZ_RELAY_PRIVATE_KEY=your_64_char_hex_relay_private_key
+
+# ── Git HMAC secret ───────────────────────────────────────────
+BUZZ_GIT_HOOK_HMAC_SECRET=your_64_char_hex_hmac_secret
+
+# ── Database ──────────────────────────────────────────────────
+POSTGRES_DB=buzz
+POSTGRES_USER=buzz
+POSTGRES_PASSWORD=your_random_postgres_password
+
+# ── Redis ─────────────────────────────────────────────────────
+REDIS_PASSWORD=your_random_redis_password
+
+# ── S3 / MinIO ────────────────────────────────────────────────
+BUZZ_S3_ACCESS_KEY=your_random_access_key
+BUZZ_S3_SECRET_KEY=your_random_secret_key
+BUZZ_S3_BUCKET=buzz-media
+
+# ── Ports ─────────────────────────────────────────────────────
+BUZZ_HTTP_PORT=3000
+CADDY_HTTP_PORT=80
+CADDY_HTTPS_PORT=443
+
+# ── Logging ───────────────────────────────────────────────────
+RUST_LOG=buzz_relay=info,buzz_db=info,buzz_auth=info,buzz_pubsub=info,tower_http=info
+```
+
+<Notice type="warning" title="RELAY_OWNER_PUBKEY no lleva el prefijo BUZZ_">
+Esto es intencional y una trampa habitual. La variable es `RELAY_OWNER_PUBKEY`, no `BUZZ_RELAY_OWNER_PUBKEY`. Si añades el prefijo `BUZZ_`, se ignorará silenciosamente y tu identidad de propietario no funcionará.
+</Notice>
+
+<Accordion label="¿Qué hace BUZZ_AUTO_MIGRATE?" group="env-faq">
+Cuando arrancas Buzz contra una base de datos Postgres nueva, el esquema todavía no existe. `BUZZ_AUTO_MIGRATE=true` le dice al relay que aplique todas las migraciones pendientes al arrancar. Sin esto, el relay se caerá en el primer arranque porque no encuentra las tablas que necesita. Ponlo siempre a `true` en instalaciones nuevas. Es seguro dejarlo activado — las migraciones son idempotentes.
+</Accordion>
+
+### Paso 4: Arranca el stack de Docker
+
+Para pruebas iniciales (sin TLS):
+
+```bash
+./run.sh start
+```
+
+Esto ejecuta `docker compose up -d --wait` por debajo. Arranca cinco contenedores:
+
+| Contenedor | Qué hace |
+|-----------|----------|
+| **buzz-relay** | El servidor relay en Rust/Axum. Maneja WebSocket + REST. Verifica firmas Schnorr. Distribuye eventos vía pub/sub de Redis. |
+| **postgres:17-alpine** | Almacén de eventos con particionado mensual, búsqueda de texto completo (índice GIN), canales, membresías, flujos de trabajo, registro de auditoría. |
+| **redis:7-alpine** | Fan-out de pub/sub entre instancias del relay, seguimiento de presencia (TTL de 90 s), indicadores de "escribiendo" (ventana de 5 s). |
+| **minio** | Almacenamiento compatible con S3 para multimedia subida (protocolo Blossom) y packfiles de git. |
+| **minio-init** | Contenedor de un solo disparo que crea el bucket `buzz-media`. Se ejecuta una vez y sale. |
+
+Comprueba que todo esté en marcha:
+
+```bash
+./run.sh status
+```
+
+Verifica que el relay esté saludable:
+
+```bash
+curl -fsS "http://127.0.0.1:3000/_liveness"
+curl -fsS "http://127.0.0.1:3000/_readiness"
+```
+
+Ambos deberían devolver `200 OK`. Si no, mira los logs:
+
+```bash
+./run.sh logs relay
+```
+
+<Notice type="success" title="Verifica tu relay">
+Después de arrancar, ejecuta los comandos curl de liveness y readiness de arriba. Ambos deberían devolver 200. Si el contenedor del relay se está reiniciando, revisa `./run.sh logs relay` en busca de errores — el problema más común es una variable de entorno ausente o mal formada.
+</Notice>
+
+El script `run.sh` tiene más comandos útiles:
+
+```bash
+./run.sh stop           # docker compose down (keeps data volumes)
+./run.sh restart        # force-recreate relay container
+./run.sh upgrade        # pull new image + restart + print backup reminders
+./run.sh logs [svc]     # follow logs (default: relay)
+./run.sh status         # compose ps
+./run.sh config         # render merged compose config
+./run.sh backup-hint    # print backup checklist
+```
+
+## Añade TLS con Caddy (recomendado para producción)
+
+Sin TLS, tu relay corre en `ws://` (sin cifrar). Vale para probar en localhost, pero para producción necesitas `wss://` con un certificado válido. Buzz incluye Caddy como overlay de compose — se encarga de Let's Encrypt automáticamente.
+
+**Paso 1:** Crea un registro DNS A que apunte tu dominio (p. ej., `buzz.yourdomain.com`) a la IP de tu VPS.
+
+**Paso 2:** Espera a que el DNS propague. Compruébalo con:
+
+```bash
+dig +short buzz.yourdomain.com
+```
+
+**Paso 3:** Arranca con TLS activado:
+
+```bash
+BUZZ_COMPOSE_TLS=true ./run.sh start
+```
+
+Esto arranca el contenedor de Caddy junto a todo lo demás. Caddy obtiene automáticamente un certificado de Let's Encrypt, hace proxy de las conexiones WebSocket y maneja HTTP/2.
+
+**Paso 4:** Verifica que TLS funciona:
+
+```bash
+curl -I https://buzz.yourdomain.com/_liveness
+```
+
+Deberías obtener un `200 OK` con un certificado válido. También puedes abrir `https://buzz.yourdomain.com` en tu navegador — verás que el certificado está emitido por Let's Encrypt.
+
+<Notice type="info" title="La propagación del DNS lleva tiempo">
+Después de crear el registro A, espera 5-15 minutos antes de arrancar con TLS. Si el DNS no está listo cuando Caddy intenta emitir el certificado, fallará. Comprueba primero con `dig buzz.yourdomain.com`. Si necesitas un setup de reverse proxy alternativo, mira [CloudPanel como reverse proxy para Docker](https://www.bitdoze.com/cloudpanel-setup-dockge/).
+</Notice>
+
+Tu archivo `.env` ya debería tener las variables de puerto de Caddy definidas. Si necesitas cambiarlas:
+
+```bash
+CADDY_HTTP_PORT=80
+CADDY_HTTPS_PORT=443
+```
+
+Si no te sientes cómodo con los overlays de Docker Compose, [Coolify ofrece despliegues con un clic](/es/instalar-coolify-alternativa-heroku/) que pueden simplificar el proceso.
+
+## Conecta la app de escritorio de Buzz a tu relay
+
+La app de escritorio es una aplicación Tauri 2 (frontend en React, shell nativo) disponible para macOS, Linux y Windows.
+
+**Descárgala** desde [GitHub Releases](https://github.com/block/buzz/releases/latest):
+- macOS: `.dmg`
+- Linux: `.AppImage` o `.deb`
+- Windows: `.exe`
+
+<Notice type="info" title="Solo app de escritorio — aún no hay UI web">
+Por ahora Buzz es solo una app de escritorio. No hay UI web. Las apps móviles (Flutter) están en desarrollo. En Linux headless sin Secret Service (gnome-keyring), la app recurre a permisos de archivo `0600` para guardar las claves.
+</Notice>
+
+**Conexión a tu relay:**
+
+1. Abre la app de escritorio
+2. En el primer arranque, haz clic en **"Create a new identity key"** — esto genera un par de claves Nostr guardado localmente en tu dispositivo
+3. Haz clic en **"Join community"** (o ve a ajustes y cambia la URL del relay)
+4. Introduce la URL de tu relay:
+   - Con TLS: `wss://buzz.yourdomain.com`
+   - Sin TLS: `ws://your-server-ip:3000`
+5. Ya estás dentro. Como tu pubkey coincide con `RELAY_OWNER_PUBKEY`, tienes acceso de administrador total.
+
+**Primeras cosas para probar:**
+- Crea un canal (p. ej., `#general`)
+- Envía un mensaje, abre un hilo
+- Prueba un DM con otro miembro
+- Sube una imagen (prueba el setup de MinIO/S3)
+
+## Añade miembros del equipo y tu primer agente de IA
+
+### Añadir miembros del equipo
+
+Cada miembro del equipo necesita su propio par de claves Nostr. Lo generan en la app de escritorio (igual que tú) y luego te comparten su clave pública.
+
+Añádelos desde el servidor:
+
+```bash
+# Add a member (default role: member)
+./run.sh add-member <their_hex_pubkey>
+
+# Add an admin
+./run.sh add-member <their_hex_pubkey> --role admin
+
+# List all members
+./run.sh list-members
+
+# Remove a member
+./run.sh remove-member <their_hex_pubkey>
+```
+
+Los miembros comparten su pubkey copiándolo desde la app de escritorio. Si te pasan una dirección `npub1...`, conviértela a hex primero:
+
+```bash
+npx @cmdcode/nip19 decode npub1theirkeyhere
+```
+
+### Conectar tu primer agente de IA
+
+Los agentes en Buzz son miembros de pleno derecho, no bots añadidos vía API. Cada agente tiene su propio par de claves Nostr, sus propias membresías de canales y su propio rastro de auditoría.
+
+Para conectar un agente:
+
+1. Genera un par de claves para el agente:
+
+```bash
+docker compose exec relay buzz-admin generate-key
+```
+
+2. Añade el agente como miembro:
+
+```bash
+./run.sh add-member <agent_hex_pubkey>
+```
+
+3. Define `BUZZ_PRIVATE_KEY` en el entorno del agente — es la clave privada del agente para firmar eventos.
+
+4. El agente se comunica vía ACP (Agent Communication Protocol). Agentes compatibles: Claude Code, Codex, Goose o cualquier agente que hable ACP.
+
+<Notice type="info" title="Trae tus propias claves de LLM">
+Buzz no proporciona inferencia de IA. Necesitas tus propias claves API para el proveedor de LLM que usen tus agentes (OpenAI, Anthropic, modelos locales, etc.). El agente firma sus propios eventos con su clave Nostr y llama al LLM a través de su propio proveedor configurado. Si quieres construir un agente personalizado, mira [cómo crear tu propio agente de IA con Mastra](https://www.bitdoze.com/build-ai-agent-mastra/). Para enrutado multi-modelo, [Agent Router](https://go.bitdoze.com/agentrouter) da acceso unificado a Claude Code, OpenAI Codex y Gemini CLI.
+</Notice>
+
+Para conectar un [agente de IA autoalojado en Docker](/es/guia-configuracion-hermes-agent/), el patrón es el mismo: genera un par de claves, añade el agente como miembro y configura su entorno.
+
+<Accordion label="¿Cómo convierto npub a hex?" group="agent-faq">
+Nostr usa dos formatos para las claves públicas: `npub1...` (codificado en Bech32, legible por humanos) y hex crudo (64 caracteres, lo que necesita el relay). Para convertir:
+
+```bash
+# Using npx
+npx @cmdcode/nip19 decode npub1yourkeyhere
+
+# The output includes a "data" field — that's your hex pubkey
+```
+
+Como alternativa, usa una herramienta web como [nostr.com/npub2hex](https://nostr.com). El valor hex es lo que pasas a `RELAY_OWNER_PUBKEY` y a `./run.sh add-member`.
+</Accordion>
+
+## Operaciones del día 2 para tu espacio de trabajo de Buzz autoalojado
+
+### Copias de seguridad
+
+Tu archivo `.env` contiene todas tus claves. Hazle copia primero, siempre.
+
+```bash
+# Print the backup checklist
+./run.sh backup-hint
+```
+
+Qué respaldar:
+
+| Elemento | Por qué | Cómo |
+|----------|---------|------|
+| `.env` | Contiene todas las claves. Perderlo = perder el espacio de trabajo. | Cópialo a un gestor de contraseñas o almacenamiento cifrado |
+| Volumen de datos de Postgres | Todos los eventos, canales, membresías, flujos de trabajo | `pg_dump` o snapshot del volumen Docker |
+| Volumen de datos de MinIO | Multimedia subida y packfiles de git | Copia el volumen o usa `mc mirror` hacia S3 |
+
+Frecuencia: diaria para producción, semanal como mínimo para setups de prueba.
+
+### Actualizaciones
+
+```bash
+./run.sh upgrade
+```
+
+Esto descarga la nueva imagen, reinicia el relay e imprime recordatorios de copia de seguridad. Las migraciones se ejecutan automáticamente si `BUZZ_AUTO_MIGRATE=true`.
+
+Para producción, fija un tag de imagen específico en lugar de `:main`:
+
+```bash
+BUZZ_IMAGE=ghcr.io/block/buzz:sha-abc1234
+```
+
+Consulta la [página de releases](https://github.com/block/buzz/releases) para tags estables.
+
+### Monitorización
+
+```bash
+# Quick health check
+./run.sh status
+
+# Health endpoints
+curl -fsS "http://127.0.0.1:3000/_liveness"
+curl -fsS "http://127.0.0.1:3000/_readiness"
+
+# Follow relay logs
+./run.sh logs relay
+
+# Follow database logs
+./run.sh logs postgres
+```
+
+Para una gestión de logs más avanzada, mira [cómo redirigir los logs de Docker a un solo archivo](/es/redirigir-logs-docker-un-solo-archivo/).
+
+### Uso de recursos
+
+RAM estimada en reposo para el stack completo:
+
+| Componente | RAM (en reposo) | Notas |
+|-----------|-----------------|-------|
+| Postgres 17 | ~300-500 MB | Crece con los datos. Los índices GIN de FTS pueden ser pesados. |
+| Redis 7 | ~50-100 MB | Ligero. |
+| MinIO | ~100-200 MB | Depende del volumen de objetos multimedia/git. |
+| buzz-relay | ~50-100 MB | Binario en Rust, eficiente. |
+| **Total** | **~500 MB-1 GB** | Más el overhead del SO. Se recomienda un VPS de 4 GB. |
+
+## Solución de problemas habituales de Buzz con Docker
+
+<Accordion label="Placeholders CHANGE_ME sin reemplazar" group="troubleshooting">
+`run.sh` busca `CHANGE_ME` en tu `.env` y se niega a arrancar si queda alguno. Genera secretos reales con los comandos del Paso 2 y reemplaza cada valor `CHANGE_ME`.
+</Accordion>
+
+<Accordion label="BUZZ_AUTO_MIGRATE no está definido" group="troubleshooting">
+Las bases de datos Postgres nuevas necesitan que se apliquen las migraciones del esquema. Si el relay se cae en el primer arranque con errores de tabla no encontrada, asegúrate de que `BUZZ_AUTO_MIGRATE=true` está en tu `.env`. También puedes ejecutar las migraciones a mano: `docker compose exec relay buzz-admin migrate`.
+</Accordion>
+
+<Accordion label="RELAY_OWNER_PUBKEY tiene el prefijo equivocado" group="troubleshooting">
+La variable es `RELAY_OWNER_PUBKEY`, NO `BUZZ_RELAY_OWNER_PUBKEY`. La ausencia del prefijo `BUZZ_` es intencional. Si añades el prefijo, el valor se ignora silenciosamente y tu identidad de propietario no se reconocerá. Revisa tu archivo `.env`.
+</Accordion>
+
+<Accordion label="La rotación de claves rompe los datos" group="troubleshooting">
+`BUZZ_RELAY_PRIVATE_KEY`, los secretos de S3 y las contraseñas de la base de datos deben permanecer estables entre reinicios. Si los regeneras, los datos existentes se vuelven inaccesibles. Nunca regeneres claves de un espacio de trabajo existente. Haz copia de `.env` inmediatamente después de generar los secretos.
+</Accordion>
+
+<Accordion label="Versión de Docker Compose demasiado vieja" group="troubleshooting">
+Buzz necesita Docker Compose v2.24.4+. El override de TLS usa la etiqueta YAML `!reset`, que las versiones antiguas no soportan. En Ubuntu 22.04, la versión de apt es demasiado vieja. Instala desde el repo oficial de Docker: `curl -fsSL https://get.docker.com | sh`. Verifica con `docker compose version`.
+</Accordion>
+
+<Accordion label="El puerto 3000 ya está en uso" group="troubleshooting">
+Cambia `BUZZ_HTTP_PORT` en `.env` a un puerto disponible. Mira qué está usando el puerto 3000: `ss -tlnp | grep 3000`. Para el setup con TLS, Caddy maneja los puertos 80/443 — asegúrate de que también estén libres.
+</Accordion>
+
+<Accordion label="La app de escritorio no puede conectar con el relay" group="troubleshooting">
+Causas habituales:
+1. **Firewall** — Asegúrate de que el puerto 3000 (o tu puerto personalizado) esté abierto. Para TLS, los puertos 80 y 443 deben estar abiertos.
+2. **Esquema de URL equivocado** — Usa `wss://` para TLS, `ws://` para conexiones en claro. Confundirlos es el error más común.
+3. **Certificado autofirmado** — Caddy usa Let's Encrypt (certificado válido). Los certificados autofirmados no funcionan sin configuración extra en el cliente.
+4. **El relay no escucha en 0.0.0.0** — Revisa `BUZZ_BIND_ADDR` si lo definiste.
+
+Prueba desde el servidor: `curl -fsS "http://127.0.0.1:3000/_liveness"`. Si eso funciona pero la app no puede conectar, es un problema de firewall o DNS.
+</Accordion>
+
+<Accordion label="El bucket de MinIO no se crea" group="troubleshooting">
+El servicio `minio-init` crea el bucket `buzz-media` en el primer arranque. Si falla, las subidas de multimedia fallarán silenciosamente. Comprueba: `docker compose logs minio-init`. Causa habitual: credenciales de MinIO incorrectas en `.env`.
+</Accordion>
+
+<Accordion label="No hay rate limiter de producción" group="troubleshooting">
+Buzz define niveles de rate limit en el código (human, agent-standard, agent-elevated, agent-platform) pero la única implementación es un stub de pruebas (`AlwaysAllowRateLimiter`). NO hay rate limiter de producción. No expongas un relay abierto a Internet público sin protección adicional — usa reglas de firewall, Cloudflare o una VPN.
+</Accordion>
+
+## Asperezas conocidas (valoración honesta)
+
+Buzz es software pre-1.0 que avanza rápido. Esto es lo que está roto o incompleto a julio de 2026:
+
+<Notice type="warning" title="Esto es software pre-lanzamiento">
+Buzz evoluciona rápido. Fija tu tag de imagen, haz copia de seguridad antes de actualizar y espera bordes ásperos. Genial para equipos pequeños cómodos con el autoalojamiento; todavía no está listo para requisitos de SSO empresarial.
+</Notice>
+
+- **Sin rate limiter de producción** — solo existe un stub de pruebas. No expongas un relay abierto públicamente sin protección extra.
+- **Las puertas de aprobación en los flujos de trabajo** no están del todo cableadas (limitación conocida). La infraestructura existe pero los pasos `request_approval` se marcan como Failed en lugar de Waiting.
+- **Las acciones de flujo de trabajo `send_dm` y `set_channel_topic`** están stubbeadas — aún no funcionan.
+- **Las apps móviles** están en desarrollo (Flutter). Hoy no hay cliente móvil.
+- **El alojamiento git** funciona pero es temprano. Para CI/CD maduro, quédate con GitHub/GitLab por ahora.
+- **Una comunidad por relay** — un relay = una comunidad. La URL ES el espacio de trabajo.
+- **Las salas de voz** funcionan pero usan un relay Opus sobre WebSocket (sin SFU externo). La calidad depende del ancho de banda de tu servidor.
+
+## ¿Es autoalojar Buzz de Block adecuado para ti?
+
+**Buzz tiene sentido cuando:**
+- Tienes un equipo pequeño (2-20 personas) cómodo con Docker y Linux
+- Quieres un espacio de trabajo nativo de agentes donde humanos e IA comparten el mismo contexto
+- Te importa la propiedad de los datos y no quieres vendor lock-in
+- Estás dispuesto a tolerar asperezas de pre-1.0 a cambio de una herramienta que evoluciona rápido
+
+**Buzz no tiene sentido cuando:**
+- Necesitas SSO/SAML empresarial hoy
+- No puedes tolerar roturas ocasionales por actualizaciones rápidas
+- Solo quieres Slack — usa Slack
+- Necesitas una app móvil madura ahora mismo
+- Necesitas certificaciones de cumplimiento (SOC 2, HIPAA, etc.)
+
+**Comparación de costes para un equipo de 10 personas:**
+
+| Stack | Coste mensual |
+|-------|---------------|
+| Slack Pro (8,75 $/usuario) + GitHub Team (4 $/usuario) + Linear Basic (10 $/usuario) | ~228 $/mes |
+| Buzz en un Hetzner CX22 | 3,99 €/mes + tus costes de API de LLM |
+
+Son unos 220 $/mes ahorrados, y los datos son tuyos. La contrapartida es que tú eres el equipo de operaciones.
+
+<Button text="Dale una estrella a Buzz en GitHub" link="https://github.com/block/buzz" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+Si quieres probarlo, arranca tu espacio de trabajo de Buzz en un [Hetzner CX22](https://go.bitdoze.com/hetzner) por 3,99 €/mes. Puedes tenerlo funcionando en 30 minutos con esta guía. Desmóntalo si no te gusta. Sin vendor lock-in, sin contratos.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Buzz de Block es gratis?" group="faq" expanded="true">
+Sí. Buzz es open source bajo Apache 2.0. Pagas tu propio VPS y tus propias claves de API de LLM. No hay nivel de pago, ni clave de licencia, ni funciones bloqueadas.
+</Accordion>
+
+<Accordion label="¿Necesito saber Nostr para usar Buzz?" group="faq">
+No. La app de escritorio se encarga de generar el par de claves. Esta guía cubre el setup del lado del servidor. Interactuarás con conceptos de Nostr (pubkeys, eventos firmados) pero las herramientas abstraen casi todo.
+</Accordion>
+
+<Accordion label="¿Cuál es el VPS mínimo para ejecutar Buzz?" group="faq">
+2 vCPU y 2 GB de RAM funcionan pero va justo. Recomendado: 2-4 vCPU, 4 GB de RAM, 40 GB SSD. Un Hetzner CX22 (3,99 €/mes) es un buen punto de partida.
+</Accordion>
+
+<Accordion label="¿Puedo usar Buzz con OpenAI, Anthropic o modelos locales?" group="faq">
+Sí. Buzz es agnóstico al modelo. Traes tus propias claves de API de LLM para el proveedor que usen tus agentes. El relay no hace inferencia — los agentes se encargan ellos mismos.
+</Accordion>
+
+<Accordion label="¿Esto es blockchain? ¿Necesito cripto?" group="faq">
+No. Nostr usa firmas criptográficas (Schnorr/secp256k1) para la identidad y la integridad de los mensajes. Sin tokens, sin minería, sin blockchain. Solo eventos firmados en una base de datos Postgres.
+</Accordion>
+
+<Accordion label="¿Puedo ejecutar varias comunidades de Buzz en un servidor?" group="faq">
+Actualmente una comunidad por relay. La URL es el espacio de trabajo. Existe un modo multi-comunidad en el código pero no es el setup autoalojado por defecto.
+</Accordion>
+
+<Accordion label="¿Sigo necesitando GitHub si Buzz tiene alojamiento git?" group="faq">
+Buzz tiene alojamiento git con revisión de PRs e integración con CI, pero es temprano. Para pipelines de CI/CD maduros, quédate con GitHub o GitLab por ahora y usa Buzz para la comunicación y coordinación.
+</Accordion>
+
+<Accordion label="¿Cómo hago copia de seguridad de mi espacio de trabajo de Buzz?" group="faq">
+Haz copia de tres cosas: `.env` (¡las claves!), el volumen de datos de Postgres y el volumen de datos de MinIO. Ejecuta `./run.sh backup-hint` para una checklist. Copias diarias para producción, semanales como mínimo para pruebas.
+</Accordion>
+
+Buzz encaja junto a los asistentes personales y los agentes de código en el stack más amplio. Mira [los mejores repos de IA en GitHub](/es/mejores-repos-github-ia/) para OpenClaw, Hermes, Pi, OpenCode y herramientas relacionadas.

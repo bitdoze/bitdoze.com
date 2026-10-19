@@ -1,0 +1,177 @@
+---
+date: 2026-10-08T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "superlogical-rex"
+title: "Superlogical Rex: el Creador de Ghostty Repiensa el Multiplexor de Terminal"
+meta_title: "Superlogical Rex: el Multiplexor de Terminal del Creador de Ghostty"
+description: "Rex es el multiplexor de terminal de Mitchell Hashimoto: streaming PTY crudo a clientes, sesiones persistentes, logins remotos estilo SSH, config en Lua y una CLI scriptable."
+image: "@assets/images/26/10/superlogical-rex-cover.webp"
+imageAlt: "Multiplexor de terminal Superlogical Rex"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["rex", "superlogical", "terminal"]
+canonical: "https://www.bitdoze.com/es/superlogical-rex/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+
+Rex es el multiplexor de terminal que Mitchell Hashimoto lleva construyendo en Superlogical desde HashiCorp y Ghostty. Es un emulador de terminal y un multiplexor en una sola aplicación nativa: abres la app, estás en un terminal, y las sesiones, splits y persistencia ya están ahí. Al 5 de octubre está en [prueba pública](https://www.superlogical.com/updates/public-testing-beginning) (invitaciones por lista de correo, macOS primero), pero la documentación ya es pública y Hashimoto ha publicado dos largos recorridos de cómo funciona. Hay material real suficiente para escribir un briefing en condiciones, así que aquí está.
+
+![La app Rex para macOS: pestañas de sesión arriba, paneles divididos corriendo una revisión de código Codex, una TUI de git diff y un juego Snake](@assets/images/26/10/superlogical-rex-ui.webp)
+
+## Qué es Rex
+
+No corres Rex dentro de otro terminal como [tmux](/es/tmux-comandos-basicos/) corre dentro de Kitty o [Ghostty](/es/terminal-ghostty/); él *es* el terminal. El pitch de Superlogical es "un reemplazo directo del terminal que uses hoy", con sesiones persistentes, conexiones remotas y estado de actividad de programas encima.
+
+El vocabulario son cuatro sustantivos, y aparecen por todas partes en la CLI y la config:
+
+- Una **sesión** es un grupo de trabajo, normalmente un proyecto. El servidor la mantiene viva haya o no alguien mirándola.
+- Una **ventana** es una pestaña dentro de una sesión. Contiene un layout de bloques.
+- Un **bloque** es una aplicación en una ventana. Hoy eso significa un terminal.
+- Un **cliente** es un programa conectado al servidor, como la app de macOS.
+
+El servidor lo posee todo. Los clientes se conectan, renderizan, se desconectan. Cierra la app a mitad de un build, vuelve a abrirla, y estás de vuelta en la misma sesión donde la dejaste.
+
+## Por qué la arquitectura es diferente (y por qué importa)
+
+Esta es la parte que vale entender, porque es la razón por la que Rex existe en vez de ser otra skin de tmux.
+
+Un multiplexor tradicional se sienta entre tu emulador de terminal y el PTY. Terminal → [tmux](/es/tmux-comandos-basicos/) → shell. Cada byte se parsea dos veces: una por el modelo de terminal interno del multiplexor, otra por tu emulador. E históricamente, los núcleos de terminal dentro de tmux, screen y zellij son lentos al lado de los emuladores modernos. Hashimoto lo dice sin rodeos en su recorrido de arquitectura: Ghostty, Kitty y Alacritty son a veces 100x más rápidos en IO de terminal que el emulador dentro de un multiplexor, así que atornillar uno delante de tu terminal rápido te da, en sus palabras, "esa experiencia lenta en un terminal rápido".
+
+![Quién parsea el flujo PTY: los multiplexores tradicionales se sientan entre tu terminal y el shell y parsean los bytes dos veces; Rex deriva bytes crudos a instancias libghostty por cliente](@assets/images/26/10/superlogical-rex-data-path.webp)
+
+Rex invierte quién hace el parsing:
+
+1. **El servidor posee el PTY.** Cuando un cliente se conecta, el servidor pausa el procesamiento del PTY un momento y envía un frame binario personalizado con justo el estado suficiente (dimensiones, cursor, pantalla actual) para que el cliente renderice. Luego un frame de listo: puedes escribir, seleccionar y hacer scroll mientras todo lo demás carga.
+2. **Bytes crudos, no diffs de pantalla.** En vez de seguir un modelo de pantalla compartido y enviar diffs, el servidor deriva los bytes PTY crudos a cada cliente, como SSH. Cada cliente corre libghostty y parsea independientemente. Si el servidor alguna vez parsea lento, a tu cliente le da igual.
+3. **El scrollback se transmite detrás.** Primero el chunk más nuevo, con un estado de carga mientras el historial se rellena. Y como el cliente posee su propio viewport, dos clientes conectados pueden hacer scroll en la misma sesión independientemente, lo que arregla el famoso comportamiento de tmux donde una persona haciendo scroll mueve la pantalla de todos.
+
+Dos consecuencias que vale conocer:
+
+- **Sin multiplexado dentro de la ventana.** Cada split es su propia conexión PTY renderizada como pestaña, split o ventana nativa. Eso es lo que hace posibles los clientes iOS y navegador, y es por qué un árbol de paneles estilo tmux no es el modelo. Un modo de compatibilidad legacy para terminales tontos (una capa libghostty en medio, el mismo trade-off que hace tmux pero con un núcleo más rápido) aún se está discutiendo.
+- **El input sigue centralizado.** Las pulsaciones de teclas se serializan por el servidor, un escritor y muchos lectores, así que el estado autoritativo nunca se bifurca aunque un cliente se desincronice. Un cliente desviado simplemente reejecuta el handshake.
+
+Como el cliente es el emulador de terminal, el soporte de funciones sigue a libghostty. La brecha del protocolo de gráficos Kitty que tmux nunca cerró es el tipo de cosa que aterriza mucho más rápido aquí, porque Superlogical envía el motor de terminal.
+
+## Hosts remotos: discretamente un reemplazo de SSH
+
+La segunda demo es la que me hizo incorporarme. Rex no es solo persistencia local. Desde la paleta de comandos añades un host remoto (Hashimoto lo demuestra contra un VPS en su tailnet), y lo que se abre parece SSH pero no es SSH:
+
+- Hace un **login de sistema real**. La sesión aparece en `who`, tu login shell se carga, los límites por usuario se respetan. Hashimoto dice que ni siquiera corre SSH en esa máquina; Rex es cómo entra, incluyendo como root. Un mapeo del lado servidor controla qué identidades pueden actuar como qué usuarios, y las claves SSH existentes se respetan.
+- **`rex whoami` reporta la cadena de identidad.** En la demo muestra que conectó como `mitchellh` vía su identidad Tailscale a través de un par de saltos. La autenticación remota viaja sobre la identidad de red que ya tienes.
+- **Se siente local.** Describe haber tomado ideas arquitectónicas de Mosh para la respuesta, sin reclamar paridad completa con Mosh. Matar una sesión remota vía `rex session kill` se propaga antes de que puedas reabrir la app.
+- **Todo lo local funciona en remoto.** El salto a directorio `Cmd+Shift+G` también funciona en hosts remotos. "Todo lo que funciona local debería funcionar remoto" es una regla de diseño declarada.
+
+Las sesiones locales no necesitan nada remoto. Los hosts remotos son para cuando quieres la misma persistencia en un VPS.
+
+## La CLI rex es la superficie de control
+
+Cada terminal que abre Rex obtiene `rex` en su PATH automáticamente, más tres variables de entorno que le dicen a la CLI dónde está:
+
+| Variable | Contiene |
+|---|---|
+| `REX_SESSION` | ID de la sesión a la que pertenece el terminal |
+| `REX_BLOCK` | ID del bloque propio del terminal |
+| `REX_SERVER` | Dirección del servidor que corre el terminal |
+
+Así que `rex split` dentro de un panel divide ese panel. Para actuar en otro sitio, apunta con `-s` (sesión), `-w` (ventana), `-b` (bloque), `-C` (cliente) o `-S` (servidor). Los objetivos se resuelven en un orden fijo: ID completo, luego label, luego posición, luego un sufijo de ID de 4+ caracteres. Un objetivo ambiguo no cambia nada: lista las coincidencias y sale con estado 3.
+
+```sh
+rex ls                              # list sessions
+rex session inspect                 # details of the session you're in
+rex send -s build -w 2 'make test'  # type into window 2 of the "build" session
+rex capture -b logs                 # print the screen of the block labeled "logs"
+rex -S studio ls                    # sessions on the host labeled "studio"
+```
+
+La mayoría de comandos aceptan `--json` (salida estable con IDs completos, hecha para scripts) y devuelven códigos de salida con significado: `0` ok, `1` falló, `2` línea de comandos mala, `3` objetivo inexistente o ambiguo, `4` servidor inalcanzable, `130` interrumpido. `rex wait` y `rex run --wait` adoptan el estado de salida del programa envuelto, así que los scripts componen limpiamente. Es la misma filosofía "todo es automatizable" de cmux, llevada más lejos.
+
+## La configuración es Lua, y las acciones personalizadas son reales
+
+La config vive en un archivo: `~/.config/rex/init.lua` en macOS y Linux, `%AppData%\rex\init.lua` en Windows, `REX_CONFIG` pisa ambas. Rex no necesita config alguna, y `require` te permite dividir una grande en archivos.
+
+```lua
+rex.bind("cmd+d", "pane.split", { direction = "right" })
+rex.bind("ctrl+b>c", "window.new")  -- tmux-style prefix chords work
+```
+
+Dos detalles que la documentación deja claros y es fácil pasar por alto: el **servidor** lee el archivo, así que `rex config reload` debe correr en la máquina del servidor y es rechazado por una conexión remota. Y no hay file watching; la recarga es manual. `rex config check` valida un archivo sin aplicarlo, una llamada `rex.*` errónea se salta con un error mientras el resto del archivo sigue cargando, y un error de sintaxis Lua duro mantiene la última config buena.
+
+Las acciones personalizadas son funciones Lua con nombre definidas con `rex.action`. Una vez definidas se comportan como las integradas: vinculables a teclas, buscables en la paleta de comandos, ejecutables desde la CLI con `rex do`:
+
+```lua
+rex.action{
+  name  = "scratch",
+  title = "Open Scratch Window",
+  run   = function(ctx, args)
+    rex.session.new_window{
+      layout = rex.layout.block{
+        flavor = "com.superlogical.terminal.shell",
+      },
+    }
+  end,
+}
+rex.bind("shift+cmd+n", "scratch")
+```
+
+Las acciones toman `args` tipados (o un JSON Schema completo como tabla Lua), reciben un `ctx` (`session_id`, `block_id`, `client_id`, `origin`), llaman a otras acciones por `rex.invoke`, y encolan acciones del lado cliente con `rex.client.queue`. Dos puertas que conocer: la app solo acepta acciones desde la CLI cuando **Remote Control** está activado en ajustes, y `rex do ~/.config/rex/init.lua --action scratch` corre una acción desde un archivo contra la sesión viva sin tocar la config en ejecución. Esa última es el bucle de iteración rápida.
+
+## Dónde puedes correrlo, y cuánto cuesta
+
+<ListCheck>
+  <ul>
+    <li>**App de macOS primero.** Autoaloja un servidor Rex localmente y se conecta a otros servidores Rex, así que el remoting Mac-a-Mac ya funciona.</li>
+    <li>**Otras plataformas están construidas, no enviadas.** Los servidores Rex corren en Linux y Windows internamente, y existen clientes iOS, Linux y Windows en "diversos estados de preparación".</li>
+    <li>**Gratis, sin cuenta, autoalojable.** Superlogical: "Rex es y será siempre gratis", clientes y servidores "no van a monetizarse directamente", sin compartición de datos. El plan de comercialización se promete antes del release estable.</li>
+    <li>**Acceso vía la lista de correo.** Las invitaciones salen en oleadas; unas 50 personas corrieron la prueba privada durante meses, y el equipo quiere limpiar toda la lista en menos de un mes.</li>
+  </ul>
+</ListCheck>
+
+Para conseguir un sitio, únete a la lista de correo en la [página del anuncio](https://www.superlogical.com/updates/public-testing-beginning). La [documentación](https://www.superlogical.com/rex/docs/installation) es pública y vale leerla incluso sin acceso; la referencia de CLI y Lua te cuenta la mayor parte de lo que es el producto.
+
+## Rex vs tmux vs Herdr
+
+| | Rex | tmux / zellij | Herdr |
+|---|---|---|---|
+| Qué es | App de terminal + multiplexor | Multiplexor dentro de tu terminal | Plano de control de agentes |
+| Cómo renderiza | Pestañas/splits nativos, libghostty por cliente | Modelo de pantalla interno difereado a tu terminal | TUI sobre un servidor de sesiones |
+| Historia remota | Remoting integrado, login de sistema real, respuesta estilo Mosh | SSH dentro, luego attach | SSH attach, clientes web/móvil |
+| Config | Lua (`init.lua`) | tmux.conf / KDL | `~/.config/herdr` |
+| Scripting | CLI `rex`, acciones Lua, `--json` | CLI + scripts shell | Socket API + CLI |
+| Estado | Nuevo, solo macOS | En todas partes, décadas de madurez | Open source, activo |
+
+Encuadre honesto: son herramientas diferentes resolviendo problemas diferentes. tmux es el incumbente con décadas de memoria muscular detrás. Rex apuesta a que el multiplexor debería ser el terminal. Herdr ni siquiera es un terminal, es un plano de control para agentes de código IA (sidebar de estado de agentes, socket API, plugins de marketplace). Si los agentes son tu problema real, empieza con mi [reseña de Herdr](/herdr-agent-multiplexer/) y las guías de los [mejores clientes Herdr](/es/mejores-clientes-herdr/) y [mejores plugins Herdr](/es/mejores-plugins-herdr/). Si la ergonomía del terminal es el problema, Rex es lo más interesante en este espacio desde zellij.
+
+## Aristas que conocer
+
+- **Solo macOS por ahora.** Sin workaround, sin sideload; las piezas de Linux y Windows existen pero aún no están en manos de testers.
+- **El flujo tmux no se porta 1:1.** Sin árbol de paneles dentro de la ventana; los splits son conexiones separadas en contenedores nativos. Los acordes de prefijo como `ctrl+b>c` funcionan en `rex.bind`, tu `.tmux.conf` no.
+- **La recarga de config es manual.** Sin file watching aún; `rex config reload` solo en la máquina del servidor.
+- **El reemplazo de SSH es real pero temprano.** Las demos muestran logins completos y respeto de claves SSH, pero el mapeo de identidades del lado servidor aún no está documentado en profundidad.
+- **La superficie de funciones sigue a libghostty.** Adopción rápida de funciones de terminal, pero el servidor sigue gobernando lo que una sesión puede hacer.
+
+## FAQ
+
+<Accordion label="¿Rex es gratis?" group="faq">
+  Sí. Superlogical dice "Rex es y será siempre gratis", sin cuenta requerida, servidores completamente autoalojables, y no ven ni comparten tus datos. Sea cual sea la comercialización eventual, se han comprometido a que no será el cliente ni el servidor en sí.
+</Accordion>
+
+<Accordion label="¿Puedo correr Rex en Linux o Windows hoy?" group="faq">
+  Todavía no. El cliente que se envía es la app de macOS. Los servidores Rex ya corren en Linux y Windows internamente, y existen clientes iOS, Linux y Windows en diversa preparación, pero ninguno está disponible para testers todavía.
+</Accordion>
+
+<Accordion label="¿Rex reemplaza a tmux?" group="faq">
+  Reemplaza el trabajo que hace tmux (persistencia, sesiones, splits, attach remoto) con un modelo diferente: bytes PTY crudos a emuladores de terminal por cliente en vez de un modelo de pantalla compartido. Lo que pierdes es el anidado de paneles dentro de la ventana y décadas de plugins de ecosistema. Lo que ganas es scrollback por cliente, UI nativa, remoting de primera clase, y una superficie scriptable en Lua y CLI. Nuestra [guía de tmux básico](/es/tmux-comandos-basicos/) muestra cómo es el flujo incumbente.
+</Accordion>
+
+<Accordion label="¿Rex funciona con mi config o tema de Ghostty?" group="faq">
+  Aún no documentado. Rex está construido sobre libghostty y las demos muestran manejo de temas estilo [Ghostty](/es/terminal-ghostty/), así que espera familiaridad más que una ruta de importación de config hoy.
+</Accordion>
+
+## La versión corta
+
+Rex es Mitchell Hashimoto argumentando que un multiplexor de terminal no debería emular un terminal en medio de tu terminal. El cliente parsea, el servidor transmite, las sesiones persisten, los remotos hacen login de verdad, y todo es scriptable en Lua. Es solo-macOS por ahora, pero la documentación es pública y la arquitectura es genuinamente diferente en vez de un reskin. [Únete a la lista de correo](https://www.superlogical.com/updates/public-testing-beginning) si quieres entrar.
+
+También vale una mirada: mi [guía de configuración de Ghostty](/es/terminal-ghostty/) (el mismo motor está bajo el capó de Rex) y la [guía de cmux](/cmux-terminal/), otro terminal basado en libghostty con una CLI de automatización que ya está disponible para macOS.

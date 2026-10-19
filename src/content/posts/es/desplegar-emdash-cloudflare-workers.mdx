@@ -1,0 +1,657 @@
+---
+date: 2026-10-05
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "deploy-emdash-cloudflare-workers"
+title: "Despliega EmDash en Cloudflare Workers: D1, R2 y Tier Gratis"
+meta_title: "Despliega EmDash en Cloudflare Workers (Tier Gratis + Costes)"
+description: "Despliega EmDash en Cloudflare Workers con D1 y R2: setup completo de wrangler, límites gratis vs de pago, costes reales, y una checklist de troubleshooting para un CMS a $0."
+image: "@assets/images/26/10/deploy-emdash-cloudflare-workers-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["emdash", "cloudflare", "cloudflare-workers"]
+series: ["EmDash CMS", "4"]
+canonical: "https://www.bitdoze.com/es/desplegar-emdash-cloudflare-workers/"
+---
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+Puedes desplegar EmDash en Cloudflare Workers por 0 $/mes, si sabes qué bindings quitar y qué límites vigilar. EmDash es el CMS basado en Astro con licencia MIT de Cloudflare. La 1.0 salió a finales de septiembre de 2026, y Cloudflare corre su propio blog sobre él. Un despliegue lleva el sitio, el panel de administración en `/_emdash/admin`, una REST API, auth con passkeys, una librería de medios, publicación programada y backups JSON. D1 guarda el contenido, R2 guarda los medios.
+
+El tier gratis es real, y tiene una arista dura: la plantilla de serie trae un binding `LOADER` para plugins de marketplace en sandbox, y Dynamic Workers está en beta abierta solo en Workers Paid (5 $/mes). Quita ese binding y un sitio plano corre a 0 $. Déjalo y pagas 5 $. Ese intercambio, más cada límite del plan gratis que te morderá, es lo que esta guía cubre de extremo a extremo: bindings, deploy, dominio, caching, medios, secrets, coste mensual real, y una checklist que demuestra que el deploy funciona.
+
+Si aún estás decidiendo sobre el propio CMS, lee primero [nuestra reseña de seis meses de EmDash CMS](/emdash-cms-review/). EmDash también entra en nuestra lista de [apps autoalojadas que corren enteramente en Cloudflare Workers](/self-hosted-apps-cloudflare-workers/). Mi propio [emdashhq.com](https://emdashhq.com/), un hub de tutoriales, temas y plugins de EmDash, corre sobre el stack exacto que esta guía despliega; sus números reales de dashboard están cerca del final.
+
+<Button text="EmDash en GitHub" link="https://github.com/emdash-cms/emdash" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/EbVsG5feCH8"
+  label="Deploy EmDash on Cloudflare Workers"
+/>
+
+## Cuánto cuesta desplegar EmDash en Cloudflare Workers
+
+Antes del cómo, la pregunta del dinero. EmDash en Cloudflare no es un producto, son siete servicios cosidos por bindings: Workers corre el código, D1 guarda contenido, R2 guarda medios, KV puede cachear resultados de queries, un cron trigger publica posts programados y escribe backups, un binding de Images hace transforms, y Email Sending entrega magic links. Cada uno tiene una asignación gratis y un suelo de pago.
+
+Hay dos resultados honestos:
+
+- **0 $/mes.** Workers Free más D1 free más R2 free más la asignación gratis de Images. Esto es un CMS completo para un blog personal o un pequeño sitio folleto. No cuesta nada y nunca lo hará, mientras el tráfico y los medios se queden dentro de las asignaciones gratis de abajo. Una puerta no obvia: R2 no se activa hasta que la cuenta tiene una tarjeta de crédito o PayPal guardado como método de pago — nada se cobra dentro de la asignación gratis, pero el primer deploy falla hasta que existe.
+- **5 $/mes.** Workers Paid. Ese es el suelo en el momento en que quieres plugins de marketplace en sandbox (helpers SEO, handlers de formularios, lo que sea del registro de plugins). También compra D1 Time Travel de 30 días, 10 GB por base de datos D1, y margen real de CPU.
+
+<Notice type="info" title="La versión de una línea">
+Gratis es real, pero la plantilla trae un binding de solo-pago. Lo quitamos en la sección de bindings de abajo y el deploy funciona bien sin él.
+</Notice>
+
+Dos números que conocer antes de empezar. Primero, el cron por defecto de la plantilla es `* * * * *`, cada minuto. Eso quema 1.440 invocaciones/día contra el presupuesto de 100.000 requests diarios del plan gratis antes de que aparezca un solo visitante. Bien para un sitio pequeño, pero es el 1,4% de tu asignación diaria gastada en scheduling. Segundo, el volumen de requests es la razón habitual por la que un sitio EmDash gratis empieza a dar errores, no el almacenamiento. La mayoría de bases de datos de contenido se quedan muy por debajo del tope de tamaño de D1; el techo de 100k requests/día es lo que los sitios en crecimiento golpean primero.
+
+Las cuentas de coste y ops para este stack son la misma historia que cubrimos en [el desglose de coste y ops de Astro vs WordPress](/astro-vs-wordpress/): la línea de hosting baja a cero cuando el cómputo baja a cero, y lo que pagas en su lugar es atención a los límites.
+
+## EmDash en el tier gratis de Cloudflare: qué te dan por 0 $
+
+En Workers Free obtienes el CMS completo. Panel de administración, REST API, auth con passkeys, librería de medios, publicación programada, backups JSON, transforms de imagen, auth compatible con magic links (necesita un setup de plugin, anotado abajo). A lo que renuncias es al marketplace de plugins: los plugins en sandbox necesitan Dynamic Workers, que es solo-pago. Los plugins de config nativa, los listados en `plugins: []` en `astro.config.mjs`, siguen corriendo en-proceso en gratis.
+
+**El tier gratis basta si:**
+
+<ListCheck>
+<ul>
+<li>Es un blog personal, portfolio o sitio folleto</li>
+<li>No necesitas plugins en sandbox o de marketplace</li>
+<li>El tráfico se queda bajo unas 100k requests/día</li>
+<li>Los medios se quedan bajo la asignación gratis de R2 (10 GB de almacenamiento)</li>
+<li>Tu base de datos de contenido se queda muy por debajo de 500 MB (salvo importaciones de WordPress pesadas en metadatos)</li>
+<li>Un editor o un equipo pequeño, no una redacción</li>
+</ul>
+</ListCheck>
+
+**Necesitas Workers Paid (5 $/mes) si:**
+
+<ListCheck>
+<ul>
+<li>Quieres plugins en sandbox del registro o marketplace</li>
+<li>Necesitas una base de datos D1 mayor de 500 MB</li>
+<li>Quieres D1 Time Travel de 30 días en vez de 7</li>
+<li>Publicas mucho y necesitas margen en escrituras KV o CPU de cron</li>
+<li>Las respuestas SSR se pasan regularmente de 10 ms de tiempo CPU por invocación</li>
+</ul>
+</ListCheck>
+
+### Gratis vs de pago: la tabla de límites que importa
+
+Esta es la tabla a tener abierta mientras decides. Las cifras son de las propias páginas de precios y límites de Cloudflare a las fechas marcadas en cada fuente (precios de Workers actualizados 28 ago 2026; límites de Workers 5 sep 2026; límites de D1 21 abr 2026; precios de R2 7 ago 2026; precios de Images 8 jul 2026; límites de Email Service 25 sep 2026). Vuelve a comprobar las páginas antes de presupuestar, estos números se mueven.
+
+| Capacidad | Workers Free | Workers Paid (base 5 $/mes) |
+|---|---|---|
+| Precio | 0 $ | 5 $/mes mínimo; +0,30 $/M requests sobre 10M; +0,02 $/M CPU-ms sobre 30M |
+| Requests del Worker | 100.000/día (resetea 00:00 UTC, luego error 1027) | 10M/mes incluidos |
+| Tiempo CPU | 10 ms por invocación (HTTP y cron) | 30s por defecto, hasta 5 min |
+| Tiempo de cron | 15 min | 15 min |
+| Cron triggers | 5 por cuenta | 250 por cuenta |
+| Subrequests | 50 por request | 10.000 por request |
+| Dynamic Workers (plugins en sandbox) | no disponible | beta abierta |
+| Filas D1 leídas / escritas | 5M/día / 100k/día | 25B/mes / 50M/mes incluidas |
+| Tamaño de base D1 | 500 MB por DB, 5 GB/cuenta, 10 DBs | 10 GB por DB, 1 TB/cuenta |
+| Queries D1 por invocación | 50 | 1.000 |
+| D1 Time Travel (PITR) | 7 días | 30 días |
+| Almacenamiento / ops R2 | 10 GB-mes; 1M Clase A (escrituras)/mes; 10M Clase B (lecturas)/mes; egress gratis | 0,015 $/GB-mes; 4,50 $/M Clase A; 0,36 $/M Clase B |
+| Lecturas / escrituras KV | 100k/día / 1.000/día; 1 GB | 10M + 0,50 $/M / 1M + 5,00 $/M; 1 GB + 0,50 $/GB-mes |
+| Images (transforms únicos) | 5.000/mes, luego error 9422 en transforms nuevos | 5.000 incluidos + 0,50 $ por 1.000 |
+| Email Sending | funciona desde Workers; las cuentas nuevas reciben una cuota diaria conservadora de escalado automático | misma mecánica, límites mayores bajo petición |
+| Requests de assets estáticos | gratis e ilimitados | gratis e ilimitados |
+| Workers Logs | 200k eventos/día, retención 3 días | 20M/mes incluidos, retención 7 días |
+
+Tres cosas que la tabla no dice en voz alta:
+
+1. **El tiempo CPU excluye la espera de I/O.** El tiempo esperando a D1, KV o `fetch` no cuenta contra los 10 ms. El problema es la CPU que sí usas: el SSR de EmDash hace varias idas y vueltas a D1 por request y ensambla respuestas en código Worker. Esa es exactamente la carga que los docs te dicen que vigiles en el límite gratis. El caching (abajo) es la mitigación; subir de plan es la otra.
+2. **Las respuestas de admin nunca se cachean.** EmDash envía `Cache-Control: private, no-store` en rutas de admin y API, así que el tráfico de editores no envenena tu edge cache. Significa que cada clic de admin es una invocación de Worker contra tu presupuesto diario.
+3. **Los hits de Workers Cache siguen contando como requests.** En gratis, un hit de caché es más barato (sin CPU), pero no es gratis del contador de requests. Presupuesta en consecuencia.
+
+<Notice type="warning" title="El error 1027 bloquea a todos, editores incluidos">
+Cuando el tope de 100k requests/día se agota, Cloudflare devuelve error 1027 a los siguientes. Decide por ruta si prefieres comportamiento fail-open o fail-closed cuando eso pase. Un sitio que crece más allá de 100k requests/día suele descubrir esto como "los editores no pueden entrar al CMS al mediodía", que es una mala forma de enterarte de tu tráfico.
+</Notice>
+
+### La trampa de Dynamic Workers: los plugins en sandbox necesitan pago
+
+Esta es la confusión recurrente en Reddit y en los foros, así que merece su propia sección. La plantilla EmDash viene con `worker_loaders` configurado por defecto. Dynamic Workers, la API Worker Loader que corre plugins en sandbox, está en beta abierta y disponible para **todos los usuarios de pago de Workers**. En una cuenta gratis, desplegar la plantilla por defecto falla o las instalaciones de plugins se niegan a funcionar. Si buscaste "cloudflare emdash free" y chocaste con un muro, casi siempre es este muro.
+
+<Notice type="error" title="Por esto falló tu deploy gratis">
+Desplegar la plantilla sin modificar en una cuenta gratis tropieza con el binding `LOADER`. La escotilla oficial de los docs de despliegue: si el sitio no usa plugins de marketplace, registro o `sandboxed`, omite `sandboxRunner` y el binding `LOADER` por completo. El CMS funciona sin ellos.
+</Notice>
+
+La división es limpia:
+
+- **Plan gratis:** CMS completo, solo plugins de config nativa (`plugins: []` en `astro.config.mjs`, corren en-proceso). Sin marketplace, sin registro, sin plugins en sandbox.
+- **Workers Paid (5 $/mes):** los plugins en sandbox del registro se instalan en tu bucket R2 y corren como Dynamic Workers con comprobaciones de capacidad por plugin (`content:read`, `email:send`, etc.).
+
+Una restricción más si vas a pago: los plugins en sandbox son solo-D1. El puente de plugins sandbox habla directamente con un binding D1, así que si planeabas adaptadores de base de datos exóticos con plugins en sandbox, no lo hagas.
+
+![Diagrama de decisión gratis vs de pago: la necesidad de plugins en sandbox lleva a Workers Free con LOADER quitado versus Workers Paid a cinco dólares al mes](@assets/images/26/10/emdash-free-vs-paid-flowchart.svg)
+
+## Lo que necesitas antes de desplegar EmDash
+
+Nada exótico, y nada fuera de Cloudflare. Sin VPS, sin Docker, sin cuenta S3 externa, sin proveedor de email de terceros requerido.
+
+<ListCheck>
+<ul>
+<li>Una cuenta de Cloudflare (el plan Free funciona si quitas los bindings de sandbox)</li>
+<li>Una tarjeta de crédito o PayPal guardada en la cuenta como método de pago — R2 no se activa sin una, aunque 10 GB de almacenamiento sean gratis; el primer deploy se bloquea en ello</li>
+<li>Un dominio ya activo en Cloudflare DNS, en la <strong>misma cuenta</strong> que el Worker (requerido para dominios personalizados)</li>
+<li>Node.js 20+ y pnpm o npm</li>
+<li>Wrangler autenticado: <code>pnpm wrangler login</code></li>
+<li>Un proyecto EmDash con el adaptador Cloudflare en su sitio (siguiente sección)</li>
+<li>De 30 a 60 minutos para el recorrido completo, incluyendo verificación</li>
+</ul>
+</ListCheck>
+
+El desarrollo local no necesita ninguna de las piezas de Cloudflare. La ruta Node.js/SQLite con almacenamiento `local()` y el stub de email por consola corre en un portátil. Si aún no has construido un sitio en local, sigue primero el [tutorial de EmDash CMS](/emdash-cms-tutorial/), luego vuelve aquí para el deploy.
+
+## Dos puntos de partida: plantilla EmDash o sitio Astro existente
+
+O creas desde cero o portas lo que tienes. Ambos aterrizan en el mismo sitio: `wrangler.jsonc` con bindings nombrados, `src/worker.ts`, y una integración EmDash cableada a D1 y R2. Mi default para un sitio nuevo es plantilla-primero. Son menos piezas móviles y los nombres de binding ya coinciden.
+
+<Tabs>
+<Tab name="Desde una plantilla">
+
+```bash
+npm create emdash@latest
+# pick a Cloudflare template: blog, marketing, portfolio, starter, or blank
+npm install
+npx wrangler login
+npm run build
+npm run deploy
+```
+
+Las plantillas Cloudflare incluyen el entry point del Worker completo y los bindings D1 y R2 nombrados preconfigurados. Editas nombres y secrets, no escribes fontanería. Este es el camino que tomaría esta noche.
+
+</Tab>
+<Tab name="Sitio Astro existente">
+
+Es un port de config, no una reescritura. Tus páginas Astro siguen funcionando; EmDash añade `/_emdash` y la capa de colecciones. Cuatro cosas que añadir:
+
+1. El adaptador `@astrojs/cloudflare` y la integración `emdash` con adaptadores `d1()` / `r2()`.
+2. `src/worker.ts` con el handler de EmDash y el scheduled handler.
+3. Bindings en `wrangler.jsonc`.
+4. `react()`, porque la UI de admin es una app React.
+
+Si el sitio existente es grande, presupuesta algo de comprobación de build-time mientras conviertes. Para lo que cambió en el compilador actual, mira [benchmarks de build-time de Astro 7](/astro-7-faster-builds/). Y si aún estás eligiendo CMS en vez de comprometerte con EmDash, [las mejores opciones de headless CMS para Astro](/best-headless-cms-for-astro/) enfrenta este stack contra las alternativas git-based y hosted.
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="Reconstruir una plantilla no preserva tus datos">
+Nunca re-scaffoldes sobre un sitio en vivo. El contenido vive en la base de datos, no en el repo, pero un re-scaffold aún puede dejar huérfano tu estado de setup y sembrar una base de datos que no pretendías tocar. Scaffolda en un directorio nuevo, despliega, migra el contenido deliberadamente.
+</Notice>
+
+## Un tercer punto de partida: el tema gratis Biolink
+
+Si lo que quieres es una página link-in-bio en vez de un blog, sáltate el scaffolding por completo. [Biolink](https://github.com/bitdoze/emdash-biolink-theme) es un tema EmDash gratis que mantengo exactamente para eso: cabecera de perfil, más de 30 iconos sociales, tarjetas de enlaces, listas de enlaces, tarjetas de proyectos, bloques de texto, imagen y embed, todo editado como bloques reordenables en el admin. Diez esquemas de color, modos claro/oscuro/sistema, theming por página, y sin plugins requeridos, lo que significa que corre en Workers Free sin quitar nada.
+
+Dos rutas de deploy:
+
+1. **El botón Deploy to Cloudflare** en el README del repo entrega el repo a Workers Builds, que te guía por un formulario y luego clona, buildea y despliega por ti. Lo que pide el formulario:
+   - Un **nombre de proyecto** y una **conexión a GitHub** — autorizas GitHub, y Workers Builds crea un repositorio privado bajo tu cuenta desde el que buildea en cada push.
+   - Una **nueva base de datos D1** (nombre y ubicación) y un **bucket R2** (pista de ubicación) — los defaults valen.
+   - Una **`EMDASH_ENCRYPTION_KEY`** — el único campo que traes tú. Genérala primero desde cualquier checkout de EmDash con `npx emdash secrets generate` y pégala en el formulario.
+   - Los comandos de build vienen prellenados (equivalente a `npm run build` + `npm run deploy`); la corrida tarda un minuto o dos con los logs en streaming en el dashboard.
+
+   Dos cosas hacen tropezar en esta ruta. El primer deploy **falla en R2** si el servicio de almacenamiento aún no está activo en la cuenta — activarlo pide la tarjeta de crédito o PayPal de los prerequisitos, luego le das a deploy otra vez. Y una vez termina el build, `EMDASH_SITE_URL` aún hay que fijarla antes del asistente de setup (el aviso de abajo cubre por qué).
+2. **CLI**, si lo quieres primero en local:
+
+```bash
+npm create astro@latest -- my-links --template github:bitdoze/emdash-biolink-theme --no-ai
+cd my-links
+npm install
+npx wrangler login
+npm run deploy   # astro build && wrangler deploy
+```
+
+El primer deploy aprovisiona la base de datos D1 `emdash-biolink` y el bucket R2 `emdash-biolink-media` por nombre, igual que la ruta de plantilla de arriba. Renómbralos en `wrangler.jsonc` si quieres los tuyos propios. `npm run dev` funciona sin cuenta de Cloudflare, en workerd con emulación local de D1 y R2, y el asistente de setup siembra una colección Bio Pages más un perfil demo que puedes editar o reemplazar.
+
+<Notice type="warning" title="Pon EMDASH_SITE_URL antes de correr el asistente de setup">
+El setup registra el origen en el que corre, y los passkeys solo funcionan en ese origen. Tras el primer deploy, añade una variable `EMDASH_SITE_URL` en texto plano (Worker -> Settings -> Variables and Secrets) con la URL de producción, luego corre el asistente en `https://tu-dominio/_emdash/admin`, no en localhost ni en una URL de preview. Cambia el valor más tarde y todos los passkeys hechos en el origen viejo mueren.
+</Notice>
+
+¿Cuánto cuesta correr un sitio Biolink desplegado? Este es su dashboard de D1 en 24 horas:
+
+![Métricas D1 de un sitio EmDash Biolink desplegado en 24 horas: 39k queries totales, 56k filas leídas, 3k filas escritas, 1,41 MB de almacenamiento en 69 tablas, todo en la región EEUR](@assets/images/26/10/biolink-emdash-theme-db-stats.webp)
+
+El ritmo plano de ~400-queries-por-15-minutos es el cron de cada-minuto haciendo sus rondas: comprobaciones de publicación programada, mantenimiento, contabilidad de backups. Eso son ~39k queries D1 y 1.440 invocaciones de Worker al día con casi ningún tráfico de visitantes, exactamente el coste de fondo del que advierte la tabla de límites de arriba. Daño total en Workers Free: 0 $, y con 1,41 MB de almacenamiento usado el tope de tamaño de D1 no es algo en lo que este sitio vaya a pensar jamás.
+
+<Button text="Despliega Biolink en Cloudflare" link="https://deploy.workers.cloudflare.com/?url=https://github.com/bitdoze/emdash-biolink-theme" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Tema Biolink en GitHub" link="https://github.com/bitdoze/emdash-biolink-theme" variant="outline" color="gray" size="md" icon="arrow-right" />
+
+## Los bindings explicados: cableando EmDash a D1 y R2
+
+Esta es la sección que el doc oficial de deploy recorre rápido y donde los deploys fallan en la práctica. Los adaptadores Cloudflare de EmDash se enlazan a recursos nombrados por cadena. Los nombres en `wrangler.jsonc` y los nombres en `astro.config.mjs` deben coincidir exactamente, u obtienes "D1 binding not found" en tiempo de request.
+
+![Diagrama de arquitectura de EmDash en Cloudflare Workers: navegador a edge cache a Worker, enlazado a D1, R2, KV, Images, Email Sending y un cron trigger](@assets/images/26/10/emdash-cloudflare-architecture.svg)
+
+### wrangler.jsonc: DB, MEDIA, LOADER y el cron de cada minuto
+
+La config de la plantilla, anotada:
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-emdash-site",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "my-emdash-site" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "my-emdash-media" }
+  ],
+  "worker_loaders": [{ "binding": "LOADER" }],   // omit on Free plan
+  "triggers": { "crons": ["* * * * *"] }
+}
+```
+
+Qué hace cada pieza y dónde muerde:
+
+- **`DB` y `MEDIA` son nombres de contrato.** Deben coincidir con `d1({ binding: "DB" })` y `r2({ binding: "MEDIA" })` en la config de integración de EmDash. Renombra un lado y obtienes un error de binding-not-found en el primer request.
+- **Wrangler crea la base de datos D1 y el bucket R2 en el primer deploy si esos nombres no existen.** Mantén los nombres estables. Cambiar `database_name` después no mueve tu contenido, aprovisiona una base de datos nueva y vacía y la vieja se convierte en huérfana.
+- **`triggers.crons` es el default de cada-minuto.** La publicación programada, las tareas de plugins, los backups JSON automáticos y el mantenimiento cabalgan sobre él. Ajústalo, pero ajústalo en dos sitios (siguiente subsección).
+- **Adiciones opcionales:** `"kv_namespaces": [{ "binding": "CACHE" }]` para la caché de objetos, `"send_email": [{ "name": "EMAIL" }]` para magic links, `"images"` (normalmente auto-añadida por el adaptador), `"routes"` para un dominio personalizado, `"placement"` para placement dirigido.
+
+La variante del plan gratis es una eliminación. Lado a lado:
+
+<Tabs>
+<Tab name="Plan gratis (sin plugins en sandbox)">
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-emdash-site",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "my-emdash-site" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "my-emdash-media" }
+  ],
+  "triggers": { "crons": ["* * * * *"] }
+}
+```
+
+Sin `worker_loaders`. Combínalo con `sandboxRunner` eliminado de `astro.config.mjs`. Ese es todo el delta del tier gratis.
+
+</Tab>
+<Tab name="Workers Paid (plugins en sandbox)">
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-emdash-site",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "my-emdash-site" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "my-emdash-media" }
+  ],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "triggers": { "crons": ["* * * * *"] }
+}
+```
+
+`worker_loaders` es la única diferencia estructural. Mantén el nombre de binding `LOADER`, el adaptador lo espera.
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="El desajuste de nombres de binding es el fallo de deploy número uno">
+"D1 binding not found" o "R2 binding not found" en runtime significa que la cadena en `wrangler.jsonc` y la cadena en `d1({ binding })` / `r2({ binding })` no concuerdan. Revisa ambos archivos antes de depurar nada más ingenioso.
+</Notice>
+
+Para sitios de contenido que preferirían no correr sobre D1 en absoluto, la alternativa en el mundo Astro es [Astro DB con una base de datos PostgreSQL en Bunny](/astro-db-bunny-database/). Dentro de EmDash en Cloudflare, sin embargo, D1 es el camino de menor resistencia y el que el puente de plugins sandbox requiere.
+
+Truco útil para la sección de placement más adelante: `pnpm wrangler d1 info my-emdash-site` imprime los detalles de la base D1 incluyendo su ubicación primaria. Querrás ese valor.
+
+### astro.config.mjs y src/worker.ts
+
+La config de integración:
+
+```js
+import { defineConfig } from "astro/config";
+import cloudflare from "@astrojs/cloudflare";
+import react from "@astrojs/react";
+import emdash from "emdash/astro";
+import { d1, r2, sandbox } from "@emdash-cms/cloudflare";
+
+export default defineConfig({
+  output: "server",
+  adapter: cloudflare(),
+  integrations: [
+    react(), // required: admin UI is a React app
+    emdash({
+      database: d1({ binding: "DB" }),
+      storage: r2({ binding: "MEDIA" }),
+      sandboxRunner: sandbox(), // omit on Free plan
+    }),
+  ],
+});
+```
+
+Y el entry del Worker:
+
+```ts
+import handler, { createScheduledHandler, PluginBridge } from "@emdash-cms/cloudflare/worker";
+
+export { PluginBridge };
+export default {
+  ...handler,
+  scheduled: createScheduledHandler(),
+} satisfies ExportedHandler;
+```
+
+`createScheduledHandler()` es lo que corre la publicación programada, las tareas de plugins, los backups y el mantenimiento cuando dispara el cron. `PluginBridge` solo se necesita para plugins en sandbox, pero los docs recomiendan mantenerlo exportado; es inofensivo sin ellos.
+
+Dos trampas en estos archivos:
+
+1. **Las rutas de importación derivan entre fuentes.** El README de GitHub muestra `import { d1 } from "emdash/db"` mientras los docs de despliegue usan `@emdash-cms/cloudflare`. El proyecto se mueve rápido. Comprueba qué importa la plantilla generada y cita eso, no un post de blog (incluido este).
+2. **Si cambias la expresión cron, cámbiala en ambos sitios.** `triggers.crons` en `wrangler.jsonc` y `createScheduledHandler({ generalCron: "..." })` deben coincidir. Si difieren, el handler loguea e ignora el trigger inesperado. La publicación programada simplemente para, en silencio.
+
+<Notice type="warning" title="El desajuste de cron falla en silencio">
+No hay página de error cuando `triggers.crons` y `generalCron` no coinciden. Tus posts programados se quedan sin publicar y los logs solo mencionan un trigger inesperado. Verifica con `pnpm wrangler tail` tras cualquier cambio de cron.
+</Notice>
+
+## Primer deploy de EmDash con wrangler: login, build, envío
+
+```bash
+pnpm wrangler login
+pnpm build
+pnpm wrangler deploy
+```
+
+El primer deploy aprovisiona la base de datos D1 y el bucket R2 por nombre y devuelve una URL `workers.dev` inmediatamente. Ábrela. Deberías obtener una página renderizada (o el asistente de setup si la base de datos está vacía).
+
+Demuestra que funcionó antes de seguir:
+
+<ListCheck>
+<ul>
+<li>La página pública renderiza en la URL <code>workers.dev</code></li>
+<li><code>/_emdash/admin</code> carga el asistente de setup (identidad del sitio + cuenta de admin; los passkeys son la auth por defecto)</li>
+<li><code>pnpm wrangler tail</code> muestra los requests llegando mientras navegas</li>
+</ul>
+</ListCheck>
+
+El fallo se ve como un 500 en la página pública (entonces `wrangler tail` y lee el mensaje) o un error de binding-faltante (entonces la comprobación de desajuste de nombres de arriba). La URL `workers.dev` es tu señal limpia de que la app funciona antes de que el DNS entre en escena. Mantenla viva mientras añades el dominio personalizado.
+
+### Migraciones, datos semilla y el primer request
+
+EmDash por defecto usa modo de migración `auto`. En Cloudflare eso significa que el **primer request** al Worker desplegado aplica las migraciones de núcleo pendientes. El archivo semilla (`.emdash/seed.json`, con fallback a `package.json#emdash.seed`, luego `seed/seed.json`) se inlina en build time y solo aplica si la base de datos está vacía y el setup no está completo. Los deploys posteriores dejan el contenido en paz.
+
+<Notice type="info" title="Calienta el sitio tú mismo antes de anunciarlo">
+El primer request carga el trabajo de migración. Golpea la URL tú mismo tras cada deploy. No dejes que un lector o un crawler sea el primer visitante tras una release.
+</Notice>
+
+Para pipelines de CI que deban aplicar migraciones antes de que el código nuevo reciba tráfico, cambia a modo de migración explícito en vez de confiar en la auto-migración del primer request; la página "Manage core database migrations" de los docs cubre el setup del pipeline. Si una migración falla, `pnpm wrangler tail`, reproduce el request, y lee el mensaje subyacente. Los errores de migración rara vez son silenciosos, solo están enterrados en el stream.
+
+## Dominio personalizado, placement y caching
+
+Una vez `workers.dev` está en verde, ponlo en tu dominio. En `wrangler.jsonc`:
+
+```jsonc
+{
+  "routes": [{ "pattern": "www.example.com", "custom_domain": true }]
+}
+```
+
+El dominio debe ser una zona Cloudflare activa en la misma cuenta que el Worker. El orden de operaciones importa: pon el Worker sirviendo en `workers.dev` primero, luego añade la ruta, despliega otra vez, y verifica ambas URLs. Mantener `workers.dev` vivo durante las pruebas de DNS te ayuda a distinguir un problema de routing de un problema de aplicación. Contexto de límites: 100 dominios personalizados por zona, 1.000 rutas por zona.
+
+![Diagrama de ruta de request y caching: el hit de Workers Cache se salta el Worker, el miss corre SSR contra D1 cerca del primario con Targeted Placement](@assets/images/26/10/emdash-cache-request-path.svg)
+
+### Targeted Placement cerca de tu primario D1
+
+El SSR de EmDash hace varias idas y vueltas a D1 por request. Corre el Worker en el edge del visitante y cada query paga un salto de red a dondequiera que esté el primario D1. Targeted Placement ancla la ejecución cerca de la base de datos en su lugar. Suena al revés, pero es el intercambio correcto para una app SSR pesada en base de datos: cuando el Worker pasa su tiempo esperando a la base de datos de una región, correrlo cerca del usuario solo añade saltos.
+
+La config del doc de deploy de EmDash:
+
+```jsonc
+{
+  "placement": {
+    "mode": "targeted",
+    "region": "weur" // exactly one selector: region, host, or hostname
+  }
+}
+```
+
+Elige el selector que coincida con la ubicación de tu primario D1 (`pnpm wrangler d1 info my-emdash-site` la imprime). Dos reglas duras de los docs: no actives réplicas de lectura D1 junto a Targeted Placement, y mantén el ajuste `session` de EmDash en el default `"disabled"` para que lecturas y escrituras golpeen el primario cercano.
+
+Verifica con el header de respuesta `cf-placement`: `remote-LHR` versus `local-EWR` te dice dónde corrió el Worker.
+
+<Notice type="warning" title="Verifica la sintaxis de placement contra tu versión de wrangler">
+Hay una discrepancia real aquí. El propio doc de Placement de Cloudflare (actualizado 23 abr 2026) documenta `mode: "smart"` o claves de nivel superior `region`/`host`/`hostname` y no usa la palabra "targeted". Los docs de EmDash especifican `placement.mode: "targeted"`. Prueba la sintaxis exacta con `pnpm wrangler deploy --dry-run` en tu wrangler instalado antes de fiarte de cualquiera de los dos. Un informe de la comunidad también describe targeted placement causando 403 salientes a un origen no-Cloudflare, así que si los fetches salientes empiezan a fallar justo tras activar placement, sospecha de placement primero.
+</Notice>
+
+### Caché de objetos KV y Workers Cache (dos gotchas)
+
+Dos cachés separadas. La gente las confunde; Cloudflare no.
+
+**La caché de objetos KV** cachea resultados de queries de contenido y config para reducir la carga de lectura en D1:
+
+```js
+import { kvCache } from "@emdash-cms/cloudflare";
+
+emdash({
+  database: d1({ binding: "DB" }),
+  storage: r2({ binding: "MEDIA" }),
+  objectCache: kvCache({ binding: "CACHE" }),
+});
+```
+
+Añade la entrada `"kv_namespaces"` correspondiente enlazada como `CACHE` en `wrangler.jsonc`. En el plan gratis, fíjate en el tope de escrituras KV: 1.000 escrituras/día (las lecturas son 100k/día). Las escrituras de invalidación de caché de objetos en un día editorial intenso son lo que se come ese presupuesto. No afirmo que lo vayas a golpear; digo que el tope existe y la invalidación de caché es lo que lo consume.
+
+**Workers Cache** se sienta delante del Worker por completo. Un hit ni siquiera invoca el Worker:
+
+```js
+import { cacheCloudflare } from "@astrojs/cloudflare/cache";
+
+export default defineConfig({
+  adapter: cloudflare(),
+  cache: { provider: cacheCloudflare() },
+  routeRules: { "/": { maxAge: 300, swr: 86400 } },
+});
+```
+
+La invalidación pasa por `cache.purge()`:
+
+```ts
+import { cache } from "cloudflare:workers";
+
+await cache.purge({ purgeEverything: true });
+// or targeted: { tags: ["posts"] }
+```
+
+Los dos gotchas, ambos de los propios docs de despliegue de EmDash:
+
+1. **Caching heurístico.** Las respuestas sin header `Cache-Control` igualmente se cachean (frescura heurística RFC 9111; un 200 sin header se trata como cacheable por un par de horas). Toda ruta personalizada necesita `Cache-Control` explícito. Cualquier cosa dependiente de sesión lleva `private, no-store`.
+2. **Los editores logueados ven la página cacheada.** La caché no puede hacer bypass por cookies, así que un editor con sesión puede recibir la variante anónima cacheada: sin barra de edición visual, sin preview de borradores, hasta expiración o purge.
+
+<Notice type="warning" title="'Mi barra de edición desapareció' es una caché, no un bug">
+Cuando un editor reporta que la barra se ha ido, Workers Cache casi siempre le está sirviendo la página anónima. Nada se filtra en la otra dirección (las respuestas de editor son `private, no-store` y nunca se almacenan). Mitigaciones: `maxAge` corto en rutas que los editores frecuentan, purge al publicar, y avisa a los editores por adelantado de que esto pasa. Gestionar expectativas es más barato que un hilo de soporte.
+</Notice>
+
+Nota de precios para presupuestar el plan gratis: los hits de Workers Cache se facturan como requests aunque sirvan desde caché (sin CPU cargada). Siguen comiéndose la asignación gratis de 100k/día.
+
+## Medios en R2: dominios públicos, la mina de backups/, facturación de Images
+
+Por defecto los medios se sirven por la ruta de medios autenticada de EmDash en `/_emdash/api/media/file/...`. Sin bucket público necesario, y ese es el default seguro. Déjalo así hasta que tengas una razón para no hacerlo.
+
+La aceleración opcional es un dominio personalizado del bucket como `publicUrl`:
+
+```js
+storage: r2({ binding: "MEDIA", publicUrl: "https://media.example.com" })
+```
+
+<Notice type="error" title="Nunca expongas el bucket de medios entero">
+Los backups JSON automáticos escriben al prefijo `backups/` en el mismo backend de almacenamiento. Un dominio de bucket público sirve cada objeto del bucket, backups incluidos. El acceso público no está acotado a medios. Mantén el bucket privado y sirve por la ruta de medios autenticada, o restringe el origen público solo a objetos de medios. Evita también las URLs `r2.dev` para producción: están limitadas en tasa y Cloudflare lo dice. Usa un dominio personalizado.
+</Notice>
+
+Si usas un dominio público, conoce el trade-off: los medios por URL de bucket pasan por el endpoint de transform del adaptador que hace fetch por HTTP, mientras los medios de ruta interna leen directo del binding R2 sin fetch y siguen funcionando detrás de Cloudflare Access o `global_fetch_strictly_public`.
+
+Luego está la sorpresa de facturación escondida en el binding Images. El adaptador `@astrojs/cloudflare` auto-añade el binding `IMAGES` en build time cuando el servicio de imágenes de runtime es `cloudflare-binding`. Para ver lo que un deploy realmente obtuvo, lee el `dist/server/wrangler.json` generado (o `.wrangler/deploy/config.json`), no tu `wrangler.jsonc`. Verifica el despliegue que obtuviste, no el que escribiste.
+
+La facturación de transforms cuenta cada combinación única de imagen fuente y set de parámetros una vez por mes natural; las repeticiones dentro del mes son gratis. 500 imágenes por (thumbnail + hero) son 1.000 transforms únicos/mes, que cabe en gratis. 2.000 imágenes por 5 tamaños son 10.000, que se pasa.
+
+<Notice type="warning" title="El error 9422 es cómo se ve el mes 5.001">
+En el plan gratis, una vez pasas 5.000 transforms únicos en un mes natural, los transforms ya cacheados siguen sirviendo pero los nuevos fallan con error 9422. No se te cobra en gratis, los transforms simplemente dejan de funcionar hasta que el mes rota. En pago, el mismo volumen cuesta 0,50 $ por 1.000 sobre los 5.000 incluidos. La trampa del thumbnail es regenerar un set de parámetros nuevo (un ancho nuevo, un valor de calidad nuevo) sobre una librería de medios grande de golpe.
+</Notice>
+
+Última advertencia de medios: los backups de base de datos contienen **metadatos** de medios, no los archivos almacenados. Los medios de R2 no están en tus backups de D1 ni en tus backups JSON. Haz backup del backend de almacenamiento aparte si los archivos importan. Este es el único hueco versus un setup con S3 donde ya tienes un pipeline de sync corriendo.
+
+## Email para magic links: un setup aparte
+
+Los Workers de producción no tienen entrega de email por defecto. Los magic links, invitaciones y notificaciones devuelven `503 EMAIL_NOT_CONFIGURED` hasta que un plugin de email está activo. Esto quemó a bastante gente antes de la 1.0 (issue #1431 de GitHub, "No production email provider on Cloudflare Workers", cerrado vía #1433 para el hito 1.0). El arreglo es el plugin oficial `cloudflareEmail` sobre Cloudflare Email Sending: onboarding del dominio remitente, un binding `send_email` en `wrangler.jsonc`, luego activación bajo Extensions y Settings -> Email. Esa cadena tiene suficientes piezas móviles para tener su propio tutorial en esta serie en vez de una versión comprimida aquí.
+
+<Notice type="info" title="Solo-passkeys es una configuración legítima del tier gratis">
+Los passkeys son la auth por defecto. Los magic links son el fallback. Un operador en solitario puede correr el CMS entero sin email: registra un passkey, usa el copy-link de invitación para cualquier otro. Los equipos querrán email funcionando, porque "copia esta URL de invitación y pégasela" deja de tener gracia alrededor de la tercera persona.
+</Notice>
+
+## Secrets y entornos de preview
+
+Los secrets de plugins están cifrados en reposo, y la clave de cifrado es tuya de gestionar. Genera un valor, luego guárdalo como secret del Worker:
+
+```bash
+npx emdash secrets generate
+pnpm wrangler secret put EMDASH_ENCRYPTION_KEY
+```
+
+Ponlo **antes** de guardar cualquier secret de plugin en el admin. Guarda una copia de la clave fuera de los backups de D1; si la pierdes, los secrets cifrados son irrecuperables. La rotación es en dos fases: añade la clave nueva primero, mantén las viejas separadas por comas, re-guarda cada secret de plugin, luego suelta las claves viejas.
+
+Los secrets de preview van al env nombrado: `pnpm wrangler secret put <NAME> --env preview`.
+
+<Notice type="error" title="Nunca leas secrets vía import.meta.env">
+EmDash lee secrets de `process.env`. Eso funciona porque la plantilla fija `nodejs_compat` y una compatibility date de 2026-02-24; cualquiera a partir de 2025-04-01 puebla `process.env` automáticamente. Las compatibility dates más viejas necesitan el flag `nodejs_compat_populate_process_env` o los ajustes cifrados se rompen de formas confusas. El error inverso es peor: leer secrets por `import.meta.env` permite a Vite inlitarlos en el bundle del servidor en build time. Tu clave de cifrado viajaría en el artefacto desplegado.
+</Notice>
+
+**Entornos de preview.** Los entornos Wrangler nombrados no heredan bindings de la config de nivel superior. Cada binding debe repetirse bajo `env.preview`:
+
+```bash
+pnpm wrangler d1 create my-emdash-site-preview --binding DB --env preview --update-config
+pnpm wrangler r2 bucket create my-emdash-media-preview --binding MEDIA --env preview --update-config
+pnpm build
+pnpm wrangler deploy --env preview
+```
+
+Repite los bindings opcionales (KV, email, loader) del mismo modo. Los secrets solo-de-preview usan `--env preview`. Dos reglas: nunca apuntes un binding de preview a D1 o R2 de producción, y recuerda que el primer request de preview aplica migraciones, igual que en producción. En el plan gratis, los recursos de preview cuentan contra las mismas cuotas (10 bases de datos D1 por cuenta caben prod más unas cuantas previews; el almacenamiento R2 se dobla con cada bucket de preview).
+
+## Coste mensual real: tres ejemplos trabajados
+
+**1. Blog personal o sitio folleto pequeño: 0 $/mes.** Workers Free, una base de datos D1 que se queda de tamaño metadatos (ni cerca de 500 MB salvo que importes un archivo WordPress con años de revisiones), medios R2 bajo 10 GB, caché de objetos KV, unos miles de transforms de imagen al mes. El cron de cada-minuto cuesta 1.440 requests/día de tus 100k. Un sitio pequeño con caching delante no notará el resto.
+
+**2. Sitio pequeño o medio con plugins: 5 $/mes.** Workers Paid te da plugins en sandbox (SEO, formularios, lo que sea del registro), bases D1 de 10 GB, Time Travel de 30 días, margen de escrituras KV, y un límite de CPU por defecto de 30 segundos. La mayoría de sitios en esta clase ni se acercan a los 10M requests y 30M CPU-ms incluidos.
+
+**3. 5 $/mes más overages: los cables trampa.** Images pasados 5.000 transforms únicos (0,50 $ por 1.000: 500 imágenes fuente a 2 tamaños se queda gratis, 2.000 a 5 tamaños corre unos 2,50 $/mes). Escrituras KV pasado 1M/mes (5 $/M, solo si la invalidación de caché de objetos churrasca mucho). Lecturas D1 pasados 25B/mes (0,001 $/M, un número que no alcanzarás en un sitio de contenido).
+
+La victoria de ops versus la ruta de servidor: sin servidor que parchear, sin pipeline de backup a S3 que vigilar (EmDash escribe backups JSON a R2 en el cron), y D1 Time Travel reemplaza los rituales de point-in-time-restore. El caveat es el de la sección de medios: los medios R2 no están en esos backups de base de datos. Si ya corres backups S3 en otro sitio, el sync de medios es el único hueco que cerrar.
+
+## Los números reales de un sitio vivo: emdashhq.com
+
+[emdashhq.com](https://emdashhq.com/) es mi propio hub de EmDash (los tutoriales, temas y plugins para este CMS, incluido el tema Biolink de arriba) corriendo sobre este stack exacto: Workers, D1, R2, dominio personalizado, Workers Cache delante. Como los ejemplos trabajados de arriba son estimaciones, así se ve un despliegue real en las últimas 24 horas.
+
+![Métricas de Cloudflare Workers para emdashhq.com en 24 horas: 863 invocaciones, 0 errores, ~50 ms de tiempo CPU mediano, 608 ms de duración mediana de request, 59,95% de hit rate de Workers Cache API, 90,43% de hit rate de caché de assets](@assets/images/26/10/emdashhq-worker-merics.webp)
+
+Lee el dashboard así:
+
+- **863 invocaciones, 0 errores.** Un sitio de contenido de bajo tráfico. Incluso a 10x esto, el tope gratis de 100k requests/día está lejos.
+- **Tiempo CPU mediano ~50 ms.** Este es el número que importa para elegir plan: por encima de la línea de 10 ms del plan gratis, así que un sitio con esta forma necesita Workers Paid o caching mucho más agresivo. El ensamblado SSR es trabajo de CPU real, exactamente lo que la tabla de límites advertía.
+- **59,95% de hit rate de Workers Cache API, 90,43% de hit rate de caché de assets.** La caché absorbe la mayoría de repeticiones; las invocaciones que quedan son tráfico de admin, misses de caché y el cron.
+- **Duración de request ~600 ms mediana contra ~50 ms de CPU.** La mayoría del reloj de pared es espera a D1 y R2, por eso Targeted Placement cerca del primario D1 (EEUR, ver abajo) importa más que limar código.
+
+Y el lado de base de datos del mismo sitio:
+
+![Métricas D1 de la base de datos emdashhq en 24 horas: 14k queries totales, 62k filas leídas, 160 filas escritas, 1,82 MB de almacenamiento en 73 tablas, región Europa del Este](@assets/images/26/10/emdashhq-db-stats.webp)
+
+Dos conclusiones. Primero, ~14k queries contra 863 invocaciones son aproximadamente 16 idas y vueltas D1 por invocación de Worker, ticks de cron incluidos: la afirmación de "varias idas y vueltas D1 por request" no es teórica. Segundo, 1,82 MB en 73 tablas. El esquema de EmDash es ancho pero los datos son diminutos, y las lecturas superan a las escrituras 400 a 1 en un sitio de contenido. El tamaño de D1 y los límites de escritura son lo último que golpearás; el conteo de requests y la CPU son lo primero.
+
+## Troubleshooting: qué se rompe en EmDash en Cloudflare Workers
+
+Síntoma, causa, arreglo. Los primeros cuatro cubren la mayoría de fallos de noche-de-deploy.
+
+| Síntoma | Causa | Arreglo |
+|---|---|---|
+| "D1 binding not found" / "R2 binding not found" | Desajuste de nombre de binding entre `wrangler.jsonc` y las llamadas `d1()` / `r2()` | Haz las cadenas idénticas en ambos lados |
+| Deploy gratis falla o los plugins no se instalan | `worker_loaders` / `sandboxRunner` vienen activados por defecto; Dynamic Workers es solo-pago | Omite `LOADER` y `sandboxRunner` en Free |
+| `503 EMAIL_NOT_CONFIGURED` | Ningún plugin de email activo en producción | Necesita `cloudflareEmail` sobre Email Sending (guía aparte en esta serie); los passkeys funcionan sin email |
+| Publicación programada no corre en silencio | `triggers.crons` y `createScheduledHandler({ generalCron })` no coinciden | Hazlos idénticos; verifica con `pnpm wrangler tail` |
+| Imágenes rotas a mitad de mes | 5.000 transforms únicos agotados en Free (error 9422) | Espera a la rotación del mes o compra Images Paid |
+| El editor no ve la barra de edición visual | Workers Cache sirviendo la página anónima cacheada | Acorta `maxAge`, purge al publicar |
+| Errores de migración en deploy | La auto-migración del primer request golpeó un estado malo | `wrangler tail`, lee el mensaje; cambia CI a modo de migración explícito |
+| Archivos de backup legibles en internet | Dominio personalizado R2 público sirviendo el prefijo `backups/` | Mantén el bucket privado o acota el origen público solo a medios |
+| Escrituras KV fallando | Tope gratis de 1.000 escrituras/día alcanzado | Reduce el churn de invalidación o pasa a pago |
+| Error 1027 para todos | Tope gratis de 100k requests/día alcanzado | Añade caching, o sube; decide fail-open vs fail-closed por ruta |
+| Error 1102 / `exceededCpu` | Límite gratis de CPU de 10 ms golpeado por SSR | Añade la caché de objetos KV y Workers Cache, o pasa a pago |
+| Ajustes cifrados se comportan mal, `process.env` vacío | Compatibility date anterior a 2025-04-01 | Sube la fecha o añade `nodejs_compat_populate_process_env` |
+
+## Checklist de verificación pre-vuelo
+
+Corre esto antes de dar el deploy por hecho. Es el "Verify the deployment" de los docs más las comprobaciones de operador que los docs asumen que ya conoces.
+
+<ListCheck>
+<ul>
+<li>La página pública renderiza en la URL <code>workers.dev</code>, luego en el dominio personalizado</li>
+<li>El sign-in de <code>/_emdash/admin</code> funciona: asistente de setup completado, passkey registrado, magic link llega si el email está configurado</li>
+<li>Sube un archivo de medios de prueba y recupéralo (valida el binding R2 y la ruta de transform de Images)</li>
+<li><code>pnpm wrangler tail</code> muestra el scheduled handler disparando cuando debería correr el cron</li>
+<li>El header de respuesta <code>cf-placement</code> coincide con lo esperado si Targeted Placement está activado</li>
+<li>El <code>dist/server/wrangler.json</code> generado contiene la entrada <code>images</code> y, en Free, ningún <code>worker_loaders</code></li>
+<li>Si hay un dominio de medios público configurado, no lista objetos de <code>backups/</code></li>
+<li>El entorno de preview (si hay) apunta solo a D1 y R2 de preview, nunca producción</li>
+</ul>
+</ListCheck>
+
+Si quieres una ruta de rollback antes de necesitarla: `pnpm wrangler rollback` restaura la versión de despliegue anterior. Para teardown, `pnpm wrangler delete` elimina el Worker, y `pnpm wrangler d1 delete` / `pnpm wrangler r2 bucket delete` eliminan los almacenes de datos (irreversible; exporta primero si hay contenido que te importe).
+
+## EmDash en Cloudflare Workers vs un VPS de 5 euros
+
+Paso la mayor parte de mi vida laboral en flotas de servidores, y mi default para proyectos autoalojados es un VPS barato corriendo un PaaS autoalojado. Así que así se comparan los dos.
+
+EmDash en Cloudflare gana en: cero servidores que parchear, economía de scale-to-zero, D1 Time Travel para recuperación a punto-en-tiempo, y todo en una cuenta (sin proveedor de email, sin proveedor de S3, sin malabares de DNS). Para un sitio de contenido en solitario que debería costar nada, este es el default correcto.
+
+La ruta VPS gana en: acceso shell cuando algo va mal, flexibilidad de cron más allá del modelo Workers, sin acoplamiento a proveedor, un precio de máquina plano que incluye toda la CPU que el kernel te dé, y la capacidad de correr el resto de tu stack en la misma máquina. Para ese lado del intercambio, mira [cómo desplegar Astro en un VPS con CloudPanel](/deploy-astro-on-vps/) y nuestra comparación de opciones PaaS autoalojadas [Coolify vs Dokploy vs Kamal 2](/coolify-vs-dokploy-vs-kamal-2/). Mi propio default es aproximadamente un VPS de 5 euros al mes de [Hetzner Cloud](https://go.bitdoze.com/hetzner) corriendo Dokploy, con backups compatibles-S3 para cualquier cosa que importe.
+
+Regla general: sitio de contenido en solitario que debería costar cero, se queda dentro de un dominio, y no necesita jobs de fondo más allá de un cron de publicación -> Workers. Cualquier cosa que necesite otros servicios, trabajo longevo, o libertad de Cloudflare específicamente -> el VPS. Si mantienes un homelab y quieres exposición de nivel-Cloudflare sin Cloudflare, [Pangolin es una alternativa autoalojada a Cloudflare Tunnels](/pangolin-cloudflare-tunnels-alternative/).
+
+## FAQ: desplegando EmDash en Cloudflare
+
+<Accordion label="¿Es EmDash en Cloudflare realmente gratis? ¿Cuál es la trampa?" group="faq" expanded="true">
+Sí, para un sitio plano. La trampa es un binding: `worker_loaders` (Dynamic Workers) es solo Workers Paid, y la plantilla lo trae por defecto. Quita `sandboxRunner` y el binding `LOADER` y tienes un CMS completo en Workers Free: admin, API, auth, medios, publicación programada, backups. Lo que pierdes es el marketplace de plugins en sandbox. Los plugins de config nativa siguen corriendo en-proceso en gratis.
+</Accordion>
+
+<Accordion label="¿10 ms de CPU y 100k requests/día aguantan una carga de CMS real?" group="faq">
+Para un sitio de contenido pequeño o medio, sí, con caching. El tiempo CPU excluye la espera de I/O, así que las idas y vueltas a D1 no se comen los 10 ms directamente, pero el ensamblado SSR sí. Pon la caché de objetos KV y Workers Cache delante (Workers Cache significa que los hits ni siquiera invocan el Worker) y vigila el contador de requests. El cron de cada-minuto solo ya quema 1.440 requests/día. Los sitios en crecimiento golpean el techo de 100k requests/día antes que cualquier límite de almacenamiento; ese es el error 1027, y bloquea a los editores junto a los lectores.
+</Accordion>
+
+<Accordion label="¿Por qué mis magic links fallan con 'Email is not configured'?" group="faq">
+Los Workers de producción no tienen entrega de email por defecto — esto fue el issue #1431 de GitHub antes de la 1.0. Los magic links necesitan el plugin `cloudflareEmail` sobre Cloudflare Email Sending (dominio remitente, binding `send_email`, activación del plugin), que es su propia guía en esta serie. Hasta que el email esté configurado, los passkeys y los copy-links de invitación cubren el sign-in bien.
+</Accordion>
+
+<Accordion label="¿Por qué no puedo ver la barra de edición en mi propio sitio?" group="faq">
+Workers Cache te está sirviendo la página anónima cacheada. La caché no puede hacer bypass por cookies, así que un editor con sesión puede recibir la variante pública hasta que expire o se purgue. Las respuestas de editor son `private, no-store` y nunca se filtran en la otra dirección. Arreglo: `maxAge` más corto en rutas que los editores visitan, purge al publicar, y gestiona expectativas.
+</Accordion>
+
+<Accordion label="¿Qué pasa a los 5.001 transforms de imagen?" group="faq">
+En el plan gratis, los transforms nuevos fallan con error 9422 hasta que el mes natural rota. Los transforms cacheados siguen sirviendo. No se te factura en gratis. En Workers Paid, el mismo overage cuesta 0,50 $ por 1.000 transforms sobre los 5.000 incluidos. Fíjate que el conteo es por imagen fuente única y set de parámetros por mes, así que un redeploy que regenere cada imagen a un ancho nuevo es la forma clásica de fundírselo.
+</Accordion>
+
+<Accordion label="¿Puedo correr EmDash sin email en absoluto?" group="faq">
+Sí. Los passkeys son la auth por defecto; los magic links son el fallback. Registra un passkey para ti, usa el copy-link de invitación para cualquier otro, y sáltate Email Sending por completo hasta que un equipo haga que valga el setup. Si estás construyendo el sitio en local primero, el [tutorial de EmDash CMS](/emdash-cms-tutorial/) cubre la ruta de setup con passkeys.
+</Accordion>
+
+## Cierre
+
+Despliega EmDash en Cloudflare Workers esta noche y no cuesta nada si quitas el binding `LOADER`, o 5 $/mes si quieres el marketplace de plugins. Los bindings son todo el juego: `DB` a D1, `MEDIA` a R2, `CACHE` opcional a KV, un cron que debe coincidir en dos sitios, y un bucket de medios que nunca debe exponer `backups/`. Corre la checklist pre-vuelo antes de dar el deploy por hecho.
+
+Esa es la parte 4 de la serie EmDash CMS: la ruta de despliegue en Cloudflare, sus límites, y su precio.
+
+<Button text="Empieza con el tutorial de EmDash CMS" link="/emdash-cms-tutorial/" variant="outline" color="gray" size="md" />

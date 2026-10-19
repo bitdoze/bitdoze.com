@@ -1,0 +1,464 @@
+---
+date: 2026-09-29
+translationKey: "emdash-cms-review"
+title: "Reseña de EmDash CMS: 6 meses después, tras el lanzamiento de la 1.0"
+meta_title: "Reseña de EmDash CMS (2026): el sucesor de WordPress de Cloudflare"
+description: "Una reseña honesta de EmDash CMS tras seis meses y la versión 1.0: qué cambió, deploy en Cloudflare vs VPS autoalojado, trampas de operación y para quién es realmente."
+image: "@assets/images/26/09/emdash-review.webp"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["emdash", "astro", "cloudflare"]
+series: ["EmDash CMS", "1"]
+canonical: "https://www.bitdoze.com/es/emdash-cms-resena/"
+---
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Esta reseña de EmDash CMS se escribe seis meses después de que el sucesor de WordPress de Cloudflare saliera el 1 de abril de 2026, y a pocos días del lanzamiento de la 1.0. Cada análisis independiente que encontrarás ahora mismo es una primera impresión de abril sobre una beta 0.x. Esa beta ya no existe. `emdash@1.0.1` está en npm, el registro de plugins funciona, y el propio Cloudflare Blog lleva corriendo sobre EmDash desde el 12 de agosto.
+
+Si estás buscando "qué es EmDash CMS" y si está listo para producción, la versión corta: ya es un CMS de verdad, con prueba en producción a una escala que casi nada más en este mercado puede mostrar, y un modelo de seguridad de plugins genuinamente novedoso. También sigue siendo solo para Astro, la base de datos es cosa tuya y la UX del admin es joven. Si ese intercambio te conviene depende de una bifurcación en el camino, y esta reseña la recorre de principio a fin: Cloudflare a fondo (Workers + D1 + R2) frente a Node.js autoalojado en un VPS barato con SQLite y copias de seguridad en S3.
+
+Lo que sigue es la profundidad de operaciones que ningún artículo de abril tenía: configs de deploy reales, matemática de costes en orden de magnitud, los modos de fallo sacados de la propia documentación de troubleshooting de EmDash, y un veredicto por perfil. Todas las métricas llevan fecha de "septiembre de 2026" para que puedas comprobarlas en el momento de la publicación.
+
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/1X6KwMjbv-Y"
+  label="WordPress Is Broken. Can emdash Replace It?"
+/>
+
+## ¿Qué es EmDash CMS? El sucesor de WordPress de Cloudflare, explicado
+
+EmDash es un CMS full-stack en TypeScript construido como una integración de Astro. Con licencia MIT, sin código de WordPress, anunciado el 1 de abril de 2026 como "sucesor espiritual de WordPress", y publicado como `emdash@1.0.1` a finales de septiembre de 2026. Un solo despliegue lleva el sitio Astro, el panel de administración, una API REST, auth con passkeys primero, una biblioteca de medios y un sistema de plugins. Esa es la idea central: CMS más sitio web en una sola aplicación.
+
+La arquitectura importa más que la lista de funciones:
+
+- **Integración de Astro**, configurada en `astro.config.mjs` como `emdash({ database, storage, sandboxRunner })`. La dependencia paritaria es `astro >= 6`.
+- **Live Content Collections**: las páginas renderizadas en servidor leen el contenido publicado en el momento de la petición. El cambio de un editor aparece en la siguiente petición sin recompilar. Las páginas prerenderizadas siguen estáticas hasta que recompiles.
+- **El contenido vive en la base de datos**, no en tu repo. Los editores trabajan en el admin en `/_emdash/admin`; los desarrolladores ejecutan `npx emdash types` para generar declaraciones TypeScript (`emdash-env.d.ts` se actualiza solo en dev).
+- Formato de contenido **Portable Text** (JSON estructurado, no HTML serializado). TipTap es el editor de texto enriquecido. Hay un conversor `gutenberg-to-portable-text` para importaciones desde WordPress.
+- **Adaptadores SQL con Kysely**: D1, SQLite, libSQL o Postgres. Los medios van a R2, a cualquier API S3 o al disco local.
+- **Servidor MCP integrado en cada instalación** en `/_emdash/api/mcp`, con unas 60 herramientas (CRUD de contenido, publicar, programar, medios, esquemas, taxonomías) más las herramientas de los plugins. Solo auth por bearer token: OAuth 2.1 con PKCE, tokens de acceso personal o el device grant de `emdash login`. Desde la 0.37.0, las actualizaciones exigen el token de concurrencia `_rev`, así que un agente no puede sobrescribir a ciegas los cambios de un editor.
+- **Pagos x402 integrados**: marca contenido como de pago, fija un precio y una dirección de monedero, y los agentes reciben HTTP 402, pagan y leen. Una primitiva interesante, no un plan de ingresos (el volumen real de x402 seguía alrededor de $28k/día en todo el ecosistema en abril).
+- **Cinco plantillas** en `create-emdash`, cada una con una variante Cloudflare y otra Node/SQLite: blog, marketing, portfolio, starter y blank.
+
+Node.js `>= 22.16` es obligatorio si lo autoalojas. Y una cosa que la documentación dice sin rodeos: EmDash no es un maquetador visual de páginas. Los componentes Astro son dueños del HTML. Si quieres diseño de arrastrar y soltar, esta no es tu herramienta.
+
+![Arquitectura de EmDash CMS: sitio Astro con panel de administración, API REST y servidor MCP consultando una base de datos y almacenamiento de medios compatible con S3](@assets/images/26/09/emdash-architecture.svg)
+
+<Notice type="info" title="La trampa de react()">
+La UI del admin es una app React, así que la integración `react()` de Astro es obligatoria incluso en un sitio Astro puro. Olvídala y el admin se rompe. Es un despiste fácil en una config mínima, y es lo primero que hay que comprobar cuando `/_emdash/admin` se comporta mal.
+</Notice>
+
+Esa dependencia de React te compra el admin de abajo: el editor de entradas de EmDash v1.0, vía el sitio oficial.
+
+![Interfaz de administración de EmDash v1.0: el editor de entradas con navegación lateral, área de contenido TipTap y un panel de publicación que sigue la versión en vivo frente a los cambios en borrador](@assets/images/26/09/emdash-admin.webp)
+
+Si lo estás comparando con el campo de los SaaS, nuestro artículo sobre [las mejores opciones de CMS headless para Astro](/best-headless-cms-for-astro/) es el lugar adecuado para ver dónde encaja un CMS con base de datos dentro de la app frente a alternativas basadas en git y alojadas. Para contexto de velocidad de build del framework subyacente, mira [qué cambió Astro 7 en velocidad de build](/astro-7-faster-builds/) (EmDash 1.0.1 ya sigue a Astro 7 en sus devDependencies).
+
+## Chequeo a los seis meses: 12.9k estrellas, 126k descargas y una gran migración
+
+Las reseñas de abril juzgaban una vista previa 0.1. Seis meses de lanzamientos después, esta es la foto de salud del proyecto a finales de septiembre de 2026:
+
+| Métrica | Valor (a sep 2026) | Fuente |
+|---|---|---|
+| Estrellas en GitHub | ~12.9k (snapshot de la API: 12,971) | API de GitHub |
+| Forks | ~1.2k | API de GitHub |
+| Colaboradores | 175+ | Post de la 1.0 de Cloudflare |
+| Commits | 1,800+ | Post de la 1.0 de Cloudflare |
+| Issues abiertos | 304 | API de GitHub |
+| Descargas npm (`emdash`) | 126,332/mes (29 ago a 27 sep) | api.npmjs.org |
+| Descargas npm (`create-emdash`) | 3,228/mes | api.npmjs.org |
+| Lanzamientos | ~37 en 6 meses (0.1.0 a 1.0.1) | Releases de GitHub |
+| Discord | 800+ miembros | Post de la 1.0 de Cloudflare |
+| Idiomas de la UI | 25 | Post de la 1.0 de Cloudflare |
+| Tamaño del paquete | 23.1 MB descomprimido, 2,489 archivos | Registro npm |
+
+Los lanzamientos iban guiados por changesets y firmados, con provenance de npm vía publicación confiada OIDC de GitHub Actions y attestations SLSA en la 1.0.1. Es una higiene de cadena de suministro seria para un proyecto de CMS de medio año. La cadencia también es real: la 0.19.0 llegó en agosto (el release que por fin hizo funcionar la publicación programada), la 0.37.0 del 9 de septiembre trajo la verificación del registro y el requisito de concurrencia `_rev`, y la 1.0.1 llegó a finales de septiembre. Los mantenedores son Matt Kane (el campo `author` en npm) y Noah Pham, que pasó de becario a segundo mantenedor con más de 80 changesets, además de personal de Cloudflare en la lista de colaboradores. Seis meses después, este no es el repo de una sola persona.
+
+Y luego está el cliente cero. El Cloudflare Blog migró a EmDash el 12 de agosto de 2026, y los números son la prueba de producción más sólida que este mercado ha visto en todo el año:
+
+- ~75 RPS de base, picos por encima de 5,000 RPS, hasta 850 RPS servidas en estado estable.
+- Pruebas de carga con k6 con perfiles de rampa, breakpoint y ráfagas de 7,000 RPS. Umbrales: menos del 0.01% de 5xx, P95 bajo 500ms, P99 bajo 1s.
+- ~70% de todas las peticiones servidas desde caché (99.5% de los archivos estáticos), con latencia p95 plana donde la plataforma anterior era irregular.
+- Estrés de la Agents Week: 28 posts en 9 días, ~3M de páginas vistas, 450 RPS sostenidas. Un DDoS de 28,000 RPS fue absorbido el 10 de agosto en el edge de Cloudflare, no por EmDash.
+- El despliegue fue un Worker proxy con una cookie de versión, del 1% al 5% al 15% al 100% en un día, con fallback automático al blog antiguo ante errores 500.
+
+Dos advertencias honestas. Primero, su stack no es un deploy normal: Workers Cache, una caché de objetos de EmDash sobre Workers KV y Hyperdrive hacia PlanetScale. Usaron Postgres/MySQL vía Hyperdrive, no D1. Tu blog no necesitará eso. Segundo, la publicación programada **no funcionaba en absoluto hasta la v0.19.0**, un hueco que Cloudflare descubrió a mitad de la migración. Es el tipo de bug que solo aparece cuando alguien usa su propio producto, y conviene recordarlo cuando la gente dice "la 1.0 significa maduro".
+
+El post de migración de Cloudflare también publicó su propia lista de bugs de edición: los bloques HTML personalizados eran difíciles de encontrar en el selector de bloques, la barra de formato desaparecía al hacer scroll en posts largos, bugs del editor dentro de entidades y los problemas de posts programados de arriba. No son difamaciones de terceros. Es el proveedor registrando sus propios fallos en público, lo cual te sirve más como comprador que cualquier matriz de funciones.
+
+## EmDash 1.0 y el registro de plugins: qué se publicó
+
+Entre la beta de abril y la 1.0 de finales de septiembre, el cambio estrella es un registro de plugins descentralizado construido sobre AT Protocol, el mismo protocolo que impulsa Bluesky. Los publicadores conservan la propiedad, la identidad y el historial de releases en sus propios registros firmados (Merkle Search Trees con pruebas de inclusión). EmDash opera un catálogo por defecto, un agregador y un etiquetador con Workers AI para moderación, todo open source. Eso significa que ninguna empresa puede reescribir en silencio el historial de un plugin ni quitarle la identidad a un publicador. Si el registro del agregador y el del propio publicador no coinciden, EmDash lo señala (`AGGREGATOR_RECORD_MISMATCH` se añadió en la 0.37.0) en lugar de encogerse de hombros.
+
+La verificación en el momento de instalación es donde esto se pone interesante. EmDash comprueba checksums (sha2-256 multibase base32, obligatorio desde la 0.37.0), nombre del paquete, versión e identidad del manifiesto de capacidades. La procedencia opcional con Sigstore y SLSA se verifica cuando está presente. Los releases delegados pasan por GitHub OIDC con fijado del workflow vía `releases.emdashcms.com`, y la incorporación de publicadores usa un paso de aprobación en el navegador. Piensa en el diálogo de instalación como en el aviso de permisos de una tienda de apps móvil: ves lo que el plugin puede hacer antes de aprobarlo.
+
+<Notice type="info" title="La parte genuinamente novedosa">
+Los ecosistemas de plugins de CMS han sido históricamente un desastre de confianza. El propio post de lanzamiento de EmDash de Cloudflare citaba que el 96% de los problemas de seguridad en sitios WordPress se originan en plugins. Un registro descentralizado y firmado con revisión de capacidades al instalar es inusualmente serio para este espacio. Es un contraargumento, no una prueba, de que el ecosistema crecerá de forma segura.
+</Notice>
+
+El ecosistema en la 1.0 es pequeño pero ya no está vacío: Lexington Themes distribuye 44 temas Astro con variantes EmDash, Urumi es el primer plugin de eCommerce y Empress apunta a flotas multimarca. Los plugins de pago aún no están en el registro (Cloudflare está observando Atproto Spaces Alpha para eso). Y una advertencia que no puedo resolver por ti: el número exacto de plugins en sandbox instalables del catálogo ahora mismo requiere una comprobación en vivo dentro del admin. De ese número vive o muere el argumento del ecosistema. Todo lo demás de la 1.0 es el tipo de madurez aburrida: el importador de WordPress (WXR, REST API, WordPress.com vía un plugin EmDash Exporter con Application Passwords), localización con grupos de traducción, revisiones, borradores, papelera, búsqueda FTS5, registro de auditoría y las herramientas para agentes (MCP, `npx emdash types`, agent skills).
+
+### Plugins en sandbox y manifiestos de capacidades
+
+EmDash tiene dos formatos de plugin. Los **plugins nativos** van en `plugins: []` y se ejecutan dentro del proceso con acceso completo al host. Eso es para código propio o de total confianza: formularios, embeds, SEO, registro de auditoría, email de Cloudflare.
+
+Los **plugins en sandbox** son los interesantes. Se declaran en `sandboxed: []` o se instalan desde el registro, y traen un manifiesto de capacidades como `capabilities: ["content:read", "email:send"]`. El admin aprueba esas capacidades al instalar. El propio ejemplo de la documentación es la forma correcta de pensarlo: un plugin que indexa artículos para búsqueda puede leer contenido y llamar a un servicio de búsqueda, y no puede editar artículos ni contactar con otros hosts. Los hooks como `content:afterSave` corren en un runtime aislado solo con almacenamiento privado, y sin acceso a red salvo que se declaren hostnames exactos.
+
+El cumplimiento es físico, no un simple pacto de honor. En Cloudflare cada plugin es un Dynamic Worker vía Worker Loader. En Node.js es un proceso hijo de `workerd`, el propio runtime de Cloudflare corriendo en tu máquina. Los límites son fijos y sin opción de configuración: 50ms de CPU y 10 subpeticiones (solo Cloudflare), 128MB de memoria, 30s de tiempo total en ambos. Un timeout de hook se registra y la petición continúa sin el plugin. Un timeout de ruta hace fallar a quien la llamó.
+
+`sandbox: false` ejecuta los plugins en sandbox dentro del proceso. Solo para depuración. Se niega a arrancar en Cloudflare Workers.
+
+### EmDash Build: el alfa del constructor de sitios con IA
+
+EmDash Build es un constructor de sitios con IA en alfa y open source (demo en `build.emdashcms.com`): un contenedor Cloudflare Sandbox por proyecto, el Agents SDK, cambios registrados como commits de git y publicación en Workers for Platforms. Vigílalo. No construyas todavía trabajo para clientes sobre él.
+
+## Para quién es EmDash (y cuándo su propia documentación dice que elijas otra cosa)
+
+Hay que reconocerlo: la documentación de EmDash es inusualmente honesta sobre quién no debería usarlo. La checklist de "buen encaje" exige que estas cuatro cosas sean ciertas:
+
+<ListCheck>
+<ul>
+<li>El sitio web está construido con Astro</li>
+<li>Los editores necesitan gestionar contenido sin editar archivos del repo</li>
+<li>Quieres el CMS y el sitio web en una sola aplicación y un solo despliegue</li>
+<li>Puedes operar una base de datos y almacenamiento de medios junto al sitio</li>
+</ul>
+</ListCheck>
+
+Si no puedes marcar las cuatro, para aquí. Las "razones para elegir otro enfoque" de la documentación son casi literales: el proyecto no es Astro; todo el contenido debe permanecer en el repositorio fuente; varios frontends independientes necesitan un CMS que se despliegue por separado; o no quieres la carga operativa. Esta última está explicada con palabras sencillas: el equipo es responsable de la base de datos, el almacenamiento de medios, las copias de seguridad, las actualizaciones y la aplicación que sirve el panel de administración.
+
+Esto se adelanta a la objeción número uno en Reddit ("necesitas gestionar una base de datos para usarlo"). Sí. La necesitas. La documentación coincide y les dice a los usuarios de CMS basados en git que usen colecciones basadas en archivos.
+
+La tabla comparativa de la propia documentación merece ser robada para tu reunión de decisión:
+
+<Tabs>
+<Tab name="EmDash">
+<p>Los editores trabajan en una interfaz web de administración. Las páginas cargan contenido en el momento de la petición vía Live Content Collections (o en el momento de compilación para las páginas prerenderizadas). El modelo de contenido vive en la base de datos, versionado a través de la app. Tu equipo opera la base de datos, el almacenamiento de medios, las copias de seguridad, las actualizaciones y la propia app. Sitio y CMS se entregan juntos sin separación de releases.</p>
+</Tab>
+<Tab name="Colecciones Astro basadas en archivos">
+<p>Los editores trabajan en git, o en una UI respaldada por git. Las páginas cargan contenido en el momento de compilación. El modelo de contenido vive en archivos markdown/MDX del repo. Tu equipo opera el pipeline de build y el repo. Los cambios de contenido son commits y recompilaciones.</p>
+</Tab>
+<Tab name="CMS headless separado">
+<p>Los editores trabajan en un admin de terceros. Las páginas cargan contenido en build o en petición, vía API. El modelo de contenido vive en la base de datos del proveedor. Tu equipo opera el frontend más la integración; el proveedor opera el CMS. CMS y frontends se despliegan de forma independiente con separación total de releases.</p>
+</Tab>
+</Tabs>
+
+## EmDash vs WordPress: en qué acertaron y en qué fallaron los críticos de abril
+
+Las opiniones de abril han envejecido de formas interesantes. Aquí está el marcador, revisado contra seis meses de evidencia.
+
+Para poner en contexto con qué compite EmDash: WordPress sigue moviendo una parte enorme de la web, con más de 60k plugins y un mercado de temas que nadie iguala en 2026. El ángulo de lanzamiento de Cloudflare fue seguridad y arquitectura: citó que el 96% de los problemas de seguridad en sitios WordPress se originan en plugins, y posicionó los plugins en sandbox más las passkeys como la respuesta. La reacción de la comunidad se dividió por líneas predecibles. La gente de WordPress en Reddit lo llamó un "CMS vibe coded que apenas funciona" y señaló el problema del huevo y la gallina del ecosistema (en un hilo alguien contó que su equipo lo probó en demo y le dio un "no rotundo"). La gente de Astro se mostró intrigada. Ambos juzgaban una beta.
+
+| Crítico | Afirmación de abril | Qué dice la evidencia de la 1.0 | Veredicto |
+|---|---|---|---|
+| Matt Mullenweg | UI de "valle inquietante", regresión respecto a TinyMCE, sugirió Gutenberg; elogió los Agent Skills como "increíbles" | TipTap sigue sin ser Gutenberg. El propio post de migración de Cloudflare registró quejas del editor: bloques HTML difíciles de encontrar, barra de formato que se pierde al hacer scroll en posts largos | Medio acertado. El editor es mejor que el de la v0.1, aún joven |
+| WPJohnny | Amenaza de cuota de mercado "casi nula"; el discurso serverless "no conecta con el 99.99%" de los casos de uso de WP | 126k descargas npm/mes y el Cloudflare Blog en producción no son cero. Pero el realismo sobre cuota de mercado se mantiene | Acertado sobre la cuota de 2026, equivocado sobre la trayectoria |
+| Maciek Palmowski | Le gustan el sandboxing y el diseño AI-first, pero "¿resuelve el problema correcto?" para alguien contento con markdown | Su punto sobrevive: EmDash añade operación de base de datos que markdown no tiene | Acertado para usuarios de markdown, algo que la documentación ya admite |
+| CMSWire | "Arquitectura correcta, ecosistema vacío" | Lexington (44 temas), Urumi, Empress y un registro de plugins real. El catálogo sigue siendo diminuto junto a los 60k+ plugins de WP | Sigue siendo el riesgo central, menos agudo que en abril |
+
+La cuestión del lock-in merece una respuesta directa, ya que Mullenweg la planteó. EmDash es MIT. Los adaptadores son portables: D1, SQLite, libSQL, Postgres, R2, cualquier API S3, disco local. La documentación de deploy en Node no es Cloudflare-first. El riesgo de lock-in es la gravedad (ecosistema, pulido, quién arregla los bugs más rápido), no la licencia. Mullenweg también escribió "me sorprendería que esto no acabe en decenas de miles de sitios"; WPJohnny dijo que la amenaza es "casi nula". Seis meses de datos de descargas quedan entre esas dos afirmaciones. Y en el lado WordPress de la valla, el cálculo de costes y operación es exactamente para lo que sirve [nuestro desglose de Astro vs WordPress en costes y operación](/astro-vs-wordpress/).
+
+Una comparación más con WordPress que importa si estás migrando: el importador es real pero acotado. Posts, páginas, medios, taxonomías y custom post types pasan (los CPT se mapean a colecciones, el contenido Gutenberg se convierte a Portable Text). Tu tema no pasa. El comportamiento de plugins personalizados no pasa. La documentación lo dice claramente. Presupuesta una reconstrucción de la capa de presentación, no solo un export-import.
+
+<Notice type="warning" title="El catch-22 sigue siendo real">
+Sin plugins no hay usuarios, sin usuarios no hay plugins. El registro de la 1.0 es el contraargumento a ese bucle, no la prueba de que esté resuelto. Si tu proyecto necesita una tienda de plugins madura en 2026, WordPress sigue ganando, y fingir lo contrario te hace perder el tiempo.
+</Notice>
+
+## Desplegar EmDash: Cloudflare Workers vs autoalojado en un VPS
+
+Ambas rutas de deploy están oficialmente documentadas, y ambas entregan admin más API más MCP como una sola unidad. El encuadre del operador es simple. La ruta Cloudflare es la de menos servidores y la de mayor acoplamiento a la plataforma, con los plugins en sandbox tras el muro de Workers Paid. La ruta VPS es la propiedad aburrida: la base de datos, las copias de seguridad y las actualizaciones son tuyas, en una máquina que controlas. Abajo van ambas, con las configs que necesitas.
+
+![Rutas de deploy de EmDash CMS comparadas: Cloudflare Workers con D1 y R2 frente a Node.js autoalojado con SQLite y copias de seguridad S3 en un VPS](@assets/images/26/09/emdash-deploy-paths.svg)
+
+### La ruta Cloudflare: Workers + D1 + R2 (y dónde hace falta Workers Paid)
+
+El camino feliz más rápido: pulsa el botón "Deploy to Cloudflare" en la plantilla `blog-cloudflare` del repo `emdash-cms/templates` (el set completo es blog, marketing, portfolio, starter y blank, cada una con variante Cloudflare y variante Node). Wrangler crea la base de datos D1 y el bucket R2 en el primer deploy, y las migraciones se aplican automáticamente en la primera petición en el modo `auto` por defecto. Las plantillas dejan el binding de Worker Loader comentado, que es por lo que los proyectos nuevos se despliegan en el plan gratis por defecto.
+
+Si lo estás cableando tú mismo, lo esencial queda así:
+
+```jsonc
+// wrangler.jsonc (essentials)
+{
+  "name": "my-emdash-site",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-02-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [{ "binding": "DB", "database_name": "my-emdash-site" }],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "my-emdash-media" }],
+  "worker_loaders": [{ "binding": "LOADER" }],   // only for sandboxed plugins (Workers Paid)
+  "triggers": { "crons": ["* * * * *"] },        // publishing, plugin tasks, backups, maintenance
+  "placement": { "mode": "targeted", "region": "..." } // near the D1 primary
+}
+```
+
+```ts
+// astro.config.mjs (Cloudflare)
+import cloudflare from "@astrojs/cloudflare";
+import react from "@astrojs/react";                 // REQUIRED - admin UI is React
+import emdash from "emdash/astro";
+import { d1, r2, sandbox, kvCache } from "@emdash-cms/cloudflare";
+
+export default defineConfig({
+  output: "server",
+  adapter: cloudflare(),
+  integrations: [react(), emdash({
+    database: d1({ binding: "DB" }),
+    storage: r2({ binding: "MEDIA" }),
+    sandboxRunner: sandbox(),                 // omit + drop LOADER to stay on the free plan
+    objectCache: kvCache({ binding: "CACHE" }) // optional KV object cache
+  })]
+});
+```
+
+```ts
+// src/worker.ts
+import handler, { createScheduledHandler, PluginBridge } from "@emdash-cms/cloudflare/worker";
+export { PluginBridge };
+export default { ...handler, scheduled: createScheduledHandler() } satisfies ExportedHandler;
+```
+
+Despliega con `pnpm build && pnpm wrangler deploy`. Extras específicos de Cloudflare en un solo paso: Targeted Placement cerca del primario de D1 (no lo combines con réplicas de lectura de D1, y deja `session` en su valor por defecto `"disabled"`), Workers Cache vía el proveedor `cacheCloudflare()` con `routeRules`, transformaciones de imágenes a través del binding `IMAGES` (facturado como Cloudflare Images: 5,000 transformaciones únicas/mes gratis en el plan Free, después las nuevas fallan con el error `9422`), SSO con Cloudflare Access con mapeo de roles (secreto vía `wrangler secret put CF_ACCESS_AUDIENCE`), y email vía el plugin de email de Cloudflare con un binding `send_email`. Ese último importa: los magic links y las invitaciones fallan con "Email is not configured" hasta que lo configuras, y la auth sin contraseña es el flujo por defecto.
+
+<Notice type="warning" title="Dónde hace falta Workers Paid">
+Los plugins en sandbox y las instalaciones desde el marketplace necesitan el binding de Worker Loader, que exige un plan Workers Paid (comúnmente citado en $5/mes, verifica el precio actual antes de presupuestar). Sin él, el build avisa "Sandboxed plugins are disabled because wrangler.jsonc has no LOADER Worker Loader binding" y las instalaciones en runtime fallan con `SANDBOX_NOT_AVAILABLE`. El sitio por lo demás funciona bien, que es exactamente por lo que la gente se lo pierde.
+</Notice>
+
+Verifica antes de darlo por terminado:
+
+1. `pnpm wrangler tail` y confirma que el handler programado marca ticks (el cron `* * * * *`).
+2. Abre `/_emdash/admin`, inicia sesión y comprueba que el dashboard carga.
+3. Publica un borrador y confirma que la página pública se actualiza en la siguiente petición.
+
+Si estás construyendo sobre Workers en general (más allá de EmDash), nuestra guía para [ejecutar apps autoalojadas en Cloudflare Workers](/self-hosted-apps-cloudflare-workers/) cubre los patrones de plataforma sobre los que se apoya este stack.
+
+### Autoalojar EmDash en Node.js: SQLite, Docker y copias de seguridad en S3
+
+Este es el camino de la casa en Bitdoze: Node.js standalone, SQLite en un volumen, medios compatibles con S3, Docker y tu rutina habitual de copias de seguridad. Cualquier máquina clase Hetzner de 4 a 5 euros al mes mueve un EmDash a escala de blog con comodidad. En la práctica eso es un [VPS de Hetzner Cloud](https://go.bitdoze.com/hetzner), o una máquina KVM económica como [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) si quieres otras regiones o prefieres su panel.
+
+Lo que necesitas primero:
+
+<ListCheck>
+<ul>
+<li>Node.js <code>&gt;= 22.16</code> (o Docker con una imagen node:22)</li>
+<li>Un VPS con 1 a 2 GB de RAM y un registro DNS apuntándolo</li>
+<li>Opcional: un bucket compatible con S3 (R2, Backblaze B2, MinIO) para los medios</li>
+<li>Secretos de <code>npx emdash secrets generate</code> (EMDASH_ENCRYPTION_KEY y compañía)</li>
+</ul>
+</ListCheck>
+
+La config de Node es más corta que la de Cloudflare:
+
+```ts
+// astro.config.mjs (Node.js)
+import node from "@astrojs/node";
+import emdash, { local, s3 } from "emdash/astro";
+import { sqlite } from "emdash/db";   // also: libsql, postgres adapters
+
+export default defineConfig({
+  output: "server",
+  adapter: node({ mode: "standalone" }),
+  integrations: [emdash({
+    database: sqlite({ url: `file:${process.env.DATABASE_PATH}` }),
+    storage: local({ directory: "./data/uploads", baseUrl: "/_emdash/api/media/file" }),
+    // storage: s3() for S3-compatible media (R2, AWS S3, any S3 API)
+    sandboxRunner: "@emdash-cms/sandbox-workerd/sandbox" // needs @emdash-cms/sandbox-workerd + workerd
+  })]
+});
+```
+
+Ejecútalo con `node --env-file=.env ./dist/server/entry.mjs` (puerto 4321 por defecto, respeta las env vars `HOST` y `PORT`). La entrada standalone no carga `.env` automáticamente. Olvidar `--env-file` es el fallo de primera ejecución más común aquí.
+
+La documentación oficial incluye un Dockerfile y un docker-compose.yaml (multi-stage node:22-alpine, volumen con nombre para `/app/data`), que encaja directo en un deploy estilo Dokploy. Adaptado a lo esencial, la parte del compose queda así:
+
+```yaml
+# adapted from the official docs.emdashcms.com/deployment/nodejs/ compose file
+services:
+  emdash:
+    build: .
+    ports:
+      - "4321:4321"
+    env_file: .env
+    volumes:
+      - emdash-data:/app/data   # SQLite db + local uploads live here
+    restart: unless-stopped
+
+volumes:
+  emdash-data:
+```
+
+Una trampa de Docker: `workerd` es un binario específico de plataforma instalado vía dependencias opcionales. En builds multi-stage, instálalo en la misma plataforma que la etapa de runtime con las deps opcionales activadas, y luego verifica:
+
+```bash
+./node_modules/.bin/workerd --version
+```
+
+Variables de entorno que conviene conocer: `DATABASE_PATH`, `HOST`, `PORT`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION`, `S3_PUBLIC_URL`, `EMDASH_ENCRYPTION_KEY`, y opcionalmente `EMDASH_PREVIEW_SECRET`, `EMDASH_AUTH_SECRET`, `EMDASH_IP_SALT`, `EMDASH_WORKERD_PASSTHROUGH_ENV`. Nunca leas secretos desde `import.meta.env`; Vite los incrusta en el bundle del cliente en tiempo de compilación.
+
+Postura de copias de seguridad: SQLite en un volumen con nombre, medios en S3, y recuerda que las snapshots JSON automáticas viven bajo `backups/` en el mismo backend de almacenamiento. Detén el proceso antes de reemplazar el archivo de la base de datos, que es el procedimiento de restauración de la propia documentación. Guarda una copia de recuperación de `EMDASH_ENCRYPTION_KEY` fuera de las copias de tu base de datos, o la configuración restaurada de los plugins será ilegible. El rollback es lo que permita tu snapshot de volumen más la copia de la clave; no hay recuperación nativa de EmDash a un punto en el tiempo que te salve.
+
+Para operación con panel en lugar de systemd pelado, puedes [alojar apps Node.js en CloudPanel](/install-cloudpanel-host-nodejs/) (nosotros corremos Strapi 5 ahí), o seguir [cómo desplegar Astro en un VPS con CloudPanel](/deploy-astro-on-vps/) una vez el CMS esté corriendo. Si quieres una ruta Docker Compose de un clic, [Coolify, el PaaS autoalojado](/coolify-v5-self-hosted-paas-review/) encaja, y [Coolify vs Dokploy vs Kamal comparados](/coolify-vs-dokploy-vs-kamal-2/) es el artículo para elegir herramienta. Para el lado de los medios, [montar almacenamiento compatible con S3 en un VPS](/es/montar-bucket-s3-sistema-archivos-vps/) cubre las opciones de bucket-como-sistema-de-archivos.
+
+Bloque de verificación, en orden, antes de apuntar el DNS:
+
+1. `npx emdash migrate --check` informa limpio.
+2. Una página pública devuelve 200 con el contenido esperado.
+3. Puedes iniciar sesión en `/_emdash/admin`.
+4. La subida, recuperación y borrado de medios hacen el ciclo completo.
+5. Un borrador se publica y la página pública se actualiza.
+6. La invocación de un plugin en sandbox funciona (si los usas).
+7. Los ticks del planificador aparecen en los logs del proceso.
+
+### Cálculo de costes: Workers gratis vs un VPS de 4 euros
+
+Cifras en orden de magnitud a septiembre de 2026. No las tomes como presupuesto.
+
+| Ruta | Coste mensual | Qué obtienes | Qué es tuyo |
+|---|---|---|---|
+| Workers Free | $0 | Sitio básico (las plantillas dejan el binding LOADER comentado), cuotas gratis de D1/R2/KV | Sin plugins en sandbox; tope de 5k transformaciones únicas/mes de Images; vigila la economía de peticiones SSR + D1 |
+| Workers Paid | ~$5/mes (verifícalo) | Worker Loader para plugins en sandbox e instalaciones del marketplace | Lo mismo, más acoplamiento a la plataforma |
+| VPS (clase Hetzner) | ~4-5 EUR/mes | Control total, SQLite + medios S3, hijo workerd, Docker | Copias de DB/medios, actualizaciones, uptime, parches de seguridad |
+
+Dos notas que la tabla esconde. El paquete es pesado: 23 MB descomprimido y 2,489 archivos, así que los cold starts del Worker y los tamaños de imagen de contenedor no son triviales. Y el Cloudflare Blog necesitó caché de objetos KV más Hyperdrive más Workers Cache para alcanzar sus números. Los sitios normales no lo necesitarán.
+
+Una tercera nota, ya que la economía del nivel gratis es la pregunta habitual: EmDash se renderiza en servidor, así que cada visita de página sin caché hace viajes de ida y vuelta a D1. Un blog de poco tráfico se quedará dentro de las cuotas gratis con comodidad. Un sitio de marketing con tráfico debería modelar peticiones en lugar de asumir que "escala a cero significa gratis". El Cloudflare Blog alcanzó ~70% de cobertura de caché solo tras añadir la capa de Workers Cache; tus valores por defecto serán menores.
+
+<Notice type="info" title="Revisa los precios antes de presupuestar">
+La documentación de EmDash cita requisitos de plan, no cifras en dólares. Verifica los precios de Workers Paid y Cloudflare Images en la página de precios de Cloudflare antes de poner números en una propuesta para un cliente.
+</Notice>
+
+Si quieres datos antes de comprometerte con una máquina, [cómo hacer benchmark de servidores cloud antes de comprometerte](/benchmark-cloud-servers/) es el flujo de trabajo YABS que yo uso.
+
+## Las trampas de operación que vas a encontrar
+
+Esta es la capa de troubleshooting que ninguna reseña de abril tenía. Todo lo de abajo viene de la propia documentación de despliegue y resolución de problemas de EmDash más el post-mortem de la migración. La documentación es honesta sobre esto. El modo de fallo son operadores que no la leen.
+
+### workerd en Node: bucles de caídas y la ventana de arranque de 10 segundos
+
+En Node.js, los plugins en sandbox corren dentro del runtime `workerd` de Cloudflare como proceso hijo. Es un proceso real con semántica de caídas real. El arranque debe responder en 10 segundos. Una salida inesperada dispara un reinicio con backoff de duplicación de 1 a 30 segundos. Y aquí está el filo: 5 caídas en 60 segundos y el runner se rinde hasta que reinicies el servidor. La línea de log es directa: "workerd crashed 5 times in 60 seconds, giving up". Desde entonces todos los hooks y rutas en sandbox fallan, mientras el sitio sigue sirviendo.
+
+El proceso hijo también recibe un entorno recortado: solo `PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`. Los secretos no se filtran al sandbox. Amplíalo con `EMDASH_WORKERD_PASSTHROUGH_ENV` si un plugin necesita más de verdad.
+
+Si las funciones de plugins en sandbox se mueren mientras el sitio sigue sirviendo, el bucle de caídas de workerd agotó sus reintentos. Reinicia el proceso de la app, luego comprueba `./node_modules/.bin/workerd --version` y confirma que el binario coincide con la plataforma de tu contenedor. Si en cambio el sandbox falla al arrancar dentro de Docker, el binario de workerd probablemente se compiló para la plataforma equivocada: un build multi-stage lo instaló en la plataforma del builder. Reinstálalo con las deps opcionales activadas en la plataforma de la etapa de runtime.
+
+### Rotación de EMDASH_ENCRYPTION_KEY y trampas de las copias de seguridad
+
+Configura `EMDASH_ENCRYPTION_KEY` antes de guardar el primer secreto de plugin. Genérala con `npx emdash secrets generate`. Guarda una copia de recuperación fuera de las copias de seguridad de tu D1 o SQLite, porque restaurar la base de datos sin la clave deja la configuración de los plugins ilegible.
+
+La rotación es manual y da un poco de miedo: genera una clave nueva, mantén las claves antiguas listadas separadas por comas hasta que cada secreto de plugin se haya vuelto a guardar bajo la clave nueva, y luego elimina las viejas. EmDash no informa de qué IDs de clave siguen en uso. Es una carencia documentada, no un bug que te estés imaginando.
+
+<Notice type="error" title="Trata EMDASH_ENCRYPTION_KEY como un secreto de producción">
+Guárdala en tu gestor de contraseñas o almacén de secretos. Nunca distribuyas una copia de seguridad de la base de datos sin una copia separada de su clave. Y nunca leas secretos desde `import.meta.env` en tu configuración: Vite incrusta las variables de entorno en el bundle en tiempo de compilación, lo que convierte una comodidad de configuración en un vector de fuga.
+</Notice>
+
+### Workers Cache sirviendo páginas obsoletas a editores con sesión iniciada
+
+Las respuestas sin una cabecera `Cache-Control` explícita se cachean durante unas 2 horas por la heurística del RFC 9111. Pon cabeceras explícitas en cada ruta personalizada: `private, no-store` para cualquier cosa dependiente de sesión.
+
+<Notice type="warning" title="Los editores pueden recibir la página anónima cacheada">
+El síntoma clásico: un editor con sesión iniciada abre una página pública y recibe la variante anónima cacheada, sin barra de edición visual, hasta que la caché expira. Las respuestas del admin y la API ya envían `private, no-store`; tus rutas personalizadas no. Pon cabeceras explícitas en cada ruta que añadas.
+</Notice>
+
+Si quieres caché en el edge sin Workers Cache, quienes se autoalojan pueden poner delante una CDN como [Bunny.net](https://go.bitdoze.com/bunny) para lo estático y los medios, y mantener la caché del origen explícita.
+
+<Notice type="warning" title="publicUrl de R2 lo expone todo">
+Si configuras `publicUrl` en un bucket R2 público, cada objeto dentro es alcanzable, incluidas las copias de seguridad JSON automáticas bajo `backups/`. Mantén las copias en una ruta privada o en un bucket separado, y mira [montar almacenamiento compatible con S3 en un VPS](/es/montar-bucket-s3-sistema-archivos-vps/) si quieres gestionar el bucket aparte de la app.
+</Notice>
+
+### Por qué miente el endpoint de salud
+
+La documentación sugiere añadir `src/pages/health.ts` que devuelva 200. Hazlo, pero entiende el límite: un 200 solo demuestra que Astro sirve peticiones. La salud de la base de datos, la del almacenamiento, las migraciones y el sandbox no están cubiertos. La documentación lo dice explícitamente.
+
+<Notice type="warning" title="Un /health en verde no es una puerta de deploy">
+Usa la checklist de abajo como tu puerta de deploy. `/health` es una sonda de vida, nada más.
+</Notice>
+
+<ListCheck>
+<ul>
+<li>Pide una página pública y confirma el contenido esperado</li>
+<li><code>npx emdash migrate --check</code> informa limpio</li>
+<li>Ciclo completo de publicación de borrador: publica, verifica la página pública, despublica</li>
+<li>Ciclo completo de subida, recuperación y borrado de medios</li>
+<li>Invoca un plugin en sandbox (si usas alguno)</li>
+<li>Confirma que el handler programado se dispara: <code>pnpm wrangler tail</code> en Cloudflare, logs del proceso en Node</li>
+</ul>
+</ListCheck>
+
+### Más trampas que conviene conocer
+
+<Accordion label="Falta react()" group="footguns">
+La UI del admin es una app React. Omitir la integración `react()` de Astro rompe el admin, incluso en un sitio Astro puro. Es la primera línea de config que hay que comprobar.
+</Accordion>
+
+<Accordion label="Las migraciones se autoaplican en la primera petición" group="footguns">
+El modo `auto` por defecto ejecuta migraciones en la primera petición tras un deploy. Eso es radio de explosión en producción. Ejecuta `npx emdash migrate --check` en CI primero, que es lo que la documentación recomienda para pipelines.
+</Accordion>
+
+<Accordion label="El planificador de Node se pausa con el proceso" group="footguns">
+La publicación programada y las tareas de plugins solo corren mientras haya un proceso activo. Mantén al menos un proceso corriendo. En Cloudflare el cron `* * * * *` cubre esto. Y recuerda: los posts programados no funcionaban en absoluto hasta la v0.19.0.
+</Accordion>
+
+<Accordion label="Entornos de preview y fijado de versiones" group="footguns">
+Los entornos con nombre de Wrangler no heredan bindings; repite cada binding en preview, y nunca apuntes el preview a la base de datos o el bucket de producción. Además fija `>= 0.37`: un pico de escaneo de filas de D1 en la limpieza programada de uso de medios (cientos de miles de filas por tick de cron en sitios grandes) se arregló en la 0.37.0.
+</Accordion>
+
+## Pros y contras tras la 1.0
+
+¿Entonces a qué se reduce esta reseña de EmDash CMS? A ocho intercambios emparejados. Lee la columna derecha dos veces antes de comprometerte; ahí es donde vive el coste operativo.
+
+| Pros | Contras |
+|---|---|
+| Modelo de seguridad de plugins genuinamente novedoso: manifiestos de capacidades, sandbox, ahora respaldado por un registro descentralizado firmado | El catálogo de plugins y temas es diminuto frente a los 60k+ plugins de WordPress; la madurez del ecosistema no está probada |
+| Prueba de producción real a escala: Cloudflare Blog sirviendo hasta 850 RPS, picos de 5k+, DDoS de 28k RPS absorbido en el edge, ~70% de aciertos de caché | Operas una base de datos, almacenamiento de medios, copias de seguridad y actualizaciones. La documentación lo dice con palabras claras |
+| Una sola unidad desplegable: sitio Astro + admin + API REST + MCP; las Live Content Collections hacen que las ediciones aparezcan en la siguiente petición sin recompilar | Solo Astro. Los usuarios de contenido-en-git explícitamente no son el objetivo |
+| Nativo para agentes sin el impuesto del hype: MCP en cada instalación, concurrencia `_rev` desde la 0.37.0, agent skills, CLI, importador de WP | La UX del admin aún está madurando. Los críticos de abril no estaban equivocados en eso; la propia migración de Cloudflare registró bugs del editor |
+| Adaptadores portables: D1/SQLite/libSQL/Postgres, R2/S3/local; ruta oficial con Docker y compose para un VPS barato | La historia del sandbox es más fuerte en Cloudflare (Workers Paid). En Node ejecutas `workerd`, el runtime de Cloudflare, como proceso hijo con su propia semántica de caídas |
+| Velocidad de entrega: ~37 releases en 6 meses, builds firmados, provenance de npm, 175+ colaboradores, MIT | La velocidad corta en ambos sentidos: breaking changes dentro de 0.x (el requisito `_rev` llegó en la 0.37.0) y deriva de la documentación (el README aún dice "beta" y lista 3 plantillas donde el repo tiene 5) |
+| Auth passkeys-first, roles RBAC, SSO opcional con Cloudflare Access | El email no viene configurado de fábrica en Workers; los magic links y las invitaciones fallan hasta que añades el plugin de email y el binding |
+| x402 integrado: gratis ignorarlo, interesante si quieres contenido con paywall para agentes | x402 es incipiente (~$28k/día en todo el ecosistema en abril) y la publicación programada estuvo rota hasta la 0.19.0. El riesgo de los primeros días es real |
+
+## Veredicto: quién debería usar EmDash (y quién no)
+
+![Diagrama de decisión para adoptar EmDash CMS: requisito de Astro, necesidades de los editores, disposición a operar una base de datos y elección de deploy entre Cloudflare y VPS](@assets/images/26/09/emdash-decision-flow.svg)
+
+**Agencia.** La apuesta más creíble para construir plataformas en años: plantillas para el handoff, plugins en sandbox como control del radio de explosión del soporte, Workers for Platforms y EmDash Build como maquinaria de sitios white-label. Pero elígelo para proyectos Astro nuevos donde controles el tema, no para clientes que exijan la tienda de plugins de WordPress. Vigila el registro por los plugins de pago; aún no están. Sí condicional.
+
+**Desarrollador Astro.** Si ya querías un CMS con base de datos en Astro, este es el default obvio frente a atornillar un CMS headless SaaS. `npx emdash types` más MCP lo hacen amigable para agentes, y la ruta Node + SQLite hace que Cloudflare sea opcional. Si eres un leal al contenido-en-git, no cambies; la documentación te da la razón. Sí, con esa salvedad.
+
+**Refugiado de WordPress.** La ruta de importación es real: WXR, REST API o WordPress.com vía el plugin EmDash Exporter con un Application Password. Los custom post types se mapean a colecciones, Gutenberg se convierte a Portable Text. Passkeys más RBAC son una mejora de seguridad. Pero el tema y cualquier comportamiento serio de plugin son una reconstrucción, el editor es TipTap en lugar de Gutenberg, y aceptas operar una base de datos. Migra primero un sitio de poca importancia. Avulux movió un microsite en menos de un día con agent skills; tu sitio de 40 plugins no será eso. Si decides que la reconstrucción no merece la pena y te quedas en WordPress, al menos puedes externalizar la parte operativa a hosting cloud gestionado como [Cloudways](https://go.bitdoze.com/cloudways). Condicional.
+
+**Bloguero solitario.** La comparación honesta es EmDash frente a markdown-en-git. Si lo único que haces es publicar, Astro estático más markdown sigue siendo más simple y barato: sin base de datos, sin admin, sin workerd. EmDash se gana su sitio en el momento en que quieres una UI de administración, posts programados, gestión de medios o coeditores que no son devs. El deploy casi gratis en Cloudflare (sin plugins en sandbox) o un VPS de 4 euros lo mantiene barato. Sí, pero solo pasado ese umbral.
+
+Hacia dónde va: EmDash Build hacia GA, plugins de pago vía Atproto Spaces Alpha, madurez continua del editor y lo que sea que haga WordPress a continuación. La conclusión de esta reseña de EmDash CMS: recomendado para equipos Astro que quieren un CMS de verdad y están dispuestos a ser dueños de una base de datos. Todavía no es un reemplazo de WordPress para sitios dependientes de plugins. Es una posición mucho mejor que la que tenía en abril.
+
+<Button text="Despliega Astro en un VPS esta noche" link="/deploy-astro-on-vps/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Preguntas frecuentes sobre EmDash CMS
+
+<Accordion label="¿Es gratis EmDash?" group="faq" expanded="true">
+Sí. Licencia MIT, open source, autoalojable. El nivel gratis de Cloudflare sirve para un sitio básico (las plantillas dejan el binding de Worker Loader comentado). Los plugins en sandbox necesitan Workers Paid, comúnmente citado en $5/mes (verifica el precio actual). La ruta VPS cuesta lo que cueste la máquina: 4 a 5 euros al mes es el suelo realista.
+</Accordion>
+
+<Accordion label="¿Funciona EmDash sin Cloudflare?" group="faq">
+Sí. Node.js con SQLite, libSQL o Postgres más almacenamiento S3 o local es una ruta de deploy documentada y de primera clase. El único código de Cloudflare en ese stack es el runtime del sandbox (`workerd`), que corre como proceso hijo en tu servidor. Base de datos, medios, copias de seguridad y actualizaciones son tuyos.
+</Accordion>
+
+<Accordion label="¿Puede importar desde WordPress?" group="faq">
+Sí, para el contenido. Exportación WXR, REST API o WordPress.com vía el plugin EmDash Exporter con un Application Password. Los custom post types se convierten en colecciones y el contenido Gutenberg se convierte a Portable Text. Los temas y el comportamiento de plugins personalizados son una reconstrucción. La documentación lo dice claramente.
+</Accordion>
+
+<Accordion label="¿Está EmDash listo para producción?" group="faq">
+La 1.0 más el Cloudflare Blog en producción (hasta 850 RPS, picos de 5k+) dice que sí para equipos que se hacen cargo de la operación. El ecosistema y la UX del admin aún son jóvenes. Fija `>= 0.37.x`, ejecuta la checklist de verificación antes del tráfico y trata la publicación programada con respeto (no existía hasta la 0.19.0).
+</Accordion>
+
+<Accordion label="¿Es EmDash solo lock-in de Cloudflare?" group="faq">
+No. Licencia MIT, adaptadores portables (D1/SQLite/libSQL/Postgres, R2/S3/local) y documentación de deploy en Node que no es Cloudflare-first. El riesgo de lock-in es la gravedad del ecosistema y el pulido, no la licencia. El runtime del sandbox es código de Cloudflare, pero también corre en tu propio servidor.
+</Accordion>
+
+Esto es una fotografía. A los tres meses volveré a comprobar el tamaño del catálogo del registro, la disponibilidad de plugins de pago, los arreglos del editor de la propia lista de bugs de la migración de Cloudflare y si las plantillas fijan Astro 7. Hasta entonces, los enlaces internos de arriba cubren las decisiones más amplias: elección de CMS para Astro, economía de Astro frente a WordPress y las rutas de autoalojamiento tanto en Workers como en VPS.
+
+<Button text="Compara opciones de CMS headless para Astro" link="/best-headless-cms-for-astro/" variant="outline" color="gray" size="md" />

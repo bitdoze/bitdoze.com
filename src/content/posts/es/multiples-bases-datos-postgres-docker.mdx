@@ -1,0 +1,572 @@
+---
+date: 2026-10-11T00:00:00Z
+lastmod: 2026-10-18T00:00:00Z
+translationKey: "multiple-postgres-databases-docker"
+title: "Múltiples Bases de Datos Postgres en un Solo Servicio Docker Compose"
+meta_title: "Múltiples Bases de Datos PostgreSQL en Docker Compose (2026)"
+description: "Crea múltiples bases de datos Postgres en un solo servicio Docker Compose usando un script de inicialización. Actualizado para rutas de volumen de Postgres 18, permisos por usuario y backups."
+image: "@assets/images/24/07/multiple-postgres-databases-docker.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "postgres", "docker-compose"]
+canonical: "https://www.bitdoze.com/es/multiples-bases-datos-postgres-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+La imagen oficial `postgres` de Docker crea exactamente una base de datos: la que nombras en `POSTGRES_DB`. No hay una variable de entorno oculta para múltiples bases de datos. La petición de funcionalidad upstream (docker-library/postgres#151) se cerró sin una. Para obtener múltiples bases de datos PostgreSQL en un solo servicio Docker Compose dejas caer un script de inicialización en `/docker-entrypoint-initdb.d` y dejas que el entrypoint de la imagen lo ejecute en el primer arranque. Ese sigue siendo el patrón oficialmente documentado, y funciona igual en PostgreSQL 18.
+
+Esta guía construye un contenedor alojando `db1`, `db2` y `db3` desde un único script de inicialización, luego añade una segunda variante que da a cada base de datos su propio usuario y contraseña. Está actualizada para el cambio de ruta de volumen de PostgreSQL 18, la corrección de permisos de schema de PostgreSQL 15+, y comandos `docker compose` v2 en todo. Si solo necesitas el trabajo de "docker postgres crear múltiples bases de datos" hecho, los pasos 1, 2 y 4 son todo el camino feliz.
+
+<Notice type="warning" title="Actualizado para PostgreSQL 18">
+¿Usas `postgres:18` o más nuevo? Monta <code>/var/lib/postgresql</code>, NO <code>/var/lib/postgresql/data</code>. En imágenes 18+ <code>PGDATA</code> se movió a <code>/var/lib/postgresql/18/docker</code>, así que el viejo montaje silenciosamente deja de persistir datos y todo desaparece cuando el contenedor se recrea. Los bloques de volumen correctos están en "Cambio de ruta de volumen de Postgres 18+" bajo el Paso 2. En `postgres:17` y anteriores, mantén la vieja ruta <code>/var/lib/postgresql/data</code>: montar el directorio padre ahí tampoco persiste datos.
+</Notice>
+
+## Por qué correr múltiples bases de datos PostgreSQL en un contenedor
+
+Cuatro razones por las que este patrón sigue apareciendo:
+
+<ListCheck>
+<ul>
+<li><b>Entornos de desarrollo y pruebas.</b> Un contenedor contiene cada base de datos que toca tu app. Un `docker compose up`, un flujo de logs, una cosa que reiniciar.</li>
+<li><b>Eficiencia de recursos en un VPS pequeño.</b> Un solo proceso Postgres significa un buffer pool y un conjunto de workers en segundo plano en vez de N copias. En una máquina de 2 vCPU / 4 GB esa diferencia es real.</li>
+<li><b>Apps multi-tenant.</b> Una base de datos por tenant, todavía gestionada como un único servicio con un único calendario de backup.</li>
+<li><b>Aplicaciones legadas.</b> Algunas apps esperan varias bases de datos en un servidor. Replicar eso en Docker hace la migración aburrida en vez de interesante.</li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="Cuándo no hacer esto">
+Un contenedor significa `max_connections` compartido, memoria compartida y radio de explosión compartido. Una mala query en `db1` puede dejar sin comer a `db3`. Un único punto de actualización es cómodo hasta que es una caída. Para cualquier cosa con necesidades distintas de uptime, ciclo de vida o cumplimiento, corre contenedores Postgres separados. Este patrón es un buen default para stacks de desarrollo y proyectos pequeños, no para aislamiento multi-tenant duro.
+</Notice>
+
+En costes esto es difícil de batir: todo el stack cabe en un único VPS de 4-6 EUR/mes. Yo lo correría en un [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) y mantendría un volcado nocturno fuera de la máquina. Un patrón de contenedor único relacionado es cómo [despliego PGvector y pgAdmin en Docker](/deploy-pgvector-pgadmin-docker/) para trabajo local de embeddings.
+
+## Prerequisitos
+
+<ListCheck>
+<ul>
+<li>Docker Engine con el plugin Compose v2. El viejo binario `docker-compose` v1 está en desuso; cada comando de abajo usa `docker compose` (espacio, sin guion).</li>
+<li>Un VPS Linux o host Docker local donde puedas ejecutar `docker`.</li>
+<li>Un directorio de proyecto para el archivo compose, el script de inicialización y los datos.</li>
+<li>Familiaridad básica con `psql`.</li>
+<li>Puerto 5432 libre en el host, o elige otro (5433 funciona bien).</li>
+</ul>
+</ListCheck>
+
+Comprueba lo que tienes:
+
+```sh
+docker compose version
+```
+
+Espera algo como `Docker Compose version v2.x.x`. Si ese comando falla, instala el paquete `docker-compose-plugin` o actualiza Docker antes de continuar.
+
+<Notice type="info" title="compose.yaml vs docker-compose.yml">
+Docker ahora documenta `compose.yaml` como el nombre de archivo preferido. El viejo `docker-compose.yml` sigue funcionando y Compose lo recoge automáticamente. Los ejemplos de abajo usan `compose.yaml`.
+</Notice>
+
+## Paso 1: crea el script de inicialización para múltiples bases de datos
+
+La imagen postgres ejecuta cada script en `/docker-entrypoint-initdb.d` en el primer arranque, ordenados por nombre, como el superusuario de bootstrap. El entrypoint hace source o ejecuta scripts de shell (`.sh`) y alimenta archivos SQL (`.sql`) a `psql`. Este es el patrón `docker-entrypoint-initdb.d` para múltiples bases de datos: no hay bandera nativa, solo estos hooks.
+
+Crea `init-multiple-databases.sh`:
+
+```sh
+#!/bin/bash
+
+set -e
+set -u
+
+function create_user_and_database() {
+  local database=$1
+  echo "  Creating user and database '$database'"
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "postgres" <<-EOSQL
+    CREATE USER $database;
+    CREATE DATABASE $database OWNER $database;
+    GRANT ALL PRIVILEGES ON DATABASE $database TO $database;
+EOSQL
+}
+
+if [ -n "${POSTGRES_MULTIPLE_DATABASES:-}" ]; then
+  echo "Multiple database creation requested: $POSTGRES_MULTIPLE_DATABASES"
+  for db in $(echo "$POSTGRES_MULTIPLE_DATABASES" | tr ',' ' '); do
+    create_user_and_database "$db"
+  done
+  echo "Multiple databases created"
+fi
+```
+
+Esto crea un usuario y una base de datos por nombre en `POSTGRES_MULTIPLE_DATABASES`, con el usuario poseyendo la base de datos. `CREATE DATABASE ... OWNER ...` importa más de lo que parece: en PostgreSQL 15+ es la diferencia entre "conecta" y "puede crear tablas". Más sobre eso en la sección por usuario y en resolución de problemas.
+
+Dos banderas hacen el trabajo de seguridad. `set -e` aborta el script en el primer error, y `ON_ERROR_STOP=1` hace que `psql` salga con código no cero en cualquier error SQL. Combinadas, una ejecución mala falla ruidosamente en vez de dejarte un clúster medio inicializado que parece bien.
+
+<Notice type="warning" title="Los scripts de inicialización corren solo una vez">
+Los scripts en `/docker-entrypoint-initdb.d` se ejecutan solo contra un directorio de datos vacío. Añadir `db4` a `POSTGRES_MULTIPLE_DATABASES` la semana que viene no hace nada: el clúster ya está inicializado y los scripts se saltan. Mira "Añadir una base de datos después" para la corrección.
+</Notice>
+
+Si el script falla a mitad de ejecución, el entrypoint sale. En el siguiente arranque con un directorio de datos medio inicializado, los scripts restantes tampoco correrán. Arregla el script, luego borra y re-inicializa (solo desarrollo) o repara manualmente con `psql`.
+
+## Paso 2: archivo Docker Compose para múltiples bases de datos Postgres
+
+Crea `compose.yaml` junto al script de inicialización:
+
+```yml
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    container_name: postgres_multi_db
+    restart: unless-stopped
+    shm_size: 128mb
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_MULTIPLE_DATABASES: db1,db2,db3
+    volumes:
+      - ./init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
+      - ./postgres_data:/var/lib/postgresql
+    ports:
+      - 127.0.0.1:5432:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d db1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+```
+
+Lo que cada parte te compra:
+
+- `POSTGRES_MULTIPLE_DATABASES: db1,db2,db3` es una lista simple separada por comas. El script de inicialización divide por comas y crea un usuario más una base de datos por nombre. Todas comparten el mismo login (`POSTGRES_USER`) en esta variante.
+- El script de inicialización se monta `:ro`. Solo se lee en la primera inicialización, así que solo lectura es el default correcto.
+- `127.0.0.1:5432:5432` enlaza solo a loopback. Si otra app en el mismo host necesita Postgres, eso es todo lo que necesitas. No publiques `5432:5432` al mundo a menos que de verdad lo quieras.
+- El healthcheck `pg_isready` te da una señal real de readiness en vez de "lee el log y entrecierra los ojos". Es lo que hace funcionar `docker compose up --wait` en el Paso 4.
+- `shm_size: 128mb` coincide con el ejemplo de la imagen oficial. Postgres usa memoria compartida para queries paralelas; el default de Docker (64 MB) es pequeño.
+
+La clave de nivel superior `version:` está en desuso e ignorada por el Compose moderno, así que déjala fuera. Fija la versión menor (`postgres:18.6-alpine`) si quieres builds reproducibles, o flota en `postgres:18-alpine` y acepta subidas menores. No uses `postgres:14` o `postgres:15` de tutoriales viejos: mira las notas de versiones al final.
+
+Si quieres una UI junto a tus stacks compose, [gestiona stacks Compose con Dockge](/es/instalar-dockge/) en vez de entrar por SSH para cada `docker compose ps`.
+
+### Cambio de ruta de volumen de Postgres 18+ (monta /var/lib/postgresql)
+
+Este es el cambio que muerde a la gente. En imágenes PostgreSQL 18, `PGDATA` se movió a un directorio específico de versión: `/var/lib/postgresql/18/docker`. El `VOLUME` de la imagen subió un nivel a `/var/lib/postgresql` (docker-library/postgres PR #1259, mergeado el 06-06-2025). La regla de ruta de montaje de volumen de postgres 18 en docker ahora va indexada a la versión mayor:
+
+| Mayor de imagen | Bind mount | Dónde aterrizan los datos |
+|---|---|---|
+| 18+ | `./postgres_data:/var/lib/postgresql` | `./postgres_data/18/docker` (persistido) |
+| 17 y anteriores | `./postgres_data:/var/lib/postgresql/data` | `./postgres_data` (persistido) |
+
+<Tabs>
+<Tab name="PostgreSQL 18+">
+
+```yml
+    volumes:
+      - ./init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
+      - ./postgres_data:/var/lib/postgresql
+```
+
+</Tab>
+<Tab name="PostgreSQL 17 y anteriores">
+
+```yml
+    volumes:
+      - ./init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
+      - ./postgres_data:/var/lib/postgresql/data
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="error" title="Pérdida de datos en postgres:18 con la ruta vieja">
+Si subes la imagen a `postgres:18` manteniendo el montaje `./postgres_data:/var/lib/postgresql/data`, las escrituras van al `PGDATA` propio de la imagen (`/var/lib/postgresql/18/docker`), que cae en un volumen anónimo. El bind mount se queda vacío. `docker compose down` seguido de `up` recrea el contenedor, el volumen anónimo desaparece, y tus bases de datos se han ido. Síntoma: `docker volume ls` muestra volúmenes anónimos y `postgres_data` está casi vacío. Arregla la ruta de montaje antes del primer `up`.
+</Notice>
+
+El aviso inverso del README oficial es igual de importante: en imágenes `postgres:17` y anteriores, montar `/var/lib/postgresql` (en vez de `/var/lib/postgresql/data`) NO persistirá datos a tu bind mount. Indexa el montaje a la versión mayor y deja de adivinar.
+
+Una victoria de operador de este cambio: como `PGDATA` ahora vive bajo la ruta versionada `/var/lib/postgresql/18/docker`, una actualización de versión mayor con `pg_upgrade --link` puede correr entre recreaciones de contenedor contra el mismo directorio montado. Los tutoriales viejos no podían hacer eso limpiamente.
+
+## Paso 3: configura las variables de entorno (.env)
+
+Pon las credenciales en `.env` junto a `compose.yaml` en vez de hardcodearlas:
+
+```sh
+POSTGRES_USER=myuser
+POSTGRES_PASSWORD=mypassword
+```
+
+El archivo compose ya las referencia con guardas: `${POSTGRES_USER:-postgres}` cae a `postgres`, y `${POSTGRES_PASSWORD:?set in .env}` se niega a arrancar si falta la contraseña. Luego bloquea el archivo:
+
+```sh
+chmod 600 .env
+```
+
+Compose lee `.env` para interpolación, pero no exporta nada a tu shell. Los comandos `psql` de abajo expanden `$POSTGRES_USER` del entorno del shell, así que carga el archivo una vez:
+
+```sh
+set -a; source .env; set +a
+echo "$POSTGRES_USER"
+```
+
+Esa última línea debe imprimir `myuser`. Si no imprime nada, el paso de exportación no corrió y cada `psql -U "$POSTGRES_USER"` de abajo fallará con `fe_sendauth` o `role "" does not exist`. También puedes simplemente reemplazar `$POSTGRES_USER` con el nombre de usuario literal en esos comandos.
+
+<Notice type="warning" title="Las contraseñas en variables de entorno no son secretos">
+Todo lo que pones en `environment:` es visible para cualquiera que pueda ejecutar `docker inspect`, incluyendo `POSTGRES_MULTIPLE_DATABASES` cuando usas el formato `db:user:pass` de abajo. La imagen soporta `POSTGRES_PASSWORD_FILE`, `POSTGRES_USER_FILE`, `POSTGRES_DB_FILE` y `POSTGRES_INITDB_ARGS_FILE` para las variables estándar, pero la variable multi-BD personalizada no obtiene manejo `_FILE`. Para secretos reales, mira [secretos de Docker Compose y alternativas seguras](/docker-compose-secrets/).
+</Notice>
+
+## Paso 4: corre el stack y espera al readiness
+
+```sh
+docker compose up -d --wait
+```
+
+`--wait` bloquea hasta que el healthcheck `pg_isready` pasa y devuelve no cero si el servicio nunca se pone healthy. Esa es una barrera de readiness real: si este comando sale con 0, puedes conectar. En un primer arranque es aquí donde ocurre el trabajo de "docker postgres crear múltiples bases de datos": el entrypoint hace source de tu script de inicialización antes de que el servidor acepte conexiones. No uses el nombre de binario legado `docker-compose up -d`.
+
+Las líneas interesantes en `docker compose logs postgres` se ven así (timestamps recortados):
+
+```sh
+postgres_multi_db  | /usr/local/bin/docker-entrypoint.sh: sourcing /docker-entrypoint-initdb.d/init-multiple-databases.sh
+postgres_multi_db  | Multiple database creation requested: db1,db2,db3
+postgres_multi_db  |   Creating user and database 'db1'
+postgres_multi_db  | CREATE ROLE
+postgres_multi_db  | CREATE DATABASE
+postgres_multi_db  | GRANT
+postgres_multi_db  |   Creating user and database 'db2'
+postgres_multi_db  | CREATE ROLE
+postgres_multi_db  | CREATE DATABASE
+postgres_multi_db  | GRANT
+postgres_multi_db  |   Creating user and database 'db3'
+postgres_multi_db  | CREATE ROLE
+postgres_multi_db  | CREATE DATABASE
+postgres_multi_db  | GRANT
+postgres_multi_db  | Multiple databases created
+postgres_multi_db  | PostgreSQL init process complete; ready for start up.
+postgres_multi_db  | database system is ready to accept connections
+```
+
+Cada base de datos debe producir `CREATE ROLE`, `CREATE DATABASE` y `GRANT`. Si ves `sourcing ... init-multiple-databases.sh` pero no `Multiple database creation requested`, la variable de entorno nunca llegó al contenedor. Si el contenedor sale justo después de la línea de sourcing, el script falló y `set -e` abortó la inicialización.
+
+<Notice type="info" title="sh: locale: not found es esperado en Alpine">
+Las imágenes basadas en Alpine imprimen `sh: locale: not found` y `WARNING: no usable system locales were found` durante `initdb`. Eso es musl siendo musl. Inofensivo para desarrollo. Si necesitas collations en condiciones, mira resolución de problemas abajo.
+</Notice>
+
+Confirma el readiness:
+
+```sh
+docker compose ps
+```
+
+`STATUS` debe leer `healthy`. Si estás haciendo esto en un host Dokploy (la versión original de este artículo corría bajo `/opt/stacks`), el mismo archivo compose funciona como servicio Dokploy: [despliega una app Docker Compose en Dokploy](/dokploy-docker-compose-app/).
+
+## Paso 5: verifica las bases de datos
+
+Lista las bases de datos:
+
+```sh
+docker compose exec postgres psql -U "$POSTGRES_USER" -c '\l'
+```
+
+Debes ver `db1`, `db2` y `db3` junto a `postgres`, `template0` y `template1`. Abreviado, las filas que importan se ven así:
+
+```sh
+  Name    |  Owner
+----------+---------
+  db1     | db1
+  db2     | db2
+  db3     | db3
+  postgres| myuser
+  ...
+```
+
+Ahora demuestra que los permisos funcionan. `\l` a solas nunca pillaría el bug de schema de PostgreSQL 15:
+
+```sh
+docker compose exec postgres psql -U db1 -d db1 -c 'CREATE TABLE _probe(i int); DROP TABLE _probe;'
+```
+
+Espera `CREATE TABLE` luego `DROP TABLE`. Cualquier `permission denied` aquí significa que falta la corrección de owner; salta a resolución de problemas.
+
+<ListCheck>
+<ul>
+<li>`docker compose ps` muestra el servicio `healthy`.</li>
+<li>`\l` lista db1, db2, db3.</li>
+<li>La sonda `CREATE TABLE _probe` / `DROP TABLE` tiene éxito como el usuario por base de datos.</li>
+<li>Deseable para el montaje PG18: `docker compose down && docker compose up -d --wait`, luego `\l` sigue listando las bases de datos. Si desaparecen, tu ruta de montaje está mal.</li>
+</ul>
+</ListCheck>
+
+## Usuarios y contraseñas distintas por base de datos
+
+Si cada base de datos debería tener su propio login, cambia a un formato `db:user:pass` y arregla la propiedad en el momento de creación. Esta es la variante que la versión vieja de este artículo hacía mal en PostgreSQL 15+.
+
+<Notice type="error" title="PostgreSQL 15+: GRANT ALL no basta">
+<code>GRANT ALL PRIVILEGES ON DATABASE</code> no otorga CREATE sobre el schema <code>public</code>. Desde PostgreSQL 15 el schema <code>public</code> no otorga CREATE a PUBLIC y es propiedad de <code>pg_database_owner</code>. El usuario conecta bien y luego cada <code>CREATE TABLE</code> falla con <code>ERROR: permission denied for schema public</code>. La corrección es una cláusula: <code>CREATE DATABASE $database OWNER $user;</code>
+</Notice>
+
+Reemplaza `init-multiple-databases.sh` con:
+
+```sh
+#!/bin/bash
+
+set -e
+set -u
+
+function create_user_and_database() {
+  local database=$1 user=$2 password=$3
+  echo "  Creating user '$user' and database '$database'"
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL
+    CREATE USER $user WITH PASSWORD '$password';
+    CREATE DATABASE $database OWNER $user;
+    GRANT ALL PRIVILEGES ON DATABASE $database TO $user;
+EOSQL
+}
+
+if [ -n "${POSTGRES_MULTIPLE_DATABASES:-}" ]; then
+  echo "Multiple database creation requested: $POSTGRES_MULTIPLE_DATABASES"
+  for cfg in $(echo "$POSTGRES_MULTIPLE_DATABASES" | tr ',' ' '); do
+    IFS=':' read -r db user pass <<< "$cfg"
+    create_user_and_database "$db" "$user" "$pass"
+  done
+  echo "Multiple databases created"
+fi
+```
+
+Y pasa las tuplas en `compose.yaml`:
+
+```yml
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_MULTIPLE_DATABASES: db1:user1:pass1,db2:user2:pass2,db3:user3:pass3
+```
+
+El formato es `database:user:password`, separado por comas. Dos limitaciones a conocer antes de copiar esto a producción:
+
+1. Las contraseñas no pueden contener `:` ni `'`. El `:` rompe la división de campos y `'` rompe el literal SQL. Genera contraseñas solo con `[A-Za-z0-9]` para este esquema, o pasa a un montaje de variable de entorno por base de datos.
+2. Estos valores son variables de entorno en plano. `docker inspect` las muestra todas. Bien en un portátil de desarrollo, no bien en un host compartido.
+
+Verifica la corrección del mismo modo que el Paso 5, pero como el usuario por base de datos:
+
+```sh
+docker compose exec postgres psql -U user1 -d db1 -c 'CREATE TABLE _probe(i int); DROP TABLE _probe;'
+```
+
+Si eso devuelve `CREATE TABLE` / `DROP TABLE`, la propiedad es correcta y `user1` puede construir schema en `db1`.
+
+<Accordion label="¿Por qué poseer la base de datos arregla el schema public?" group="faq">
+Antes de PostgreSQL 15, cualquiera con CONNECT podía crear objetos en el schema `public`. PG 15 eliminó ese permiso CREATE de PUBLIC e hizo a `pg_database_owner` el propietario de `public`. Así que el camino a "este usuario puede crear tablas aquí" es ahora: el usuario posee la base de datos, `pg_database_owner` resuelve a ese propietario para la base de datos, y el propietario naturalmente tiene CREATE sobre `public`. Por eso `CREATE DATABASE db1 OWNER user1` reemplaza el viejo combo `CREATE DATABASE db1` + `GRANT ALL`. `GRANT ALL PRIVILEGES ON DATABASE` solo toca privilegios a nivel de base de datos (CONNECT, CREATE, TEMP), no a nivel de schema.
+</Accordion>
+
+## Añadir una base de datos después (los scripts de inicialización corren solo una vez)
+
+La sorpresa más común con montajes de `docker-entrypoint-initdb.d` para múltiples bases de datos: los scripts no se re-ejecutan. Disparan solo cuando el directorio de datos está vacío. Editar `POSTGRES_MULTIPLE_DATABASES` y reiniciar no cambia nada. Tres caminos:
+
+**1. Créala manualmente (default, funciona en todas partes).** Necesitas el rol y la base de datos:
+
+```sh
+docker compose exec postgres psql -U "$POSTGRES_USER" -c "CREATE USER user4 WITH PASSWORD 'pass4';"
+docker compose exec postgres psql -U "$POSTGRES_USER" -c "CREATE DATABASE db4 OWNER user4;"
+docker compose exec postgres psql -U "$POSTGRES_USER" -c "GRANT ALL PRIVILEGES ON DATABASE db4 TO user4;"
+```
+
+Los mismos one-liners funcionan para la variante simple: `CREATE DATABASE db4 OWNER db4;`. Comprueba que aterrizó:
+
+```sh
+docker compose exec postgres psql -U "$POSTGRES_USER" -c "SELECT datname FROM pg_database ORDER BY 1;"
+```
+
+**2. Borra y re-inicializa (solo desarrollo).**
+
+```sh
+docker compose down -v
+docker compose up -d --wait
+```
+
+<Notice type="error" title="down -v borra tus datos">
+<code>docker compose down -v</code> elimina el contenido del directorio de datos junto con los volúmenes anónimos. Cada base de datos del clúster se va con él. Nunca corras esto contra un stack que contenga algo que te importe. Si necesitas una ruta de rollback antes de un cambio arriesgado, toma un volcado primero (mira la sección de backup).
+</Notice>
+
+**3. Mantén el script idempotente.** Si de verdad quieres un script re-ejecutable (por ejemplo montado en un entrypoint personalizado), haz los CREATE condicionales:
+
+```sh
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<-EOSQL
+    SELECT 'CREATE USER user4'
+    WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'user4')\gexec
+    SELECT 'CREATE DATABASE db4 OWNER user4'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'db4')\gexec
+EOSQL
+```
+
+Eso es útil para un hook de "levanta lo que falte". La imagen de serie sigue corriendo los scripts de inicialización solo una vez, así que este patrón necesita tu propio wrapper si lo quieres en cada arranque.
+
+Disparador realista para los tres: una nueva app aterriza en el servidor y quiere su propia base de datos. [Self-hosteas analítica Umami en Docker](/umami-analytics-install/) o un wiki y espera que `umami` ya exista. Crea la base de datos manualmente (opción 1) y sigue adelante.
+
+## Resolución de errores comunes
+
+### "permission denied for schema public"
+
+```sh
+ERROR:  permission denied for schema public
+LINE 1: CREATE TABLE foo (id int);
+```
+
+Causa: PostgreSQL 15+ eliminó CREATE para PUBLIC sobre el schema `public`, y tu usuario por base de datos no posee la base de datos. Arregla en el momento de creación con `CREATE DATABASE $database OWNER $user;` o después:
+
+```sh
+docker compose exec postgres psql -U "$POSTGRES_USER" -c "ALTER DATABASE db1 OWNER TO user1;"
+```
+
+Vuelve a probar con la sonda `CREATE TABLE _probe` del Paso 5.
+
+### Puerto 5432 ya en uso
+
+```sh
+Error response from daemon: driver failed programming external connectivity ... bind: address already in use
+```
+
+Encuentra al ocupante:
+
+```sh
+ss -ltnp | grep 5432
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep 5432
+```
+
+Luego o para el otro listener, remapea a `127.0.0.1:5433:5432`, o elimina el bloque `ports:` por completo. Si solo contenedores necesitan este Postgres, pueden hablar por la red compose sin publicar ningún puerto de host.
+
+### sh: locale: not found y "no usable system locales were found"
+
+Esperado en imágenes Alpine. `initdb` busca locales del sistema, musl no las trae, y Postgres registra un aviso y cae a collations `en_US.utf8` / C. Inofensivo para desarrollo y la mayoría de apps. Si necesitas soporte real de collations (ordenación, constraints únicos sobre texto acentuado), cambia a la imagen no-Alpine o usa locales ICU:
+
+```yml
+    environment:
+      POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=en-US"
+```
+
+El soporte de locales ICU está disponible en imágenes basadas en Alpine desde `postgres:15-alpine` en adelante (las imágenes PostgreSQL 16+ lo traen).
+
+### Los datos desaparecieron tras recrear el contenedor
+
+O `docker compose down -v` corrió en algún momento, o caíste en el error de ruta de montaje de PostgreSQL 18. Comprueba:
+
+```sh
+docker volume ls
+ls -la ./postgres_data
+```
+
+Con el montaje PG18 equivocado, `postgres_data` se queda casi vacío mientras un volumen anónimo contiene tus datos hasta que el contenedor se recrea. Arregla la entrada `volumes:` para que coincida con tu mayor de imagen (mira la tabla del Paso 2), luego restaura desde backup. No hay recuperación en sitio una vez que el volumen anónimo desaparece.
+
+### El script de inicialización falló y ahora nada corre
+
+Síntoma: el contenedor sale durante el primer arranque, el log termina justo tras `sourcing /docker-entrypoint-initdb.d/...`. `set -e` y `ON_ERROR_STOP=1` hicieron su trabajo. Arregla el script (comillas, SQL malo, contraseña con un `'`), luego:
+
+```sh
+docker compose down -v
+docker compose up -d --wait
+```
+
+Solo seguro antes de tener datos reales. Si el clúster está medio inicializado y contiene datos que necesitas, conéctate como el superusuario de bootstrap y termina los CREATE a mano en vez de borrar.
+
+<Notice type="info" title="Revisa tu tag de imagen primero">
+La mayoría de estos fallos son problemas de desajuste de versiones. Un tutorial escrito para `postgres:14` te engañará en `postgres:18` (ruta de montaje) y en `postgres:15+` (permisos de schema). Confirma con `docker compose exec postgres psql -c 'SELECT version();'` antes de depurar cualquier otra cosa.
+</Notice>
+
+## Backup y restauración de múltiples bases de datos
+
+Un contenedor con N bases de datos significa N volcados más los roles. La parte de roles es lo que todo el mundo olvida: los usuarios por base de datos creados por el script de inicialización viven en el catálogo global, no dentro del volcado de ninguna base de datos.
+
+Volcar cada base de datos en formato personalizado:
+
+```sh
+for db in db1 db2 db3; do
+  docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -Fc "$db" > "${db}.dump"
+done
+```
+
+Volcar roles, tablespaces y grants:
+
+```sh
+docker compose exec -T postgres pg_dumpall --globals-only > globals.sql
+```
+
+Restaurar en el orden correcto, globals primero (los roles deben existir antes de que las bases de datos puedan referenciarlos):
+
+```sh
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -f - < globals.sql
+docker compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d db1 --clean --if-exists < db1.dump
+```
+
+`--clean --if-exists` hace la restauración re-ejecutable sobre una base de datos existente. Sin esas banderas, `pg_restore` falla en objetos que ya existen.
+
+<ListCheck>
+<ul>
+<li>Un `pg_dump -Fc` por base de datos (bucle sobre `POSTGRES_MULTIPLE_DATABASES`).</li>
+<li>`pg_dumpall --globals-only` para roles y grants.</li>
+<li>Copia offsite de ambos: almacenamiento compatible con S3 está bien, los volcados son pequeños.</li>
+<li>Prueba la ruta de restauración antes de necesitarla. Un backup sin probar es una esperanza, no un plan.</li>
+</ul>
+</ListCheck>
+
+Programa esto y empuja los artefactos a almacenamiento de objetos: [programa backups de Postgres a Cloudflare R2 con Dokploy](/dokploy-backups-cloudflare-r2/). El orden de restauración de arriba dobla como tu ruta de rollback para una migración mala: restaura el último volcado de la base de datos afectada y reejecuta lo que venga después.
+
+<Button text="Programa backups de Postgres a Cloudflare R2" link="/dokploy-backups-cloudflare-r2/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+Toma un volcado fresco antes de cualquier salto de versión mayor. Los fallos de `pg_upgrade` son raros, los fallos de "sin backup antes de la actualización" no.
+
+## Notas de versiones de PostgreSQL + Docker (octubre 2026)
+
+| Elemento | Estado (2026-10-11) |
+|---|---|
+| PostgreSQL 18 | Mayor actual, GA 25-09-2025. Última menor 18.6 (13-08-2026) |
+| PostgreSQL 17 | 17.11 (13-08-2026), soportada hasta el 08-11-2029 |
+| PostgreSQL 13 | EOL 13-11-2025 (ya pasado) |
+| PostgreSQL 14 | EOL 12-11-2026 (a un mes) |
+| Tags de imagen | `18.6-alpine3.24`, `18-alpine`, `17.11-alpine`; `latest`/`alpine` resuelven a 18.6 |
+| Variable multi-BD | Ninguna. docker-library/postgres#151 cerrado. Los scripts de inicialización siguen siendo la respuesta |
+
+<Notice type="warning" title="PostgreSQL 14 llega a EOL el 12-11-2026">
+Si un tutorial viejo te dejó en `postgres:14` o `postgres:15`, planea el movimiento ahora. EOL significa no más releases menores, incluyendo correcciones de seguridad. PostgreSQL 13 ya está fuera de soporte. No saltes a PostgreSQL 19 todavía: sigue en beta.
+</Notice>
+
+Fuente de verdad para estas cifras: `https://www.postgresql.org/versions.json` y el README de la imagen oficial. Los números de versión envejecen rápido; revisa ambos antes de fijar nada a largo plazo.
+
+## Seguridad y endurecimiento para producción
+
+Lista corta, alto valor:
+
+<ListCheck>
+<ul>
+<li>Enlaza a loopback: <code>127.0.0.1:5432:5432</code>, o no publiques ningún puerto de host si solo contenedores necesitan la base de datos.</li>
+<li>Recuerda que Docker pasa por encima de UFW. Los puertos publicados son accesibles independientemente de tus reglas de firewall. Mira [cómo Docker pasa por encima de UFW y cómo arreglarlo](/docker-bypasses-firewall/).</li>
+<li>Mantén el método de autenticación del host por defecto. Las imágenes PostgreSQL 14+ usan `scram-sha-256`. Nunca pongas `POSTGRES_HOST_AUTH_METHOD=trust` en un host en red.</li>
+<li>`chmod 600 .env` y deja de poner contraseñas reales en `compose.yaml`.</li>
+<li>Quédate en el usuario `postgres` no-root de la imagen (el default). No corras el contenedor como root para "arreglar" un error de permisos.</li>
+<li>Topea recursos para que una base de datos ruidosa no pueda hacer OOM al host: `shm_size: 128mb` más `mem_limit` (Compose) o límites deploy.</li>
+<li>Fija el tag de imagen y sube menores deliberadamente. Flotar en `latest` en producción es cómo descubres el cambio de montaje de PG18 a las 2 de la mañana.</li>
+</ul>
+</ListCheck>
+
+Para la historia de endurecimiento más amplia en un host Docker (SSH, actualizaciones desatendidas, informes de auditoría), recorrí [cómo aseguré mi servidor Docker en un recorrido de informe BSI](/bsi-security-report-docker-ufw/).
+
+## FAQ
+
+<Accordion label="¿Puedo correr múltiples versiones de Postgres en un contenedor?" group="faq" expanded="true">
+No. Una imagen trae una mayor de PostgreSQL. `postgres:18` no puede abrir un directorio de datos de `17`. Si necesitas dos mayores lado a lado, corre dos contenedores (puertos distintos, directorios de datos distintos) o usa un gestor de versiones en el host. Mezclar mayores en un contenedor no está soportado y no es recuperable.
+</Accordion>
+
+<Accordion label="¿Un contenedor con muchas bases de datos está listo para producción?" group="faq">
+Bien para desarrollo, staging y proyectos pequeños donde las bases de datos comparten ciclo de vida y objetivo de disponibilidad. Divide en contenedores separados cuando los tenants necesiten aislamiento, cuando la cadencia de backup/restauración de una base de datos difiera de las demás, o cuando un único pool compartido de `max_connections` se convierta en cuello de botella. Default aburrido: un contenedor por aplicación en producción.
+</Accordion>
+
+<Accordion label="¿Necesito un usuario por base de datos?" group="faq">
+No. La variante simple (un login `POSTGRES_USER` que puede alcanzar cada base de datos) es más fácil de operar y suficiente cuando las aplicaciones ya comparten un límite de confianza. Añade usuarios por base de datos cuando distintas apps o equipos conecten con credenciales distintas y quieras mínimo privilegio a nivel de base de datos.
+</Accordion>
+
+<Accordion label="¿Por qué no usar simplemente POSTGRES_DB?" group="faq">
+`POSTGRES_DB` crea exactamente una base de datos. No hay variante plural en la imagen oficial: la petición de una (docker-library/postgres#151) se cerró sin implementación. Los scripts de inicialización en `/docker-entrypoint-initdb.d` siguen siendo la forma soportada de crear múltiples bases de datos PostgreSQL en un solo servicio Docker Compose.
+</Accordion>
+
+## Próximos pasos
+
+Ahora tienes un servicio Postgres con N bases de datos, permisos verificados, y una ruta de volcado/restauración. Desde aquí: programa los volcados fuera de la máquina, mantén el tag de imagen fijado, y divide el clúster cuando las bases de datos dejen de compartir los mismos requisitos de uptime. El patrón del script de inicialización no ha cambiado en años; la ruta de montaje y los permisos de schema sí. Esos dos son los que rompen a la gente.

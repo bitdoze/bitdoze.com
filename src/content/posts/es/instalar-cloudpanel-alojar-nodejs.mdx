@@ -1,0 +1,513 @@
+---
+date: 2026-09-27T00:00:00Z
+lastmod: 2026-09-27T00:00:00Z
+translationKey: "install-cloudpanel-host-nodejs"
+title: "Cómo instalar CloudPanel y alojar apps Node.js (2026)"
+meta_title: "Instala CloudPanel y aloja apps Node.js en un VPS (2026)"
+description: "Instala CloudPanel en un VPS y aloja apps Node.js paso a paso: configuración de Nginx + SSL, despliegue de Strapi 5 y cómo mantenerla en línea con PM2. Actualizado para 2026."
+image: "@assets/images/23/instal-cloudpanel-host-nodejs.jpeg"
+categories: ["hosting"]
+authors: ["Dragos"]
+tags: ["cloudpanel", "node", "pm2"]
+canonical: "https://www.bitdoze.com/es/instalar-cloudpanel-alojar-nodejs/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import { Picture, Image } from "astro:assets";
+import cloudpanelNodeSite from "@assets/images/23/sanity_node.jpeg";
+import cloudpanelStack from "@assets/images/23/cloudpanel-nodejs-stack.svg";
+import cloudpanelPortMap from "@assets/images/23/cloudpanel-nodejs-port-mapping.svg";
+
+Esta guía te muestra cómo instalar CloudPanel en un VPS y alojar apps Node.js de principio a fin: una VM nueva, un sitio Node.js detrás de Nginx con SSL, un despliegue de Strapi 5 y PM2 para que la app sobreviva a los reinicios. CloudPanel es un panel de hosting gratuito sin licencias ni límites por sitio. La versión actual es v2.5.4 (julio de 2026), que añade Node.js 24 LTS, MariaDB 12.3 y soporte para Ubuntu 26.04, y los pasos de abajo corresponden a ese stack.
+
+Si todavía estás comparando paneles, tengo un resumen aparte de los [mejores paneles de servidor autoalojados](/best-self-hosted-panels/) y en qué destaca cada uno.
+
+<ListCheck>
+<ul>
+<li>Un VPS nuevo que sea una VM de verdad (no LXC/LXD/OpenVZ) con acceso SSH como root</li>
+<li>Ubuntu 26.04, 24.04 o 22.04 LTS, o Debian 13/12</li>
+<li>1 núcleo de CPU, 2 GB de RAM y 10 GB de disco como mínimo (4 GB de RAM si vas a compilar Strapi en la máquina)</li>
+<li>Un dominio o subdominio que puedas apuntar a la IP del VPS</li>
+<li>De 20 a 30 minutos</li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="Guías relacionadas de CloudPanel">
+¿Quieres CloudPanel como proxy inverso para contenedores Docker? Consulta [Configurar CloudPanel con Docker y Dockge](/cloudpanel-setup-dockge/). Para copias de seguridad externas de tus sitios y bases de datos, consulta [copias de seguridad remotas de CloudPanel](/cloudpanel-remote-backups/). ¿Buscas apps autoalojadas gratuitas? Revisa la [sección self hosted de toolhunt.net](https://toolhunt.net/sh/).
+</Notice>
+
+La configuración por defecto de esta guía es una VM Hetzner de clase CX22/CX32 con Ubuntu 24.04. Los comandos de abajo siguen la documentación del instalador de CloudPanel para Hetzner a septiembre de 2026.
+
+## Qué ofrece CloudPanel
+
+Obtienes mucho por $0. Las versiones de abajo son las que incluye la línea v2.5.x actual:
+
+<ListCheck>
+<ul>
+<li>Nginx 1.30 con HTTP/3 y el módulo PageSpeed</li>
+<li>Node.js 12 a 24 (solo versiones LTS, incluida la 24)</li>
+<li>PHP 7.1 a 8.5 y Python 3.14</li>
+<li>MySQL 8.0/8.4 y MariaDB hasta 12.3</li>
+<li>Redis 8 y Varnish Cache 7.7 (útil para WordPress, consulta [acelerar WordPress con CloudPanel Varnish Cache](/cloudpanel-varnish-cache/))</li>
+<li>Certificados gratuitos de Let's Encrypt e integración con Cloudflare</li>
+<li>Copias de seguridad remotas con Rclone</li>
+<li>Firewall, cron jobs, editor de vhosts y más de 30 plantillas de vhost configuradas</li>
+<li>Acceso SSH/FTP, gestor de archivos, bloqueador de IPs y bots</li>
+<li>Autenticación en dos pasos y Basic Auth en el área de administración</li>
+<li>Gestión de usuarios y gráficas de uso de recursos del sistema</li>
+</ul>
+</ListCheck>
+
+El panel es open-core. El repositorio [cloudpanel-io/cloudpanel-ce](https://github.com/cloudpanel-io/cloudpanel-ce) tiene unas 1.9k estrellas y el último push llegó el 2026-07-01, así que sigue mantenido activamente.
+
+La división de responsabilidades importa para el resto de esta guía. CloudPanel gestiona Nginx, TLS y la base de datos. Reenvía el tráfico al puerto de tu app y ahí termina. Tu proceso Node.js, y mantenerlo vivo, es cosa tuya (PM2 se encarga de eso en la sección 3):
+
+<Image src={cloudpanelStack} alt="Resumen del stack de CloudPanel: un VPS (VM) con Ubuntu o Debian, CloudPanel gestionando Nginx 1.30, SSL y MariaDB o MySQL, y una app Node.js Strapi 5 escuchando en 127.0.0.1:1337 mantenida en marcha por PM2" />
+
+## Requisitos mínimos
+
+- 1 núcleo de CPU (2+ recomendados para producción). Tanto x86 como ARM64 funcionan, así que las máquinas ARM baratas como Hetzner CAX o las instancias Oracle Ampere son válidas.
+- 2 GB de RAM (4 GB+ recomendados para producción)
+- 10 GB de espacio en disco
+
+<Notice type="warning" title="Sin soporte para contenedores Linux">
+CloudPanel solo admite máquinas virtuales. Los contenedores LXC, LXD y OpenVZ no están soportados y fallarán de formas extrañas. Muchas de las ofertas de VPS más baratas son contenedores por dentro, así que verifica qué estás comprando antes de hacer el pedido.
+</Notice>
+
+Si quieres monitorizar recursos del servidor como CPU, memoria y disco, consulta: [Cómo monitorizar recursos del servidor y de Docker](/sever-monitoring/). Si quieres alertas por email cuando la carga suba: [Monitorizar el uso de CPU y enviar alertas por email en Linux](/monitor-cpu-usage-and-send-email-alerts-in-linux/).
+
+Orden de magnitud del coste de una máquina para este stack: Hetzner ronda los 4-8 EUR al mes, DigitalOcean y Vultr están en torno a 10-12 USD por specs comparables, y Hostinger suele ser más barato a largo plazo. Strapi más MariaDB va cómodo con 4 GB, así que la franja de 10-15 USD al mes es el punto ideal.
+
+## Elegir un VPS
+
+CloudPanel tiene integraciones directas con DigitalOcean, Vultr, Hetzner, Hostinger, AWS, Google Cloud, Donweb, Microsoft Azure y Oracle Cloud. En los proveedores compatibles puedes crear y gestionar snapshots directamente desde la UI de CloudPanel.
+
+Este artículo usa [Hetzner](https://go.bitdoze.com/hetzner) con Ubuntu 24.04. Si estás eligiendo proveedor, mi comparativa de [DigitalOcean vs Vultr vs Hetzner](/digitalocean-vs-vultr-vs-hetzner/) entra en los compromisos de precio/rendimiento, y [cómo hacer benchmark a servidores cloud](/benchmark-cloud-servers/) muestra cómo evaluar un VPS antes de comprometer cargas de trabajo en él.
+
+Los precios de los VPS subieron en general en 2026. Si estás reconsiderando una máquina alquilada, consulta [qué cambió y cuándo gana un mini PC](/vps-price-increases/): una máquina pequeña de la clase del [ASUS DC510 mini PC](https://go.bitdoze.com/asus-dc510) puede amortizarse frente a años de facturas de VPS si te sientes cómodo alojando en casa.
+
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 gratis" />
+<Button link="https://go.bitdoze.com/vultr" text="Vultr $100 gratis" />
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 gratis" />
+<Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
+
+## Videotutorial
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/5KndMFz-VKQ"
+  label="Cómo instalar CloudPanel y alojar apps Node.js"
+/>
+
+<Notice type="info" title="El vídeo es de 2023">
+El tutorial se grabó en febrero de 2023. El hash del instalador, la lista de SO y la versión de Node.js en los pasos escritos de abajo están actualizados y son la referencia canónica: usa esos cuando difieran del vídeo.
+</Notice>
+
+Si quieres un panel web que también funcione como proxy inverso, echa un vistazo a este curso:
+
+<Button
+  link="https://webdoze.net/courses/cloudpanel-setup/"
+  text="Curso de configuración de CloudPanel"
+/>
+
+## Actualizar una instalación de CloudPanel existente
+
+Si instalaste CloudPanel después de la versión 2023 de este artículo y solo necesitas ponerte al día: CloudPanel se distribuye como paquete deb y se actualiza con un comando como root.
+
+<Notice type="warning" title="Haz un snapshot primero">
+Haz un snapshot o una copia de seguridad antes de actualizar. `clp-update` ha sido fluido en la práctica, pero un snapshot es el único camino real de vuelta atrás. Consulta [copias de seguridad remotas de CloudPanel](/cloudpanel-remote-backups/) para una opción externa.
+</Notice>
+
+```bash
+sudo clp-update
+```
+
+Verifica la nueva versión en el pie del panel después de actualizar (quieres v2.5.4 o superior).
+
+Si quieres probar versiones antes de que lleguen a todos los demás, existe un canal de pruebas:
+
+```bash
+clpctl cloudpanel:set:release-channel --channel='test'
+```
+
+Qué incluyeron las versiones recientes: v2.5.4 (2026-07-01) añadió Node.js 24 LTS, MariaDB 12.3 y soporte para Ubuntu 26.04; v2.5.3 (2025-12-04) añadió PHP 8.5 y correcciones de instalación en Debian 13; v2.5.2 (2025-08-05) añadió MySQL 8.4; v2.4.2 (2024-05-21) añadió HTTP/3 y Node.js 22.
+
+Nota: el hash del instalador de la siguiente sección es para instalaciones **nuevas**. Las instalaciones existentes solo ejecutan `clp-update`; nunca se vuelve a ejecutar el instalador.
+
+## 1. Instalar CloudPanel
+
+Una vez creado el VPS, entra por SSH y ejecuta los comandos de abajo.
+
+### 1.1 Actualizar el SO
+
+Hazlo en una VM nueva como root antes que nada:
+
+```bash
+apt update && apt -y upgrade && apt -y install curl wget sudo
+```
+
+Confirma que estás en un SO soportado antes de seguir:
+
+```bash
+cat /etc/os-release
+```
+
+CloudPanel soporta Ubuntu 26.04 LTS, 24.04 LTS, 22.04 LTS y Debian 13 (Trixie) o 12 (Bookworm). Debian 11 ya no está soportado.
+
+### 1.2 Instalar CloudPanel
+
+El hash del instalador de abajo está vigente a septiembre de 2026. Consulta siempre la [documentación de instalación de CloudPanel](https://www.cloudpanel.io/docs/v2/getting-started/hetzner-cloud/installation/installer/) para el último hash y la lista completa de opciones de base de datos.
+
+<Tabs>
+<Tab name="Hetzner + MariaDB 12.3">
+```bash
+curl -sS https://installer.cloudpanel.io/ce/v2/install.sh -o install.sh; \
+echo "8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  install.sh" | \
+sha256sum -c && sudo CLOUD=hetzner DB_ENGINE=MARIADB_12.3 bash install.sh
+```
+</Tab>
+<Tab name="Hetzner + MySQL 8.4">
+```bash
+curl -sS https://installer.cloudpanel.io/ce/v2/install.sh -o install.sh; \
+echo "8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  install.sh" | \
+sha256sum -c && sudo CLOUD=hetzner DB_ENGINE=MYSQL_8.4 bash install.sh
+```
+</Tab>
+</Tabs>
+
+Para instalaciones nuevas en Ubuntu 24.04 o 26.04, toma MariaDB 12.3 como predeterminado. MySQL 8.4 está bien si ya usas MySQL en todas partes. Qué motores de base de datos están disponibles depende de tu SO:
+
+| SO | Opciones de base de datos |
+|----|---------------------------|
+| Ubuntu 26.04 | MySQL 8.4, MariaDB 12.3, MariaDB 11.8 |
+| Ubuntu 24.04 | MySQL 8.4/8.0, MariaDB 12.3/11.4/10.11 |
+| Ubuntu 22.04 | MySQL 8.0, MariaDB 11.4/10.11/10.6 |
+| Debian 13 | MySQL 8.4/8.0, MariaDB 12.3/11.8 |
+| Debian 12 | MySQL 8.4/8.0, MariaDB 12.3/11.4 |
+
+Para proveedores que no sean Hetzner, cambia el valor de `CLOUD=` (por ejemplo `CLOUD=aws`) u omítelo por completo.
+
+<Notice type="info" title="El hash rota">
+El SHA-256 cambia cada vez que CloudPanel publica un instalador nuevo. Si `sha256sum` imprime `FAILED`, el comando de instalación no se ejecutó y tienes un hash obsoleto. Copia el actual de la documentación enlazada arriba y vuelve a intentarlo.
+</Notice>
+
+**Fallos habituales:**
+
+- `sha256sum: FAILED` - hash obsoleto, copia el actual de la documentación.
+- El instalador se interrumpe de inmediato - SO no soportado. Vuelve a comprobar `cat /etc/os-release` contra la lista de 1.1.
+- El instalador da error en `DB_ENGINE` - el valor es una cadena enum exacta (`MARIADB_12.3`, `MYSQL_8.4`, ...). Cópiala de la documentación en lugar de escribirla de memoria.
+
+**Verificación:** el instalador imprime un mensaje de éxito con la URL `https://serverIpAddress:8443`. También puedes ejecutar `systemctl status cloudpanel` y esperar que esté activo.
+
+### 1.3 Acceder a la administración de CloudPanel
+
+Abre `https://serverIpAddress:8443`. El navegador se quejará del certificado autofirmado: continúa a través del aviso.
+
+<Notice type="warning" title="Crea el usuario admin de inmediato">
+Hay una ventana corta tras la instalación en la que bots podrían reclamar la cuenta de administrador antes que tú. Crea tu usuario admin enseguida y restringe el puerto 8443 a tu IP en el firewall hasta que la contraseña esté puesta. No dejes el 8443 abierto al mundo a largo plazo. Para un bloqueo más completo (bloqueo estilo fail2ban en SSH y puertos web), consulta [proteger un servidor VPS con CrowdSec](/crowdsec-secure-server/).
+</Notice>
+
+Checklist de hardening una vez dentro: activa la autenticación en dos pasos en el área de administración (CloudPanel la soporta de forma nativa), añade opcionalmente Basic Auth encima y mantén el 8443 restringido a las IPs que uses.
+
+### 1.4 Crear un subdominio de administración
+
+Para acceder a CloudPanel con un certificado SSL válido en lugar del autofirmado, crea un subdominio (por ejemplo `admin.yourdomain.com`) y apúntalo a la IP de tu VPS. Si usas Cloudflare, añade un registro A en DNS.
+
+Después ve a **Settings** en la administración de CloudPanel y registra el subdominio ahí para proteger el área de administración.
+
+**Verificación:** `https://admin.yourdomain.com` carga con un certificado válido (candado, sin aviso del navegador).
+
+## 2. Desplegar una app Node.js en CloudPanel
+
+Vamos a desplegar Strapi, un CMS headless open source construido sobre Node.js. El mismo proceso funciona para cualquier aplicación Node.js. Un aviso: la propia documentación de CloudPanel sigue cubriendo Strapi 4 con `npx create-strapi-app@latest`. Esta guía usa Strapi 5.55.x (`npx create-strapi@latest`) sobre Node 24 LTS.
+
+### 2.1 Añadir un sitio Node.js en CloudPanel
+
+Haz clic en **Add Site** y elige **Create a Node.js Site**. Rellena tu dominio, elige una versión de Node.js, define el puerto de la app y crea las credenciales del usuario del sitio.
+
+Elige **Node.js 24**. Es el Active LTS (nombre en clave "Krypton", soportado hasta abril de 2028), y Strapi 5.55.x admite Node `>=20 <=26`, así que la 24 está totalmente cubierta. CloudPanel ofrece Node 12, 14, 16, 18, 20, 22 y 24 (solo versiones LTS). Node 26 se convierte en LTS el 2026-10-28 pero aún no está en el panel a v2.5.4.
+
+Pon el puerto de la app en **1337** para Strapi y recuerda ese número. Una discrepancia entre este valor y el puerto en el que escucha tu app es la causa número uno de errores 502 más adelante.
+
+<Tabs>
+<Tab name="CloudPanel UI">
+**Add Site** -> **Create a Node.js Site**, y luego rellena el formulario:
+
+<Picture formats={["webp"]} fallbackFormat="webp"
+  src={cloudpanelNodeSite}
+  alt="Diálogo Add Site de CloudPanel creando un sitio Node.js con el desplegable de versión de Node.js y el campo de puerto de la app"
+/>
+
+*La captura es anterior al soporte de Node 24: el desplegable de versión ahora también lista Node.js 24 LTS.*
+</Tab>
+<Tab name="clpctl CLI">
+Si prefieres el terminal, ejecuta esto como root:
+
+```bash
+clpctl site:add:nodejs --domainName=www.yourdomain.com --nodejsVersion=24 --appPort=1337 \
+  --siteUser='youruser' --siteUserPassword='!secretPassword!'
+```
+</Tab>
+</Tabs>
+
+### 2.2 Apuntar el dominio a CloudPanel
+
+Añade un registro A en tu DNS (por ejemplo en Cloudflare) apuntando tu dominio o subdominio a la IP del VPS. Activa el proxy de Cloudflare si quieres las ventajas del CDN. La validación HTTP de Let's Encrypt pasa a través del proxy de Cloudflare sin problema, así que no hace falta configuración especial para el paso del certificado.
+
+**Verificación:**
+
+```bash
+dig +short www.yourdomain.com
+```
+
+Debería devolver la IP del VPS.
+
+### 2.3 Generar el certificado SSL
+
+Ve a **SSL/TLS** de tu sitio en CloudPanel y genera un certificado Let's Encrypt para que el sitio funcione por HTTPS.
+
+**Verificación:**
+
+```bash
+curl -I https://www.yourdomain.com
+```
+
+Deberías obtener una respuesta de Nginx. Un 502 o 503 en este punto es normal: la app aún no está en marcha. Eso se arregla en 2.6.
+
+### 2.4 Instalar Strapi
+
+Entra por SSH como el **usuario del sitio** (no root):
+
+```bash
+sudo su - <your-site-username>
+cd htdocs && rm -rf www.yourdomain.com
+npx create-strapi@latest www.yourdomain.com --skip-cloud
+```
+
+`create-strapi@5.55.1` es la versión actual a septiembre de 2026. La CLI hace algunas preguntas (TypeScript o JavaScript, elección de base de datos, etc.).
+
+<Tabs>
+<Tab name="SQLite (inicio rápido)">
+Acepta los valores por defecto. Strapi v5 usa SQLite por defecto, lo que está bien para un primer despliegue:
+
+```bash
+npx create-strapi@latest www.yourdomain.com --skip-cloud
+```
+</Tab>
+<Tab name="MySQL / MariaDB">
+Para usar la base de datos que CloudPanel ya tiene en marcha, pasa los flags de base de datos:
+
+```bash
+npx create-strapi@latest www.yourdomain.com --skip-cloud \
+  --dbclient=mysql \
+  --dbhost=127.0.0.1 \
+  --dbport=3306 \
+  --dbname=strapi_db \
+  --dbusername=strapi_user \
+  --dbpassword=your_password
+```
+
+Crea primero la base de datos y el usuario en CloudPanel en **Databases** o este paso fallará con un error de conexión.
+</Tab>
+</Tabs>
+
+**Fallos habituales:**
+
+- Fallos de descarga de `npx` - problema de node o de red. Comprueba `node -v` y tu conectividad.
+- Permiso denegado al escribir archivos - probablemente sigues siendo root, o el propietario de `htdocs/` es incorrecto. Confirma que el prompt muestra tu usuario del sitio antes de ejecutar `create-strapi`.
+
+### 2.5 Compilar Strapi para producción
+
+```bash
+cd htdocs/www.yourdomain.com/
+NODE_ENV=production npm run build
+```
+
+<Notice type="warning" title="Las builds de Strapi pueden quedarse sin memoria con 2 GB">
+En la práctica, una build de producción de Strapi 5 puede dejar sin memoria una VM de 2 GB y la compilación muere. Usa una VM de 4 GB, o añade un archivo swap antes de ejecutar `npm run build`. Si ves "JavaScript heap out of memory" o la build muere sin error, esta es la razón.
+</Notice>
+
+Si quieres entender cómo `NODE_ENV` y otras variables llegan a la app bajo PM2, consulta [variables de entorno de PM2](/pm2-env-vars/).
+
+### 2.6 Arrancar Strapi
+
+```bash
+NODE_ENV=production npm start
+```
+
+Verás una salida como esta:
+
+```
+ Project information
+
+┌────────────────────┬──────────────────────────────────────────┐
+│ Time               │ ...                                      │
+│ Launched in        │ 1047 ms                                  │
+│ Environment        │ production                               │
+│ Process PID        │ 121469                                   │
+│ Version            │ 5.x.x (node v24.x.x)                    │
+│ Database           │ sqlite                                   │
+└────────────────────┴──────────────────────────────────────────┘
+
+ Create your first administrator by going to:
+ http://0.0.0.0:1337/admin
+```
+
+**Verificación:** la línea "Launched in" y la URL `http://0.0.0.0:1337/admin` significan que la app está en marcha. El puerto 1337 debe coincidir con el App Port que pusiste en 2.1.
+
+### 2.7 Crear el usuario administrador
+
+Visita `https://www.yourdomain.com/admin` y rellena tus credenciales de administrador para configurar el panel de Strapi. Hazlo justo después del primer arranque, por la misma razón de los bots que con el usuario admin del propio CloudPanel.
+
+**Verificación:** el panel de Strapi carga por HTTPS a través de tu dominio.
+
+## 3. Activar el arranque automático con PM2
+
+Una app Node.js no se reinicia sola tras un reinicio del servidor, y un proceso caído se queda caído. PM2 se encarga de ambas cosas. Ten en cuenta que CloudPanel gestiona las versiones de Node.js vía nvm, por eso importa la línea PATH del cron job de abajo.
+
+### 3.1 Instalar PM2
+
+Ejecuta esto como el **usuario del sitio**, no root (igual que la guía oficial de PM2 de CloudPanel):
+
+```bash
+npm install pm2@latest -g
+```
+
+PM2 7.0.3 es la versión actual a septiembre de 2026 y necesita Node 18+. Para una guía completa de PM2, consulta [Gestionar aplicaciones con PM2](/pm2-manage-apps/).
+
+### 3.2 Arrancar la app y guardar la configuración
+
+Desde el directorio de la app (`htdocs/www.yourdomain.com/`):
+
+```bash
+pm2 start npm --name strapi-app -- start
+pm2 save
+```
+
+`pm2 save` escribe la lista de procesos en disco. Sin él, el paso de reinicio de abajo no tiene nada que restaurar. Para producción multinúcleo luego puedes valorar [modo fork vs cluster en PM2](/pm2-fork-cluster/), pero el modo fork por defecto de Strapi está bien para empezar.
+
+### 3.3 Añadir una tarea cron para restaurar PM2 al reiniciar
+
+Obtén el PATH actual (contiene tu versión de Node gestionada por nvm):
+
+```bash
+echo $PATH
+```
+
+Edita el crontab del usuario:
+
+```bash
+crontab -e
+```
+
+Añade estas líneas, sustituyendo el valor de PATH por tu salida real:
+
+```bash
+PATH=/home/your-site-user/.nvm/versions/node/v24.x.x/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
+@reboot pm2 resurrect &> /dev/null
+```
+
+Esa línea de PATH es obligatoria porque cron se ejecuta con un entorno mínimo y de otro modo no encontraría `pm2` en tu directorio nvm. Si el patrón de nvm es nuevo para ti, consulta [cómo instalar Node.js usando nvm](/install-nodejs-using-nvm-macos-ubuntu/).
+
+Verifica que se guardó:
+
+```bash
+crontab -l
+```
+
+Reinicia el servidor y confirma que la app vuelve:
+
+```bash
+sudo reboot
+# after the server is back:
+pm2 status
+```
+
+Deberías ver el estado como **online**:
+
+```
+┌─────┬───────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id  │ name          │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├─────┼───────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 0   │ strapi-app    │ default     │ 5.x.x   │ fork    │ 1521     │ 50s    │ 0    │ online    │ 0%       │ 56.7mb   │ bit…     │ disabled │
+└─────┴───────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+## Verificar y solucionar problemas
+
+Ejecuta esta comprobación de tres comandos antes de dar el despliegue por terminado:
+
+<ListCheck>
+<ul>
+<li><code>pm2 status</code> - la app aparece como <b>online</b></li>
+<li><code>pm2 logs strapi-app</code> - el log de arranque se ve limpio, sin stack traces</li>
+<li><code>curl -I https://www.yourdomain.com</code> - devuelve 200 o 302 desde Nginx, no 502</li>
+</ul>
+</ListCheck>
+
+<Notice type="error" title="502 Bad Gateway = el puerto de la app no coincide">
+Casi todos los 502 en este stack significan que la app no está escuchando en el App Port al que CloudPanel reenvía. La app cree que está en 1337 (o 3000), CloudPanel reenvía a un número distinto. Haz que coincidan y luego reinicia la app con PM2.
+</Notice>
+
+<Image src={cloudpanelPortMap} alt="Diagrama de la ruta de la petición: navegador a Nginx en el puerto 443 y a la app en 127.0.0.1:1337, con 502 Bad Gateway causado por un puerto de app que no coincide y fallos de conexión causados por problemas de DNS o firewall" />
+
+**Fallos habituales:**
+
+| Síntoma | Causa | Solución |
+|---------|-------|----------|
+| 502 Bad Gateway | El puerto de la app no coincide, o la app está caída | Haz coincidir el puerto de la app con el App Port de CloudPanel, `pm2 restart strapi-app` |
+| App offline tras reiniciar | PATH del cron incorrecto, o `pm2 save` nunca se ejecutó | `crontab -l` debe mostrar ambas líneas; vuelve a ejecutar `pm2 save` |
+| Página en blanco, falta CSS/JS | Se omitió la build de producción | `NODE_ENV=production npm run build` |
+| `sha256sum: FAILED` | Hash del instalador obsoleto (sección 1.2) | Copia el hash actual de la documentación de instalación |
+| Build muerta, "heap out of memory" | OOM en una máquina de 2 GB (sección 2.5) | Añade swap o redimensiona a 4 GB y vuelve a ejecutar la build |
+| "address already in use" | Otro proceso tiene el puerto | `ss -tlnp \| grep 1337` y deténlo, o cambia el puerto en todas partes |
+
+**Rollback / deshacer:**
+
+- Quitar la app de PM2: `pm2 delete strapi-app && pm2 save`
+- Borrar el sitio en CloudPanel: eso elimina el vhost, el usuario del sitio y (si lo permites) la base de datos
+- Si abandonas el panel por completo, es preferible reconstruir la VM desde un snapshot que `apt purge cloudpanel`. Purgar deja atrás estado de Nginx y de la base de datos que luego es molesto de razonar.
+
+### Preguntas frecuentes
+
+<Accordion label="¿Puedo ejecutar CloudPanel en un VPS LXC u OpenVZ?" group="faq" expanded="true">
+No. CloudPanel solo admite máquinas virtuales: nada de LXC, LXD ni OpenVZ. Muchas ofertas económicas son contenedores por dentro, así que verifica que estás contratando una VM KVM (o similar) antes de hacer el pedido.
+</Accordion>
+
+<Accordion label="¿Cuándo estará disponible Node 26 en CloudPanel?" group="faq">
+No en v2.5.4. Node 26 se convierte en LTS el 2026-10-28; espera que una versión posterior de CloudPanel lo añada. Hasta entonces, Node 24 es el LTS más reciente del panel y el predeterminado correcto.
+</Accordion>
+
+<Accordion label="¿MariaDB o MySQL para una instalación nueva?" group="faq">
+MariaDB 12.3 es el predeterminado sensato en las versiones actuales de Ubuntu. MySQL 8.4 está bien y totalmente soportado: elígelo si tus herramientas o hábitos tiran hacia MySQL. Ambos son un cambio de un comando en la sección 1.2.
+</Accordion>
+
+<Accordion label="¿Debería usar PM2 o dploy para los despliegues?" group="faq">
+PM2 es el predeterminado seguro y el que usa esta guía. CloudPanel también documenta dploy (github.com/cloudpanel-io/dploy), una herramienta con licencia MIT para despliegues sin downtime de PHP, Node.js, Python y sitios estáticos. Está bastante dormida desde 2023, así que trátala como un experimento, no como la columna vertebral de producción.
+</Accordion>
+
+<Accordion label="¿Funciona esto en un VPS ARM?" group="faq">
+Sí. CloudPanel funciona en x86 y ARM64. Las instancias Hetzner CAX y Oracle Ampere funcionan, y los pasos de instalación son idénticos.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo CloudPanel más adelante?" group="faq">
+Ejecuta `sudo clp-update` como root, después de hacer un snapshot. Los pasos completos, más la opción del canal de pruebas, están en la sección [Actualizar una instalación de CloudPanel existente](#actualizar-una-instalación-de-cloudpanel-existente) de arriba.
+</Accordion>
+
+## Conclusiones
+
+Ese es el bucle completo: instala CloudPanel en un VPS tamaño VM, añade un sitio Node.js (Node 24, puerto de app 1337), despliega Strapi 5 detrás de Nginx con un certificado Let's Encrypt y luego pon PM2 al mando del proceso con `pm2 save` y un cron `@reboot pm2 resurrect`. Verifica con `pm2 status` y `curl -I`, y recuerda que un 502 casi siempre es un puerto que no coincide.
+
+CloudPanel ha sido fiable en mi experiencia. Es gratis, está mantenido activamente y cubre la mayoría de los casos de uso para desarrolladores que quieren un panel de gestión de servidor simple sin la sobrecarga de cPanel o Plesk. Si solo quieres alojar apps Node.js en un VPS con valores por defecto sensatos, este stack es aburrido de la mejor manera.
+
+Una nota de cara al futuro: Node 26 se convierte en LTS en octubre de 2026. Cuando CloudPanel lo publique, ejecuta `clp-update` y elígelo en el próximo sitio que crees.
+
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 gratis" />
+<Button link="https://go.bitdoze.com/vultr" text="Vultr $100 gratis" />
+<Button link="https://go.bitdoze.com/hetzner" text="Hetzner €20 gratis" />
+<Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />

@@ -1,0 +1,298 @@
+---
+date: 2026-07-30T00:00:00Z
+translationKey: "mastra-tools-vs-mcp"
+title: "Herramientas Mastra vs MCP: ¿Cuál Debería Usar tu Agente?"
+meta_title: "Herramientas Mastra vs MCP — ¿Herramientas Nativas o Servidores Externos? (2026)"
+description: "createTool nativo de Mastra vs servidores MCP para agentes de IA: arquitectura, coste de memoria, control de aprobaciones y cuándo elegir cada uno. Cifras reales de una app Mastra en producción."
+image: "@assets/images/26/07/mastra-tools-vs-mcp.webp"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["mastra", "mcp", "typescript"]
+canonical: "https://www.bitdoze.com/es/herramientas-mastra-vs-mcp/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Si construyes agentes con [Mastra](https://mastra.ai/), te topas pronto con esta decisión: escribir una herramienta nativa con `createTool`, o conectar un servidor MCP y repartir sus herramientas al agente.
+
+Para el modelo se ven igual: "llama a la herramienta X con estos argumentos". Las operaciones y el coste, no. Lo aprendí por las malas cuando una integración MCP de WordPress se sentó junto a mi proceso de Mastra y consumió silenciosamente unos 200 MB de RAM siempre activa, solo para que el agente *pudiera* gestionar entradas.
+
+Este artículo es la división práctica: qué es cada camino, cómo funcionan, cuándo merece la pena MCP y cuándo gana una herramienta Mastra ligera.
+
+¿Nuevo en alguno de los dos lados? Empieza con [Crea un agente de IA con Mastra](/build-ai-agent-mastra/) y [MCP para principiantes](/mcp-introduction-beginners/).
+
+<Button text="Crea un Agente con Mastra" link="/build-ai-agent-mastra/" variant="solid" color="purple" size="md" icon="arrow-right" />
+<Button text="Guía de MCP para Principiantes" link="/mcp-introduction-beginners/" variant="outline" color="blue" size="md" icon="arrow-right" />
+
+## Lo que realmente estás eligiendo
+
+| | Herramientas Mastra | Herramientas MCP |
+|--|------------------|---------------|
+| Definición | Tu código vía `createTool` | Herramientas anunciadas por un servidor MCP |
+| Dónde corre el código | En proceso (el mismo Node que Mastra) | Normalmente otro proceso (stdio) o HTTP remoto |
+| Quién lo mantiene | Tú | El autor del servidor / el proveedor |
+| RAM / procesos | Solo lo que necesita tu función | Un Node extra (y a menudo `npx`) durante la vida del host |
+| Esquemas | Zod que controlas tú | JSON Schema del servidor |
+| Aprobaciones / dry-run | Fáciles de implementar | Los envuelves o confías en el servidor |
+| Reutilización en workflows | Exporta una función normal y llámala | Incómodo fuera del agente + cliente MCP |
+| Ideal para | Capacidades centrales del producto | Paquetes opcionales o de terceros |
+
+Misma experiencia de agente. Factura de ejecución distinta.
+
+## Cómo funcionan las herramientas de Mastra
+
+Una herramienta nativa es una función tipada con una descripción que el modelo puede leer. Mastra usa Zod para las entradas (y salidas opcionales). La ejecución permanece dentro de tu servidor.
+
+```ts
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+
+export const discordNotify = createTool({
+  id: "discord-notify",
+  description: "Post a short status message to a Discord webhook channel.",
+  inputSchema: z.object({
+    title: z.string(),
+    body: z.string(),
+    level: z.enum(["info", "success", "error"]).default("info"),
+  }),
+  execute: async ({ context }) => {
+    // fetch webhook, return { ok: true } / error
+    return { ok: true, title: context.title };
+  },
+});
+```
+
+Regístrala en el agente:
+
+```ts
+export const assistant = new Agent({
+  id: "assistant",
+  name: "Assistant",
+  // ...
+  tools: {
+    discordNotify,
+    // tinyfishSearch, postTweet, queryDatabase, ...
+  },
+});
+```
+
+### Por qué es la opción por defecto para agentes en producción
+
+<ListCheck>
+<ul>
+<li>En proceso: sin IPC, sin un segundo heap de V8, sin un padre <code>npx</code> huérfano</li>
+<li>Control total sobre validación, reintentos, logging, <code>requireApproval</code> y comprobaciones de entorno</li>
+<li>Amigable con workflows: extrae <code>publishTweet()</code> y llámala desde un job programado sin el agente</li>
+<li>Despliegues predecibles: las herramientas van con tu bundle; sin sorpresas de <code>@latest</code> al arrancar</li>
+</ul>
+</ListCheck>
+
+En una app Mastra real terminas con una carpeta de herramientas: búsqueda web, metadatos de YouTube, GitHub, Discord, X/Bluesky, helpers de consulta a la BD, generación de imágenes, etc. Esa es la superficie central. Mantenla nativa.
+
+<Notice type="info" title="Patrón de seguridad">
+Para cualquier cosa que publique o mute sistemas de producción (X, Reddit, Hashnode, escrituras en el CMS), pon <code>requireApproval: true</code> en las herramientas interactivas. Los workflows desatendidos deberían llamar a funciones normales, no a herramientas de agente autoaprobadas.
+</Notice>
+
+## Cómo funcionan las herramientas MCP en Mastra
+
+[MCP (Model Context Protocol)](/mcp-introduction-beginners/) es un estándar para que un host (Mastra) pueda hablar con servidores que exponen herramientas, recursos y prompts. El cliente `@mastra/mcp` de Mastra puede lanzar un servidor stdio y cargar sus herramientas:
+
+```ts
+import { MCPClient } from "@mastra/mcp";
+
+const mcpClient = new MCPClient({
+  id: "mcp-client",
+  servers: {
+    sureDash: {
+      command: "npx",
+      args: ["-y", "@automattic/mcp-wordpress-remote@latest"],
+      env: {
+        WP_API_URL: process.env.WP_API_URL!,
+        WP_API_USERNAME: process.env.WP_API_USERNAME!,
+        WP_API_PASSWORD: process.env.WP_API_PASSWORD!,
+      },
+    },
+  },
+});
+
+const mcpTools = await mcpClient.listTools();
+
+// Same agent shape as native tools:
+// tools: { ...nativeTools, ...mcpTools }
+```
+
+### Qué se ejecuta realmente
+
+Para un servidor MCP stdio lanzado con `npx`, el árbol de procesos suele verse así:
+
+```text
+mastra node (your app + MCP client)
+  └── npm exec / npx          ← often stays alive (~100+ MB)
+        └── mcp server node   ← second V8 runtime (~80–100+ MB)
+              └── remote API (WordPress, GitHub, …)
+```
+
+El modelo nunca ve eso. Solo ve nombres de herramientas y esquemas. Tú pagas los procesos extra mientras el host de Mastra esté arriba, especialmente si haces `listTools()` en la importación del módulo y mantienes la conexión abierta.
+
+### Por qué MCP sigue existiendo (y es útil)
+
+- Los proveedores entregan paquetes completos de herramientas (entradas, páginas, medios, taxonomías) sin que escribas cada endpoint
+- Un protocolo, muchos hosts: el mismo servidor puede funcionar con Claude Desktop, Cursor, Mastra y otros
+- Integraciones opcionales: genial cuando necesitas WordPress la semana que viene, no en cada despliegue
+
+MCP no son herramientas peores. Es capacidad alquilada con un impuesto de proceso y protocolo.
+
+## Cifras reales de memoria (por qué me importa)
+
+En un servicio Mastra de producción de larga duración medí aproximadamente:
+
+| Componente | Rol | RAM (aprox.) |
+|-----------|------|----------------|
+| Node principal de Mastra | Agentes, memoria, Studio, herramientas nativas | cientos de MB (tamaño de app) |
+| `npm exec` (padre npx) | Lanza el paquete MCP | ~120 MB |
+| `mcp-wordpress-remote` | Servidor MCP stdio (SDK + stack de proxy) | ~96 MB |
+
+Solo ese camino de WordPress eran unos 200 MB siempre activos, antes de cualquier llamada del agente. El pico de memoria del servicio rondaba 1 GB. Tras desactivar MCP con un feature flag, el mismo servicio se estabilizó más cerca de ~450 MB solo con el proceso Node principal.
+
+Eso no es una fuga de WordPress. Es:
+
+1. Un segundo servidor Node para MCP stdio
+2. Un padre `npx` que no desaparece
+3. Un paquete proxy pesado (SDK de MCP, stack tipo Express, agentes de proxy, a veces QuickJS para PAC)
+4. Carga anticipada al arrancar para que las herramientas existan en cada sesión de chat
+
+El disco para la caché de npx de ese paquete era del orden de decenas de MB. La RAM es la parte cara en un VPS pequeño.
+
+## Comparación de arquitectura
+
+```text
+Native Mastra tool
+─────────────────
+User → Agent → createTool.execute() → your API/SDK → result
+                 (same process)
+
+MCP tool
+────────
+User → Agent → MCP client → stdio/HTTP → MCP server process → remote API → result
+                 (your process)          (another process)
+```
+
+La latencia suele ir bien en ambos casos para el chat humano. El coste en reposo y los modos de fallo no son iguales. MCP añade fallos de arranque (`npx`, variables de entorno ausentes, 401 remotos) y un proceso que debes monitorizar.
+
+## MCP detrás de un feature flag (recomendado)
+
+No dejes servidores MCP opcionales cableados a "credenciales presentes = siempre activo". Guarda las credenciales en `.env` y ponles puerta con un flag explícito:
+
+```ts
+function envFlag(name: string, defaultEnabled = false): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return defaultEnabled;
+  return raw !== "false" && raw !== "0" && raw !== "off" && raw !== "no";
+}
+
+const enableWordpressMcp = envFlag("ENABLE_WORDPRESS_MCP", false);
+const hasWpCreds = Boolean(
+  process.env.WP_API_URL &&
+    process.env.WP_API_USERNAME &&
+    process.env.WP_API_PASSWORD,
+);
+
+if (enableWordpressMcp && hasWpCreds) {
+  // MCPClient + listTools()
+} else {
+  // log and skip; credentials can stay for later
+}
+```
+
+```bash
+# .env
+ENABLE_WORDPRESS_MCP=false
+WP_API_URL=https://example.com/wp-json/...
+WP_API_USERNAME=...
+WP_API_PASSWORD=...
+```
+
+Actívalo solo cuando necesites las herramientas, recompila si usas un bundle de producción y reinicia el servicio. El mismo patrón funciona para cualquier servidor MCP pesado.
+
+## Cuándo usar herramientas Mastra vs MCP
+
+### Prefiere herramientas Mastra cuando
+
+- La capacidad es central para el producto (búsqueda, notificaciones, publicación, BD, TTS, imágenes)
+- Necesitas aprobación, dry-run o logging estricto
+- La herramienta corre en un schedule o workflow sin UI de chat
+- Corres en un VPS pequeño y te importa la RAM en reposo
+- Solo necesitas 2–3 endpoints de una API de proveedor enorme
+
+### Prefiere MCP cuando
+
+- Un proveedor ya entrega un servidor sólido y necesitas muchas herramientas raramente
+- Quieres el mismo servidor en Cursor y en tu app Mastra
+- La integración es opcional y puede quedarse detrás de un flag
+- Aceptas el impuesto de proceso a cambio de llegar antes a las herramientas
+
+### Un enfoque híbrido que funciona bien
+
+| Capa | Elección |
+|-------|--------|
+| Camino diario (búsqueda, archivos, social, APIs internas) | `createTool` nativo |
+| CMS ocasional / paquetes de terceros | MCP + `ENABLE_*=false` por defecto |
+| Subconjunto caliente de una superficie MCP | Promuévelo a unas pocas herramientas nativas después |
+
+Ejemplo: si solo creas y actualizas entradas, una herramienta Mastra de 40 líneas contra la REST API de WP le ganará a un proceso MCP de WordPress permanente todos los días de la semana.
+
+## Un MCP más ligero si decides mantenerlo
+
+Si MCP se queda en el stack:
+
+1. Evita `npx` de larga duración. Instala el paquete y apunta `command` al binario real o a `node path/to/proxy.js`
+2. Fija versiones. No uses `@latest` en cada arranque
+3. No cargues en la importación a menos que cada petición necesite esas herramientas (un cliente perezoso es más difícil si los agentes necesitan un mapa de herramientas estático, pero merece la pena diseñarlo así)
+4. Limita la memoria del servicio en systemd (`MemoryHigh` / `MemoryMax`) para que un servidor desbocado no se lleve la máquina
+5. Monitoriza los procesos hijos con `systemctl status` / `ps --forest` para ver los nodos de npx + MCP
+
+## Hoja de trucos para decidir
+
+| Pregunta | Inclínate así |
+|----------|----------------|
+| ¿Esto correrá cada hora sin supervisión? | Herramienta Mastra / función normal |
+| ¿Es un paquete de 50 herramientas de un proveedor que toco una vez al mes? | MCP (con flag) |
+| ¿Necesitas aprobación humana antes de efectos secundarios? | Herramienta Mastra |
+| ¿Menos de 512 MB de RAM libres? | Herramienta Mastra primero |
+| ¿Construyes una vez para Cursor + Mastra + Claude? | Servidor MCP |
+
+## Preguntas frecuentes
+
+<Accordion label="¿Prefieren los agentes MCP a las herramientas nativas?" group="faq">
+No. El modelo solo ve nombre, descripción y esquema. La calidad de la descripción y la fiabilidad de la herramienta importan más que el transporte. Las herramientas nativas suelen ganar porque controlas los mensajes de error y los argumentos.
+</Accordion>
+
+<Accordion label="¿Es Composio lo mismo que MCP?" group="faq">
+No exactamente. Composio (y routers similares) importan herramientas vía su SDK/API. También son herramientas externas, pero normalmente no un proceso Node stdio local. En cuanto a procesos se parecen más a una integración HTTP que a <code>npx mcp-wordpress-remote</code>.
+</Accordion>
+
+<Accordion label="¿Puedo mezclar ambas en un mismo agente?" group="faq">
+Sí. Reparte las herramientas nativas y las MCP en el mismo objeto <code>tools</code>. Solo mantén el lado MCP opcional para que un arranque fallido de MCP no tumbe toda la app.
+</Accordion>
+
+<Accordion label="¿Debería cada integración convertirse en un servidor MCP?" group="faq">
+No. MCP brilla cuando compartes una superficie de herramientas entre hosts o entregas un servidor productizado. Dentro de una app Mastra, <code>createTool</code> es más simple, más barato y más fácil de asegurar.
+</Accordion>
+
+## Conclusión
+
+Las herramientas Mastra son tu contrato en proceso: rápidas, baratas, amigables con aprobaciones y listas para workflows. Las herramientas MCP son una forma estándar de alquilar la superficie de herramientas de otro. Potentes, pero los servidores stdio (especialmente vía `npx`) cuestan RAM real y atención operativa.
+
+La regla que uso ahora:
+
+- Capacidades centrales del agente → herramientas Mastra nativas
+- Paquetes opcionales de proveedores → MCP detrás de un feature flag
+- Si un servidor MCP se vuelve crítico a diario → promueve el camino caliente a herramientas nativas
+
+Esa división mantuvo la superficie del agente rica sin pagar ~200 MB para siempre por herramientas de WordPress que no estaba usando activamente.
+
+<Button text="Tutorial de agentes Mastra" link="/build-ai-agent-mastra/" variant="solid" color="purple" size="md" icon="arrow-right" />
+<Button text="Introducción a MCP" link="/mcp-introduction-beginners/" variant="outline" color="blue" size="md" icon="arrow-right" />
