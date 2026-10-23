@@ -1,12 +1,12 @@
 ---
-date: 2026-01-23T00:00:00Z
-title: "How to Self-Host Cloudreve with Docker and Cloudflare Tunnels"
-meta_title: "How to Self-Host Cloudreve with Docker and Cloudflare"
-description: "Learn how to deploy Cloudreve on your home server using Docker Compose and Dockge, then expose it securely with Cloudflare Tunnels for external access."
+date: 2026-10-23T00:00:00Z
+title: "Cloudreve Docker Setup: Self-Host with Cloudflare Tunnels"
+meta_title: "Cloudreve Docker Setup: Self-Host with Cloudflare Tunnels"
+description: "Self-host Cloudreve with Docker Compose and Dockge, then expose it securely through Cloudflare Tunnels. Updated for 4.19 with chunked uploads and backups."
 image: "../../assets/images/26/01/cloudreve-docker-setup.webp"
 categories: ["self-hosting"]
 authors: ["Dragos"]
-tags: ["dockge", "self-hosted"]
+tags: ["dockge", "self-hosted", "cloudflare-tunnel", "cloudreve"]
 canonical: "https://www.bitdoze.com/cloudreve-docker-setup/"
 ---
 
@@ -17,44 +17,55 @@ import Tabs from "../../components/widgets/Tabs.astro";
 import Tab from "../../components/widgets/Tab.astro";
 import Notice from "../../components/widgets/Notice.astro";
 import Accordion from "../../components/widgets/Accordion.astro";
+import ListCheck from "../../components/widgets/ListCheck.astro";
 import imag1 from "../../assets/images/24/01/cloudflare-tunel-setup.png";
 
-Cloudreve is an open-source file management system for building your own cloud storage. It works like Google Drive or Dropbox, except you run it on your own hardware and keep all the data.
+Cloudreve is an open-source file management system for self-hosted cloud storage. It works like Google Drive or Dropbox, except you run it on your own hardware and keep all the data.
 
 The project supports local storage, S3-compatible backends, and OneDrive. You get drag-and-drop uploads, file previews in the browser, WebDAV access for mounting as a network drive, and Aria2 integration for downloading files directly to your server.
 
-This guide covers deploying Cloudreve with Docker Compose and Dockge, using PostgreSQL and Redis for better performance than the default SQLite setup. I'll also show you how to expose it to the internet through Cloudflare Tunnels and configure remote downloads with Aria2.
+This guide covers deploying Cloudreve with Docker Compose and Dockge and exposing it through Cloudflare Tunnels, using PostgreSQL and Redis for better performance than the default SQLite setup. I'll also show you how to configure remote downloads with Aria2, plus the gotchas that matter in 2026: the 100 MB Cloudflare upload limit, chunked uploads, backups, and upgrades to 4.19.
+
+<Notice type="warning" title="Updated for Cloudreve 4.19 - check your version">
+If you deployed Cloudreve from the January 2026 version of this guide, upgrade now. Release 4.13.0 (2026-02-05) fixed CVE-2026-25726, a weak random number generator used for sensitive fields. Databases first initialized on 4.10.0 or later were not vulnerable, but running anything older than 4.13.0 in production is a bad idea. Upgrading invalidates all sessions and existing signed download links (`?sign=...`), so tell your users before you pull the trigger.
+</Notice>
+
+| Version | Released | What changed |
+|---------|----------|--------------|
+| 4.13.0 | 2026-02-05 | CVE-2026-25726 fix; sessions and signed links invalidated on upgrade |
+| 4.14.0 | 2026-02-14 | Full-text search and AI semantic search (Tika + Meilisearch), F2 rename |
+| 4.16.1 - 4.18.0 | 2026-06/07 | More security fixes, recycle bin, `__` as env separator, parallel chunk upload fixes |
+| 4.19.1 | 2026-09-18 | Current release; parallel chunk upload changes, WOPI/email fixes |
 
 ## Cloudreve features
 
-Cloudreve comes in two editions: Community (free and open source) and Pro (paid license). The Community edition covers most home server use cases.
+Cloudreve comes in two editions: Community (free and open source) and Pro (paid license). The Community edition covers most home server use cases for self-hosted cloud storage.
 
 <Tabs>
   <Tab name="Community Edition">
     The free version includes:
-    
+
     - **Multiple storage backends** - Local disk, S3-compatible services (Cloudflare R2, MinIO, Backblaze B2), OneDrive, SharePoint, and Chinese providers like Qiniu, Alibaba OSS, Tencent COS
     - **File sharing** - Generate share links with passwords and expiration dates
     - **WebDAV** - Mount your storage as a network drive on Windows, macOS, or Linux
     - **Browser previews** - View documents, images, videos, audio, ePub files, and code without downloading
     - **User management** - Create multiple users with different storage quotas and permissions
     - **Remote downloads** - Aria2 and qBittorrent integration for downloading from URLs, magnets, and torrents
+    - **Full-text and AI semantic search** - Content search via Apache Tika and Meilisearch (4.14+), covered later in this guide
     - **File compression** - Create and extract ZIP archives in the browser
-    - **Thumbnails** - Automatic thumbnail generation for images and videos
-    - **Media metadata** - Extract and search by EXIF data, video metadata, and custom tags
+    - **Thumbnails** - Automatic thumbnail generation for images, videos, and Office documents
     - **OIDC authentication** - Single sign-on with Google, GitHub, or your own identity provider
-    - **Customization** - Dark mode, custom themes, PWA support, multiple languages
   </Tab>
   <Tab name="Pro Edition">
     The Pro license adds features for larger deployments:
-    
+
     - **Slave nodes** - Distribute storage and downloads across multiple servers
     - **Load balancing** - Spread traffic across storage backends
     - **Office document collaboration** - Real-time editing with WOPI integration (like Collabora or OnlyOffice)
+    - **Desktop sync client** - Windows 10 1903+ client with placeholder files; WebDAV remains the free path
     - **Custom payment providers** - Sell storage to users with your own payment gateway
-    - **Priority support** - Direct access to the development team
     - **File encryption** - Encrypt files at rest on storage backends
-    
+
     Pro licenses are purchased from [cloudreve.org](https://cloudreve.org). Pricing depends on deployment size.
   </Tab>
 </Tabs>
@@ -65,11 +76,15 @@ For a home server or small team, the Community edition has everything you need.
 
 You'll need:
 
-- A VPS or home server with Linux. I recommend [Hetzner](https://go.bitdoze.com/hetzner), [Hostinger](https://go.bitdoze.com/hostinger-vps) for VPS hosting, or check out [Mini PC as Home Server](https://www.bitdoze.com/best-mini-pc-home-server/) for local setups
-- Docker and Dockge running on your server. See my [Dockge installation guide](https://www.bitdoze.com/dockge-install/) for setup instructions
-- Cloudflare Tunnels configured if you want external access. The Dockge article covers this too
+<ListCheck>
+  <ul>
+    <li>A VPS or home server with Linux. I recommend <a href="https://go.bitdoze.com/hetzner">Hetzner</a> or <a href="https://go.bitdoze.com/hostinger-vps">Hostinger</a> for VPS hosting. For local setups see <a href="https://www.bitdoze.com/best-mini-pc-home-server/">Mini PC as Home Server</a> or grab an <a href="https://go.bitdoze.com/asus-dc510">ASUS mini PC</a>. My <a href="https://www.bitdoze.com/hetzner-cloud-review/">Hetzner Cloud review after the 2026 price hikes</a> covers what changed.</li>
+    <li>Docker Engine with Compose v2 and Dockge running on your server. See my <a href="https://www.bitdoze.com/dockge-install/">Dockge installation guide</a> for setup instructions. Budget around 2 GB RAM for the stack; the image is ~572 MB because it bundles ffmpeg, LibreOffice, and vips.</li>
+    <li>A domain on Cloudflare and a tunnel if you want external access. The Dockge article covers the tunnel setup too. Lock down everything except what you need - here's <a href="https://www.bitdoze.com/bsi-security-report-docker-ufw/">how I secured my Docker server after the BSI report</a>.</li>
+  </ul>
+</ListCheck>
 
-_VPS prices jumped across the board in 2026 — if you're rethinking a rented box, see [what changed and when a mini PC wins](/vps-price-increases/)._
+_VPS prices jumped across the board in 2026 - if you're rethinking a rented box, see [what changed and when a mini PC wins](https://www.bitdoze.com/vps-price-increases/)._
 
 <Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
 <Button link="https://go.bitdoze.com/vultr" text="Vultr $100 Free" />
@@ -80,7 +95,7 @@ _VPS prices jumped across the board in 2026 — if you're rethinking a rented bo
 
 ## Deploy Cloudreve with Docker Compose
 
-This setup runs three containers: Cloudreve for the web interface and file handling, PostgreSQL for storing metadata and user data, and Redis for caching. PostgreSQL handles more users and larger file libraries better than SQLite.
+This Cloudreve Docker Compose setup runs three containers: Cloudreve for the web interface and file handling, PostgreSQL for storing metadata and user data, and Redis for caching. PostgreSQL handles more users and larger file libraries better than SQLite.
 
 ### 1. Create the environment file
 
@@ -105,16 +120,20 @@ CR_DB_PORT=5432
 CR_REDIS_SERVER=redis:6379
 ```
 
-The `trust` authentication method works here because PostgreSQL only accepts connections from other containers in the same Docker network. Nothing outside can reach it directly.
+The `trust` authentication method works here because PostgreSQL only accepts connections from other containers in the same Docker network. Nothing outside can reach it directly. If that makes you uneasy, switch to `scram-sha-256` and set `POSTGRES_PASSWORD` instead.
+
+<Notice type="info" title="Env var patterns worth knowing">
+`CR_CONF_<Section>.<Key>` overrides config file values (used below for database and Redis settings). `CR_SETTING_DEFAULT_<setting>` seeds settings stored in the database. From 4.18.0, `__` also works as a separator (`CR_CONF_System__Listen`) on platforms that mangle dots in env names. For anything beyond demo use, read [Docker Compose secrets: what works and secure alternatives](https://www.bitdoze.com/docker-compose-secrets/).
+</Notice>
 
 ### 2. Create the Docker Compose file
 
-Here's the full stack with Cloudreve, PostgreSQL, and Redis. This configuration includes port 6888 for BitTorrent downloads (explained in the remote download section below):
+Here's the full stack with Cloudreve, PostgreSQL, and Redis. Pin the image tags so a random `docker compose pull` doesn't surprise you: `cloudreve/cloudreve:v4` tracks the 4.x line (the official compose repo uses this tag), and `redis:8-alpine` keeps Redis reproducible. If you want a hard pin, use `cloudreve/cloudreve:4.19.1` instead. Arch-specific tags (`-amd64`, `-arm64`) exist too. This configuration includes port 6888 for BitTorrent downloads (explained in the remote download section below):
 
 ```yaml
 services:
   cloudreve:
-    image: cloudreve/cloudreve:latest
+    image: cloudreve/cloudreve:v4
     container_name: cloudreve-backend
     depends_on:
       - postgresql
@@ -131,6 +150,7 @@ services:
       - CR_CONF_Database.Name=${CR_DB_NAME}
       - CR_CONF_Database.Port=${CR_DB_PORT}
       - CR_CONF_Redis.Server=${CR_REDIS_SERVER}
+      - CR_CONF_System.ProxyHeader=X-Forwarded-For
     volumes:
       - backend_data:/cloudreve/data
 
@@ -146,7 +166,7 @@ services:
       - database_postgres:/var/lib/postgresql/data
 
   redis:
-    image: redis:latest
+    image: redis:8-alpine
     container_name: cloudreve-redis
     restart: unless-stopped
     volumes:
@@ -162,6 +182,12 @@ volumes:
 Port 6888 (TCP and UDP) is used by Aria2 for BitTorrent peer connections. If you don't plan to use torrent downloads, you can remove these port mappings. The web interface only needs port 5212.
 </Notice>
 
+<Notice type="warning" title="Don't bump Postgres casually">
+The stack pins `postgres:17` on purpose. Jumping to `postgres:18` does not migrate the data volume - you'd need a `pg_dump`/restore or `pg_upgrade`. Leave it alone unless you enjoy that kind of evening.
+</Notice>
+
+`CR_CONF_System.ProxyHeader=X-Forwarded-For` makes event logs record real client IPs instead of the tunnel container's address. That line is only safe because the only thing sending traffic is cloudflared. Don't set it if untrusted clients can hit port 5212 directly.
+
 ### Understanding the Docker volumes
 
 Docker volumes store data outside the container filesystem. When you restart or update a container, the volume keeps your files safe.
@@ -170,11 +196,11 @@ This stack uses three named volumes:
 
 | Volume | Location inside container | What it stores |
 |--------|--------------------------|----------------|
-| `backend_data` | `/cloudreve/data` | Your uploaded files, avatars, thumbnails, and Cloudreve configuration |
+| `backend_data` | `/cloudreve/data` | File blobs under `data/uploads`, plus `conf.ini`, avatars, thumbnails, and temp files |
 | `database_postgres` | `/var/lib/postgresql/data` | PostgreSQL database files containing user accounts, file metadata, and share links |
 | `redis_data` | `/data` | Redis cache data for session storage and performance |
 
-Named volumes like `backend_data` are managed by Docker and stored in `/var/lib/docker/volumes/` on your host. You don't need to create folders manually.
+In v4, files you see in the web UI map to immutable blobs on disk (content-hash named) plus database rows. Unused blobs get garbage-collected by the queue scheduler. Named volumes like `backend_data` are managed by Docker and stored in `/var/lib/docker/volumes/` on your host. You don't need to create folders manually.
 
 **Using a custom storage location**
 
@@ -199,7 +225,7 @@ To use an existing directory like `/media/storage/downloads` with Cloudreve, you
 ```yaml
 services:
   cloudreve:
-    image: cloudreve/cloudreve:latest
+    image: cloudreve/cloudreve:v4
     container_name: cloudreve-backend
     volumes:
       - backend_data:/cloudreve/data
@@ -254,37 +280,20 @@ After clicking Start, Dockge shows real-time logs from all three containers. Wai
 
 <Tabs>
   <Tab name="Dockge UI">
-    The visual approach works well for most users:
-    
-    1. Navigate to your Dockge instance
-    2. Create a new stack named `cloudreve`
-    3. Paste the compose content
-    4. Add environment variables in the UI
-    5. Save and start
-    
-    Dockge handles the `.env` file creation automatically based on the variables you enter in the UI.
+    The visual approach works well for most users: create a stack named `cloudreve`, paste the compose content, add the environment variables in the UI, save and start. Dockge writes the `.env` file for you from those variables.
   </Tab>
   <Tab name="Command Line">
     If you prefer working directly on the server:
-    
+
     ```bash
     mkdir -p /opt/stacks/cloudreve
     cd /opt/stacks/cloudreve
     ```
-    
-    Create `compose.yaml` with the Docker Compose content above.
-    
-    Create `.env` with your environment variables.
-    
-    Then start the stack:
-    
+
+    Create `compose.yaml` with the Docker Compose content above and `.env` with your environment variables, then:
+
     ```bash
     docker compose up -d
-    ```
-    
-    Check logs with:
-    
-    ```bash
     docker compose logs -f
     ```
   </Tab>
@@ -292,22 +301,28 @@ After clicking Start, Dockge shows real-time logs from all three containers. Wai
 
 ### 4. Verify the containers are running
 
-Check that all three containers started:
+This is the first checkpoint. Don't move on until all of these pass:
 
-```bash
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-```
+<ListCheck>
+  <ul>
+    <li><code>docker ps --format "table \{\{.Names\}\}\t\{\{.Status\}\}\t\{\{.Ports\}\}"</code> shows <code>cloudreve-backend</code>, <code>cloudreve-db</code>, and <code>cloudreve-redis</code> all as "Up"</li>
+    <li><code>curl -I http://localhost:5212</code> returns <code>200</code> or <code>302</code> (anything else means the app isn't listening yet)</li>
+    <li><code>docker logs cloudreve-backend</code> shows the startup line with the listen address, no database connection errors</li>
+  </ul>
+</ListCheck>
 
-You should see `cloudreve-backend`, `cloudreve-db`, and `cloudreve-redis` all showing "Up" status.
+If a container keeps restarting, `docker logs cloudreve-backend` is the first place to look. PostgreSQL usually just needs a few extra seconds on first boot; a `docker compose down && docker compose up -d` after 30 seconds fixes most first-run races.
 
-## Configure Cloudflare Tunnels
+## Configure Cloudflare Tunnels for Cloudreve
 
-Cloudflare Tunnels let you access Cloudreve from anywhere without opening ports on your router. The tunnel runs as a container on your server and creates an outbound connection to Cloudflare's network.
+Cloudflare Tunnels are the cleanest way to self-host Cloudreve without opening ports on your router. The tunnel runs as a container on your server and creates an outbound connection to Cloudflare's network, so nothing inbound touches your home connection.
+
+![Cloudreve stack architecture: browser to Cloudflare edge to cloudflared to cloudreve-backend, with PostgreSQL and Redis behind it and BitTorrent on port 6888 opened directly](../../assets/images/26/01/cloudreve-stack-architecture.svg)
 
 If you followed my Dockge guide, you already have a tunnel running. Add a new hostname for Cloudreve:
 
-1. Log into the Cloudflare Zero Trust dashboard
-2. Go to **Access > Tunnels**
+1. Log into the Cloudflare One dashboard (the old "Zero Trust" branding is gone)
+2. Go to **Networks > Tunnels**
 3. Click your tunnel name, then **Configure**
 4. Under **Public Hostname**, click **Add a public hostname**
 5. Fill in the details:
@@ -316,14 +331,15 @@ If you followed my Dockge guide, you already have a tunnel running. Add a new ho
    - **Service Type**: HTTP
    - **URL**: `cloudreve-backend:5212`
 
-<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Cloudflare Tunnel configuration" />
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Cloudflare One dashboard showing the Cloudreve tunnel public hostname pointing to cloudreve-backend:5212" />
 
 Using `cloudreve-backend:5212` works if your tunnel container shares a Docker network with Cloudreve. If they're on separate networks, use your server's local IP instead (like `192.168.1.50:5212`).
 
-
-Save the hostname. Give it a minute to propagate, then try accessing `https://cloudreve.yourdomain.com`.
+Save the hostname. Give it a minute to propagate, then try accessing `https://cloudreve.yourdomain.com`. If the page loads, the tunnel is doing its job.
 
 > CloudPanel also works as a reverse proxy. See [Setup CloudPanel as Reverse Proxy with Docker and Dockge](https://www.bitdoze.com/cloudpanel-setup-dockge/) for that approach.
+
+If you'd rather not depend on Cloudflare at all, look at [Pangolin, a self-hosted alternative to Cloudflare Tunnels](https://www.bitdoze.com/pangolin-cloudflare-tunnels-alternative/).
 
 ## Initial Cloudreve setup
 
@@ -336,21 +352,25 @@ Open Cloudreve in your browser. Use either your Cloudflare Tunnel URL (`https://
 3. Click **Sign up** again to create the account
 4. Log in with those credentials
 
-The first account you create becomes the administrator. Cloudreve v4 dropped the old default admin credentials in favor of this signup flow.
+The first account you create becomes the administrator. Cloudreve v4 dropped the old default admin credentials in favor of this signup flow, so don't leave a fresh instance sitting on a public URL before you register.
 
 ### Configure site URLs
 
-Tell Cloudreve about its public and local addresses:
+v4 keeps a list of Site URLs instead of the old primary/secondary pair. Tell Cloudreve about every address people will use:
 
 1. Click your avatar in the top right
 2. Select **Dashboard** to open the admin panel
-3. Go to **Settings > Basic**
-4. Set the URLs:
-   - **Primary Site URL**: Your local address, like `http://192.168.1.50:5212`
-   - **Secondary Site URL**: Your public address, like `https://cloudreve.yourdomain.com`
+3. Go to **Settings > Site Information**
+4. Add both URLs to the Site URLs list:
+   - Your local address, like `http://192.168.1.50:5212`
+   - Your public address, like `https://cloudreve.yourdomain.com`
 5. Click **Save**
 
-These URLs affect how Cloudreve generates share links and handles redirects.
+Share links and signed download links get their hostname from this list. When the list is wrong or incomplete, links come out pointing at the wrong host, or at `http://` when you're on `https://`.
+
+<Notice type="warning" title="Wrong hostname in download links?">
+After fixing the Site URLs list, go to **Filesystem > Clear Blob URL Cache**. Cloudreve caches generated blob URLs, so old links keep the stale hostname until you clear it. Two other things break signed links: an HTTP-vs-HTTPS mismatch between what's configured and what users hit, and server clock skew. Keep time sync on (`timedate status` should show NTP active).
+</Notice>
 
 ### Configure storage policies
 
@@ -361,9 +381,15 @@ Storage policies control where files go and what limits apply. Each policy point
 1. In the Dashboard, go to **Storage Policies**
 2. Click the default policy to edit it
 3. Set maximum upload size, allowed file extensions, and storage quota
-4. Save your changes
+4. Enable **chunked upload** and set the chunk size below 100 MB (I'd use 25-50 MB). This is what makes large uploads work behind Cloudflare, covered in detail below
+5. Optionally enable **Pre-allocate disk space** on Linux/macOS to reduce chunk fragmentation. Note that from 4.19.0, parallel chunk uploads are force-disabled when this is off
+6. Save your changes
 
-The default policy stores files in `/cloudreve/data` inside the container (mapped to `backend_data` volume or your bind mount).
+The default policy stores files under `data/uploads` inside the container (mapped to the `backend_data` volume or your bind mount).
+
+<Notice type="warning" title="Set chunk size below 100 MB if you use Cloudflare">
+Cloudflare's free plan caps a single HTTP request at 100 MB. Without chunked upload, anything bigger fails. See the "Uploading large files through Cloudflare Tunnel" section below for the full picture.
+</Notice>
 
 **Create a policy for external directories:**
 
@@ -382,6 +408,8 @@ If you mounted an external directory like `/media/storage/downloads` into the co
 <Notice type="info" title="Path must match your mount">
 The storage path in Cloudreve must match the container path from your volume mount. If you mounted `-v /media/storage/downloads:/cloudreve/downloads`, use `/cloudreve/downloads` as the storage path.
 </Notice>
+
+Local disk is the default, but the same screen lets you point a policy at S3-compatible backends like Cloudflare R2, Backblaze B2, or [Bunny.net storage](https://go.bitdoze.com/bunny). If you're shopping for that off-site bucket, my comparison of the [cheapest cloud storage backends: Bunny vs S3 vs Backblaze](https://www.bitdoze.com/bunny-storage-vs-s3-vs-backblaze/) walks through the pricing.
 
 **Assign the policy to users:**
 
@@ -418,30 +446,25 @@ To let other people use your Cloudreve:
 5. Set their storage quota
 6. Save the user
 
-Each user gets their own file space and can create their own share links.
+Each user gets their own file space and can create their own share links. The user group is the lever that ties everything together: it sets the storage policy, the quota, and whether remote downloads are allowed.
 
 ## How users and file storage work
 
-Cloudreve doesn't store files in per-user folders on disk. Instead, it uses a database to track which files belong to which user.
+Cloudreve file storage doesn't use per-user folders on disk. Instead, it uses a database to track which files belong to which user.
 
 ### Where files are stored on disk
 
-All user files go to the same storage location defined by the storage policy. Cloudreve renames uploaded files to random hashes:
+All user files go to the same storage location defined by the storage policy. In v4 the default blob directory is `data/uploads` (that's `/cloudreve/data/uploads` in this Docker setup). Uploaded content becomes immutable blobs named by content hash:
 
 ```
 /cloudreve/data/
-├── upload/
-│   ├── 1/
-│   │   ├── a3f2b8c9d4e5.jpg
-│   │   ├── 7b2e4f8a1c3d.pdf
-│   │   └── ...
-│   └── 2/
-│       └── ...
-├── thumb/
-└── temp/
+├── uploads/        # file blobs (content-hash names)
+├── thumb/          # generated thumbnails
+├── temp/           # in-flight uploads and downloads
+└── conf.ini        # config file
 ```
 
-The numbered folders (`1/`, `2/`) correspond to storage policy IDs, not users. File names are hashed, so you can't browse user files directly on the filesystem.
+The exact subfolder layout inside `uploads` can vary by version and policy, so don't build automation that walks it. Think of it as a blob store that Cloudreve owns. The Files / File Blobs / Physical Files model is what the admin docs describe: users see Files, the database records which blobs back them, and the blobs are the physical bytes. Unused blobs are garbage-collected by the queue scheduler.
 
 ### User file separation
 
@@ -449,8 +472,8 @@ Users only see their own files in the web interface. The database tracks ownersh
 
 | What users see | What's on disk |
 |----------------|----------------|
-| `/Documents/report.pdf` | `/cloudreve/data/upload/1/7b2e4f8a1c3d.pdf` |
-| `/Photos/vacation.jpg` | `/cloudreve/data/upload/1/a3f2b8c9d4e5.jpg` |
+| `/Documents/report.pdf` | A hashed blob under `data/uploads` |
+| `/Photos/vacation.jpg` | A different hashed blob under `data/uploads` |
 
 Two users can have files with the same name in the same virtual path. They're stored separately on disk with different hashes.
 
@@ -474,9 +497,8 @@ Cloudreve has a built-in import feature that adds existing files to a user's lib
 1. Go to **Dashboard > Files > Import**
 2. Configure the import:
    - **Storage policy**: Select the policy where your files are located
-   - **Source folder path**: Enter the path on disk, e.g., `/cloudreve/downloads/movies`
-   - **Target user**: Search and select which user should own the files
-   - **Destination folder path**: Where files appear in the user's file browser, e.g., `/Movies`
+   - **Source folder path**: Enter the path on disk
+   - **Target user and folder**: Who owns the imported files and where they appear
    - **Recursively import**: Enable to include subdirectories
    - **Extract media information**: Enable to pull metadata from videos and images
 3. Click **Import**
@@ -485,11 +507,79 @@ Cloudreve has a built-in import feature that adds existing files to a user's lib
 After import, Cloudreve manages the physical files. Don't modify or delete them outside Cloudreve. Importing the same file twice will skip duplicates. Files count against the user's storage quota even though no data is copied.
 </Notice>
 
-This is the fastest way to add large existing collections. The files stay in place on disk, and Cloudreve creates database entries pointing to them.
+This is the fastest way to add large existing collections. The files stay in place on disk, and Cloudreve creates database entries pointing to them. Menu locations drift between versions; if you don't see **Files > Import**, check under the storage policy's own actions.
+
+## Uploading large files through Cloudflare Tunnel
+
+This is the failure almost everyone hits with this exact stack, so it gets its own section.
+
+<Notice type="warning" title="Cloudflare free plan: 100 MB per request">
+Cloudflare's free plan caps a single HTTP request at 100 MB. Upload a 200 MB video through the tunnel without chunked upload and you'll get a `413 Request Entity Too Large`. Business lifts the cap to around 200 MB and Enterprise to around 500 MB, but the numbers move - check Cloudflare's current limits page before relying on them. cloudflared itself adds no body limit; the constraint is the edge.
+</Notice>
+
+The fix is to let Cloudreve split uploads into chunks on the client side. Each chunk is its own HTTP request, so nothing trips the 100 MB cap. Cloudreve reassembles the blob on the server.
+
+**Enable chunked upload:**
+
+1. Go to **Dashboard > Storage Policies**
+2. Edit the policy your users upload to
+3. Enable chunked upload and set the chunk size to something under 100 MB. 25-50 MB is a good range: small enough to clear the limit with room, large enough to avoid thousands of requests
+4. Save the policy
+
+**Verify it works:** upload a file bigger than 100 MB through `https://cloudreve.yourdomain.com`. It should complete with no `413`. If it still fails, open the browser dev tools network tab and look at which request dies - if it's a single giant POST, the policy change didn't apply to the user's group.
+
+<ListCheck>
+  <ul>
+    <li>Chunked upload enabled on the storage policy</li>
+    <li>Chunk size set below 100 MB (25-50 MB recommended)</li>
+    <li>Policy assigned to the user group your test account uses</li>
+    <li>Test upload of a file larger than 100 MB completes</li>
+  </ul>
+</ListCheck>
+
+**Alternatives if you don't want chunked upload:**
+
+- **WebDAV**: Mount the drive and copy files over the WebDAV endpoint. Same 100 MB request limit applies through the tunnel, but many WebDAV clients chunk on their own.
+- **Upload on the LAN**: Use the local URL (`http://server-ip:5212`) for big transfers. No Cloudflare in the path, no limit.
+- **S3-compatible policy**: Point a storage policy at Cloudflare R2 or Backblaze B2 so clients upload to the bucket instead of through your tunnel.
+
+If you also front Cloudreve with nginx somewhere, nginx's own `client_max_body_size` (default 1 MB!) is a separate limit. Set it above your chunk size or the proxy will reject chunks first.
+
+## Full-text search with Meilisearch (optional addon)
+
+From 4.14.0, the Community edition can search inside file contents. It's a two-container addon: Apache Tika extracts text (port 9998) and Meilisearch indexes it (port 7700). Skip this if you only browse by folder and filename.
+
+The official compose repo ships an override file, so you don't have to hand-roll the services. Add a master key to your `.env`:
+
+```bash
+# in /opt/stacks/cloudreve/.env
+MEILI_MASTER_KEY=$(openssl rand -hex 32)
+```
+
+Then either grab `docker-compose.fts.yml` from [cloudreve/docker-compose](https://github.com/cloudreve/docker-compose) or define `meilisearch` and `tika` services yourself, and start with both files:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.fts.yml up -d
+```
+
+The official override wires `getmeili/meilisearch:v1.37` and `apache/tika:latest` and seeds the right `CR_SETTING_DEFAULT_fts_*` variables.
+
+Once the containers are up, configure the backend in the admin panel:
+
+1. **Dashboard > Filesystem > Full-text Search**
+2. Set Meilisearch endpoint to `http://meilisearch:7700` and paste the master key
+3. Set Tika endpoint to `http://tika:9998`
+4. Save
+
+<Notice type="info" title="Existing files need a manual re-index">
+Enabling search does not retroactively index what's already uploaded. Click **Rebuild Index** and expect it to run for a while on big libraries. Do it off-peak. AI semantic search is the follow-on feature on top of this stack; see the [AI semantic search docs](https://docs.cloudreve.org/en/usage/search/ai-semantic-search).
+</Notice>
+
+Cost note: that's two more containers on the box. Meilisearch RAM grows with the index size, so a few hundred GB of documents can add up. On a 2 GB VPS, measure before you leave it enabled.
 
 ## Remote downloads with Aria2
 
-Cloudreve includes Aria2 in the official Docker image, so you can download files from URLs, magnet links, and torrents directly to your storage. The files appear in your Cloudreve file browser once the download completes.
+Cloudreve includes Aria2 in the official Docker image, so remote download tasks from URLs, magnet links, and torrents go straight to your storage. The files appear in your Cloudreve file browser once the download completes. The image is ~572 MB partly because it bundles Aria2 alongside ffmpeg, LibreOffice, and vips for thumbnails and metadata.
 
 ### Why port 6888 matters
 
@@ -516,7 +606,7 @@ sudo ufw allow 6888/tcp
 sudo ufw allow 6888/udp
 ```
 
-For home servers behind a router, forward port 6888 to your server's local IP.
+For home servers behind a router, forward port 6888 to your server's local IP. This is one of the few ports this stack needs open - keep everything else closed.
 </Notice>
 
 ### Enable remote downloads
@@ -532,6 +622,8 @@ The built-in Aria2 runs automatically with the Cloudreve container. You just nee
    - **RPC Authorization Token**: Leave empty (the built-in Aria2 has no token by default)
    - **Temporary Download Directory**: Leave empty to use the default (`/cloudreve/data/temp`)
 5. Save the node settings
+
+The bundled Aria2 starts with `--enable-rpc` on loopback port 6800 and no secret. That's fine inside the container because nothing else can reach that port. Don't publish 6800 to the host.
 
 ### Enable for user groups
 
@@ -574,7 +666,7 @@ You can pass additional options to Aria2 through the node settings. In the **Dow
 This limits download speed to 10MB/s, allows 3 concurrent downloads, adds tracker servers for better peer discovery, and stops seeding after reaching a 1:1 ratio or 60 minutes.
 
 <Accordion label="Using qBittorrent instead of Aria2" group="downloads">
-If you prefer qBittorrent for torrent downloads, run it as a separate container and point Cloudreve to its Web UI. qBittorrent handles torrents better than Aria2 for long-running seeds, but it can't download regular HTTP/FTP URLs.
+If you prefer qBittorrent for torrent downloads, run it as a separate container and point Cloudreve to its Web UI. qBittorrent handles torrents better than Aria2 for long-running seeds, but it can't download regular HTTP/FTP URLs. Cloudreve supports qBittorrent 4.4 or newer, magnet and torrent links only, and the download path must be a filesystem location Cloudreve can also see.
 
 Add qBittorrent to your compose file:
 
@@ -599,10 +691,60 @@ Add qBittorrent to your compose file:
 Then configure the node to use qBittorrent:
 - **Downloader Type**: qBittorrent
 - **Web UI Address**: `http://qbittorrent:8080`
-- **Username/Password**: Set these in qBittorrent's settings
+- **Username/Password**: Set these in qBittorrent's WebUI settings on first run. Modern qBittorrent no longer ships the old `adminadmin` default; it generates a temporary password in the container logs, so check `docker logs qbittorrent` and change it immediately.
 
 The shared `backend_data` volume lets qBittorrent download directly to Cloudreve's storage.
 </Accordion>
+
+## Backup and upgrade Cloudreve
+
+Treat this like any other database-backed service. The database holds user accounts, share links, and references to every blob. The `backend_data` volume holds the blobs and `conf.ini`. Lose either one and you're in trouble.
+
+**What to back up:**
+
+<ListCheck>
+  <ul>
+    <li>PostgreSQL dump - the critical piece. Users, shares, file metadata all live here</li>
+    <li><code>backend_data</code> volume - file blobs plus config. Skip only if every storage policy points at S3/R2/B2 off-box</li>
+    <li>Release notes between your current version and the new one - read them before every upgrade</li>
+  </ul>
+</ListCheck>
+
+**Database dump:**
+
+```bash
+docker exec cloudreve-db pg_dump -U cloudreve cloudreve | gzip > cloudreve-db-$(date +%F).sql.gz
+```
+
+**Volume copy** (named volume path on the host):
+
+```bash
+sudo rsync -a /var/lib/docker/volumes/cloudreve_backend_data/ /backups/cloudreve-backend_data/
+```
+
+If you use a bind mount, back up that directory instead. For automated versioned backups of the volume, [Zerobyte: self-hosted Restic backup automation](https://www.bitdoze.com/zerobyte-restic-gui/) is a good fit. For getting the DB dump off the box, I follow the same pattern as [off-box database backups to Cloudflare R2](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/): same idea, different service.
+
+Run both weekly and always before an upgrade. A cron line is enough:
+
+```bash
+0 3 * * 0 docker exec cloudreve-db pg_dump -U cloudreve cloudreve | gzip > /backups/cloudreve-db-$(date +\%F).sql.gz
+```
+
+**Upgrading:**
+
+<Notice type="warning" title="Always pg_dump before upgrading">
+The 4.13.0 upgrade invalidated every session and every signed `?sign=` download link in existence. That's not a bug, that's the fix for a crypto problem. You don't want to discover it without a backup and a message ready for your users.
+</Notice>
+
+```bash
+cd /opt/stacks/cloudreve
+docker exec cloudreve-db pg_dump -U cloudreve cloudreve | gzip > db-backup-$(date +%F).sql.gz
+docker compose pull && docker compose down && docker compose up -d
+```
+
+After the restart, log in and smoke test: browse files, open a share link, upload something small. If you pinned `v4`, you track 4.x automatically. If you pinned `4.19.1`, you decide when to move.
+
+Don't bump `postgres:17` to `18` in the same breath as a Cloudreve upgrade. Different problem, different weekend.
 
 ## Working with Cloudreve
 
@@ -613,8 +755,9 @@ The web interface handles most file operations:
 - **Sharing** - Right-click a file or folder, select Share, and configure the link. Set a password or expiration if needed.
 - **Previews** - Click files to preview them. Cloudreve handles images, videos, audio, PDFs, and code files.
 - **Photo editing** - Right-click an image and open it with Photopea for quick edits without leaving the browser.
+- **Recycle bin** - 4.18.0 added a one-click empty recycle bin. Deleted blobs get garbage-collected automatically by the queue scheduler.
 
-For desktop integration, enable WebDAV in your user settings and mount the drive on your computer. Windows, macOS, and Linux all support WebDAV natively.
+For desktop integration, enable WebDAV in your user settings and mount the drive on your computer. Windows, macOS, and Linux all support WebDAV natively. There is a desktop sync client now, but it's Pro-only and Windows 10 1903+; WebDAV stays the free path for everyone else.
 
 ## Troubleshooting
 
@@ -639,7 +782,7 @@ curl http://localhost:5212
 If that works but the tunnel doesn't:
 
 - Check the tunnel container is running: `docker ps | grep cloudflared`
-- Verify the hostname configuration in Cloudflare Zero Trust
+- Verify the hostname configuration in the Cloudflare One dashboard (Networks > Tunnels)
 - Make sure the URL in the hostname config matches your container name or IP
 </Accordion>
 
@@ -662,7 +805,23 @@ docker exec cloudreve-backend id
 sudo chown -R 1000:1000 /mnt/storage/cloudreve
 ```
 
-Adjust the user ID based on what the container actually uses.
+Adjust the user ID based on what the container actually uses. If you want the container to run as a dedicated non-root user, see [add a non-root user to a Docker container](https://www.bitdoze.com/add-users-to-docker-container/).
+</Accordion>
+
+<Accordion label="Upload fails with 413 / large uploads fail" group="faq">
+`413 Request Entity Too Large` behind Cloudflare means you hit the 100 MB request cap. Enable chunked upload on the storage policy with a chunk size under 100 MB (see the "Uploading large files through Cloudflare Tunnel" section). If nginx is also in the path, raise `client_max_body_size` above your chunk size.
+</Accordion>
+
+<Accordion label="Download links point to the wrong hostname" group="faq">
+Your Site URLs list is missing an entry, or Cloudreve is serving cached blob URLs. Fix the list under **Settings > Site Information**, then run **Filesystem > Clear Blob URL Cache**. Also check that users hit the same scheme you configured - switching between `http://` and `https://` breaks signed links. Server clock skew breaks them too; keep NTP on.
+</Accordion>
+
+<Accordion label="UI broken after upgrade / stale assets" group="faq">
+`/sw.js`, `/index.html`, and `/manifest.json` must not be cached. Behind Cloudflare, `.js` files are cacheable by default, which is how the Service Worker pins an old UI after a version bump. Add a Cache Rule on the zone to bypass cache for `/sw.js` (or for the whole Cloudreve hostname), then hard-refresh.
+</Accordion>
+
+<Accordion label="Event logs show proxy IPs instead of real clients" group="faq">
+Add `CR_CONF_System.ProxyHeader=X-Forwarded-For` to the cloudreve service environment in compose and restart the stack. Only do this when all traffic comes through a trusted proxy like cloudflared - if port 5212 is reachable directly, clients can spoof the header.
 </Accordion>
 
 <Accordion label="Torrent downloads are slow or won't start" group="faq">
@@ -693,12 +852,16 @@ The temp directory and storage directory must be accessible to the Cloudreve pro
 
 ## Wrapping up
 
-Cloudreve gives you a file sharing system that runs on your own hardware. Combined with Cloudflare Tunnels, you can reach your files from anywhere without exposing your home network directly to the internet.
+Cloudreve gives you a self-hosted cloud storage system that runs on your own hardware. Combined with Cloudflare Tunnels, you can reach your files from anywhere without exposing your home network directly to the internet.
 
 The PostgreSQL and Redis setup handles growth better than SQLite. Add Aria2 remote downloads to grab files from anywhere and have them waiting in your cloud storage. For a home server or small team, the free Community edition covers everything most people need.
+
+This guide now covers the 4.19.x line: pinned image tags, chunked uploads for the Cloudflare 100 MB limit, full-text search, and a backup/upgrade routine. If you deployed from the original January 2026 version, upgrade today - CVE-2026-25726 is not something to leave sitting on a public tunnel.
 
 Related guides you might find useful:
 
 - [Deploy Filebrowser with Docker](https://www.bitdoze.com/deploy-filebrowser-docker/) - Lighter alternative if you just need file browsing
 - [Best 100+ Docker Containers for Home Server](https://www.bitdoze.com/docker-containers-home-server/) - More applications for your home lab
 - [How To Monitor Server and Docker Resources](https://www.bitdoze.com/sever-monitoring/) - Track CPU, memory, and disk usage
+
+_Updated for Cloudreve 4.19._
