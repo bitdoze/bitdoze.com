@@ -1,0 +1,1002 @@
+---
+date: 2025-12-05
+lastmod: 2026-09-18T00:00:00Z
+translationKey: "rustfs-self-host"
+title: "Autoaloja RustFS en 2026: guía con Dokploy o Docker Compose"
+meta_title: "Cómo autoalojar RustFS (Dokploy y Docker Compose, 2026)"
+description: "Aprende a autoalojar RustFS 1.0, el almacenamiento de objetos de código abierto compatible con S3 y alternativa a MinIO, usando Dokploy o Docker Compose — totalmente actualizado para 2026."
+image: "@assets/images/25/12/rustfs-self-host.webp"
+imageAlt: "Almacenamiento de objetos RustFS compatible con S3 ejecutándose en Docker con un proxy inverso delante de la API y la consola"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["rustfs", "docker", "s3"]
+canonical: "https://www.bitdoze.com/es/rustfs-autoalojado/"
+---
+
+import { Image } from "astro:assets";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+Si autoalojas RustFS hoy, estás desplegando uno de los servidores de almacenamiento de objetos compatibles con S3 que más rápido crece — y con el repositorio de MinIO ya archivado, RustFS 1.0 (GA en septiembre de 2026) se ha convertido en la alternativa a MinIO por defecto para los autoalojadores. Esta guía cubre dos vías de despliegue, Dokploy (la más fácil) o Docker Compose a pelo, además de los pasos de verificación, copias de seguridad y escalado que convierten una demo en almacenamiento en el que de verdad puedes confiar tus datos.
+
+La versión de diciembre de 2025 de esta guía desplegaba una build preliminar. Todo lo que sigue se ha vuelto a comprobar contra la documentación y los repositorios oficiales en septiembre de 2026, y varios detalles de configuración cambiaron por el camino — incluidos dos errores en mis archivos compose anteriores que he corregido aquí.
+
+## ¿Qué es RustFS?
+
+[RustFS](https://github.com/rustfs/rustfs) es un servidor de almacenamiento de objetos distribuido, de alto rendimiento y compatible con S3, escrito en Rust y publicado bajo licencia Apache 2.0. El proyecto se abrió en julio de 2025 y avanzó rápido: 10 000 estrellas en GitHub en octubre de 2025, 20 000 en enero de 2026, beta en abril de 2026 y 1.0.0 GA el 16 de septiembre de 2026. Ahora suma más de 33 000 estrellas, más de 10 millones de pulls en Docker Hub y más de 160 colaboradores. (La cifra de «más de 2,7 millones de instancias desplegadas» del anuncio de la GA es una afirmación del proveedor — impresionante de todos modos, pero atribúyela al marketing.)
+
+Tres cosas lo convierten en una alternativa a MinIO sólida y no en un servidor S3 más:
+
+- **La sensación de MinIO.** RustFS replica la interfaz de MinIO, incluida una consola web para buckets, usuarios y objetos. Si migras desde MinIO, te sentirás como en casa.
+- **Rust en lugar de Go.** Seguridad de memoria sin pausas del recolector de basura, lo que importa en cargas con objetos pequeños.
+- **Apache 2.0.** Sin obligaciones AGPL. Puedes usarlo en productos comerciales sin requisitos de revelar el código fuente.
+
+### Características clave de RustFS (1.0 GA)
+
+El conjunto de funciones de la 1.0 es un salto importante respecto a las builds alfa que cubrían la mayoría de las primeras guías (incluida la mía):
+
+<ListCheck>
+- **Modo distribuido + erasure coding**: los despliegues multidisco y multinodo son GA, no «en pruebas»
+- **Cifrado del lado del servidor**: SSE-S3 (AES256), SSE-C y SSE-KMS con backends locales, Vault KV2/Transit o AWS KMS
+- **Replicación de buckets y de sitios**: GA en la 1.0.0
+- **Gestión del ciclo de vida (ILM)** con tiering a S3 remoto
+- **Registro de auditoría, OIDC, mTLS, multi-tenancy**: controles de nivel empresarial sin la licencia empresarial
+- **Notificaciones de eventos**: webhook, Kafka, MQTT, MySQL, Postgres, NATS, Redis, AMQP, Pulsar
+- **S3 Tables**: catálogo REST de Apache Iceberg integrado (en Preview a septiembre de 2026)
+- **Más que S3**: WebDAV, FTP/FTPS (más SFTP/Swift opcionales) y un servidor MCP para asistentes de IA
+- **Despliegue en un solo contenedor**: imagen de ~110 MB, amd64 y arm64
+</ListCheck>
+
+### RustFS vs MinIO vs otro almacenamiento de objetos
+
+| Característica | RustFS | MinIO | SeaweedFS | Garage |
+|---------|--------|-------|-----------|--------|
+| **Objetivo principal** | Reemplazo directo de MinIO, velocidad | Almacenamiento de objetos empresarial (AIStor) | Miles de millones de archivos pequeños | Fiabilidad, geodistribución |
+| **Consola web** | ✅ Integrada | ❌ La edición community es solo fuente, sin binarios mantenidos | ✅ Filer UI | ❌ Herramientas externas |
+| **Licencia** | Apache 2.0 | AGPLv3 (community solo fuente) | Apache 2.0 | AGPLv3 |
+| **Lenguaje** | Rust (sin GC) | Go | Go | Rust |
+| **Rendimiento** | Alto — los primeros benchmarks del proveedor afirmaban ~2,3× MinIO en GETs de objetos pequeños; ejecuta tu propia prueba con `warp`/`s3bench` | Alto | Alto | Moderado |
+| **Madurez** | GA (1.0.0, sep. 2026) | Archivado (último binario oct. 2025) | Muy estable | Estable |
+| **Protocolos** | S3 + WebDAV + FTP/FTPS + MCP | S3 | S3 (+ WebDAV) | S3 |
+
+<Notice type="info" title="GA, pero haz tu propia verificación">
+GA significa que el proveedor considera el motor principal de almacenamiento de objetos listo para producción. No significa que RustFS tenga los años de rodaje en campo de MinIO o SeaweedFS. La combinación que funciona: fija tu versión, mantén copias de seguridad, prueba las restauraciones y lee las notas de la versión antes de actualizar. Eso es cierto para cualquier sistema de almacenamiento, pero importa más cuanto más joven es el proyecto.
+</Notice>
+
+### Novedades desde nuestra guía de diciembre de 2025
+
+Si leíste la versión anterior de este artículo, esto es lo que cambió:
+
+<Notice type="info" title="Actualizado en septiembre de 2026">
+- **RustFS 1.0.0 GA** publicado el 2026-09-16 (la guía anterior desplegaba `1.0.0.alpha.68`)
+- **El repositorio de GitHub de MinIO está archivado** — «ya no se mantiene», la edición community es solo fuente y la última versión binaria fue de octubre de 2025
+- **El modo distribuido, el erasure coding, SSE/KMS y la replicación son todos GA**
+- **La CLI propia `rc`** ([rustfs/cli](https://github.com/rustfs/cli)) se une a `mc` y a la AWS CLI
+- **Nuevas opciones de instalación**: paquetes RPM/DEB, chart de Helm en ArtifactHub, operador de Kubernetes y script de instalación de un clic
+- **La política de salida SSRF** (desde la 1.0.0-beta.11) bloquea por defecto los destinos de webhooks y notificaciones en redes privadas — una trampa nueva que se cubre abajo
+- **Correcciones a esta guía**: `SERVER_DOMAIN` nunca existió en la referencia de variables de entorno (es `RUSTFS_SERVER_DOMAINS`), la consola está activada por defecto y el volumen de logs de mis antiguos archivos compose era inerte sin `RUSTFS_OBS_LOG_DIRECTORY`
+</Notice>
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/pNY7NlPuFyM"
+  label="RustFS: la solución S3 ligera que necesitas en 2026"
+/>
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+- **Un VPS o servidor**: mínimo 2 GB de RAM y 2 núcleos de CPU; 4 GB+ recomendados para producción
+- **Un nombre de dominio**: uno para la API S3 (`s3.yourdomain.com`) y otro para la consola (`storage.yourdomain.com`)
+- **Docker 20.10+** con Docker Compose (o una instalación de Dokploy existente)
+- **Almacenamiento local rápido**: SSD/NVMe para el directorio de datos; evita NFS
+- **Una decisión de topología**: los despliegues de un solo nodo y un solo disco no pueden expandirse in situ, así que decide antes del primer despliegue (ver [Escalado horizontal](#escalado-horizontal-multidisco-y-multinodo))
+</ListCheck>
+
+<Button text="Prueba Hetzner Cloud ahora" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+<Button text="Prueba un VPS de Hostinger" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="info" title="Recomendaciones de hosting">
+Un VPS de 4–8 €/mes es suficiente para empezar — el crecimiento del almacenamiento domina la factura a largo plazo, no la CPU ni la RAM. Para una comparación completa, consulta nuestra [comparativa de VPS de Hetzner vs DigitalOcean vs Vultr](https://www.bitdoze.com/es/digitalocean-vs-vultr-vs-hetzner/). La imagen es amd64 + arm64 y ocupa unos 110 MB, así que un [mini PC compacto para servidor doméstico como el GMKtec M5 Ultra](/go/gmktec-m5-ultra/) también funciona bien para uso homelab. Elijas lo que elijas: SSD/NVMe local, nada de NFS en el directorio de datos.
+</Notice>
+
+## Entendiendo los puertos de RustFS (9000 vs 9001)
+
+RustFS usa dos puertos:
+
+- **Puerto 9000**: el endpoint de la API S3. Las aplicaciones se conectan aquí. También sirve los endpoints de salud sin autenticación (`/health`, `/health/ready`) y, en despliegues multinodo, las rutas RPC internas entre nodos (`/rustfs/rpc/`, `/rustfs/peer/`). No hay un puerto de clúster separado.
+- **Puerto 9001**: la consola web para buckets, usuarios y objetos, servida bajo la ruta `/rustfs/console/`.
+
+![Diagrama de los puertos de RustFS: API S3 y RPC entre nodos en el puerto 9000, consola web en el puerto 9001 detrás de un proxy inverso](@assets/images/25/12/rustfs-ports.svg)
+
+En la práctica, pones un proxy inverso con TLS delante de ambos y solo expones el 443. Ese proxy es también la razón por la que el health check de la consola vive en `https://storage.yourdomain.com/rustfs/console/health` en lugar de en la raíz.
+
+## Opción 1: Autoaloja RustFS con Dokploy
+
+Dokploy es la vía más rápida si ya lo usas — un servicio compose más dos dominios, y Traefik se encarga del TLS. Si aún estás eligiendo PaaS, consulta nuestra [comparativa de Coolify vs Dokploy vs Kamal 2](https://www.bitdoze.com/es/coolify-vs-dokploy-vs-kamal-2/).
+
+### Paso 1: Instala Dokploy
+
+Si aún no tienes Dokploy, sigue la [guía de instalación de Dokploy](https://www.bitdoze.com/dokploy-install/) y después:
+
+```sh
+curl -sSL https://dokploy.com/install.sh | sh
+```
+
+Accede a Dokploy en `http://your-vps-ip:3000` y completa la configuración.
+
+### Paso 2: Crea un proyecto nuevo
+
+1. Inicia sesión en el panel de Dokploy
+2. Haz clic en **«Create Project»** y ponle un nombre (p. ej., «RustFS»)
+3. Dentro del proyecto, haz clic en **«Add Service»** → **«Compose»**
+4. Selecciona el tipo **«Docker Compose»** (no Stack)
+5. Llámalo «rustfs-stack»
+
+### Paso 3: Añade la configuración de Docker Compose
+
+Ve a la pestaña **General** y pega esta configuración. Si es tu primera vez con este flujo, nuestra guía sobre [cómo desplegar una app Docker Compose en Dokploy](https://www.bitdoze.com/dokploy-docker-compose-app/) recorre la interfaz en detalle.
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0 # pin the version; latest = 1.0.0 as of 2026-09-16
+    networks:
+      - dokploy-network
+    volumes:
+      - rustfs-data:/data
+    environment:
+      - RUSTFS_VOLUMES=/data
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_CONSOLE_ENABLE=true
+      # Logs go to stdout unless this is set — without it, a log volume collects nothing
+      - RUSTFS_OBS_LOG_DIRECTORY=/app/logs
+      # :? guard = the stack refuses to start on missing/default credentials
+      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY:?set_a_non_default_access_key}
+      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY:?set_a_non_default_secret_key}
+      # Only if a browser app needs CORS against the S3 API — list explicit origins:
+      # - RUSTFS_CORS_ALLOWED_ORIGINS=https://app.yourdomain.com
+      # For virtual-hosted style URLs (bucket.s3.yourdomain.com):
+      # - RUSTFS_SERVER_DOMAINS=s3.yourdomain.com
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:9000/health && curl -f http://localhost:9001/rustfs/console/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4GB
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  rustfs-data:
+```
+
+<Notice type="info" title="Explicación de los volúmenes">
+- `rustfs-data:/data` — persiste todos los datos del almacenamiento de objetos (buckets y objetos)
+- `RUSTFS_OBS_LOG_DIRECTORY=/app/logs` — necesario si quieres logs en archivo; sin él, RustFS registra en stdout y `docker logs` es tu fuente de logs
+
+Los volúmenes con nombre mantienen los datos vivos entre redespliegues de Dokploy. Fíjate en que el healthcheck coincide con el compose oficial (intervalo 30 s, timeout 10 s, 3 reintentos, start_period 40 s).
+</Notice>
+
+<Notice type="warning" title="Elige tu topología antes de desplegar">
+Este compose despliega un único volumen con nombre, lo que lo convierte en un despliegue **de un solo nodo y un solo disco (SNSD)**. SNSD **no puede expandirse in situ** y tampoco puede añadirse como pool más adelante. Pasar a multidisco significa un despliegue nuevo más una migración de datos por S3. Si el crecimiento es plausible, empieza con volúmenes multidisco (`RUSTFS_VOLUMES=/data/rustfs{0...3}`) — consulta [Escalado horizontal](#escalado-horizontal-multidisco-y-multinodo) antes de tu primer despliegue, no después de tu primer terabyte.
+</Notice>
+
+### Paso 4: Configura los dominios
+
+Este compose no tiene etiquetas de Traefik ni puertos expuestos. En su lugar, enruta el tráfico a través de la pestaña **Domains** de Dokploy. Asegúrate primero de que el DNS apunta al servidor.
+
+1. Tras el despliegue, abre la pestaña **Domains** de tu servicio compose
+2. Haz clic en **Add Domain** para la API S3:
+   - **Domain**: `s3.yourdomain.com`
+   - **Container**: selecciona el servicio `rustfs`
+   - **Port**: `9000`
+   - Activa **HTTPS** para SSL automático
+3. Añade un segundo dominio para la consola:
+   - **Domain**: `storage.yourdomain.com`
+   - **Container**: selecciona el servicio `rustfs`
+   - **Port**: `9001`
+   - Activa **HTTPS**
+
+<Notice type="warning" title="Notas importantes">
+- `dokploy-network` es obligatoria para el enrutado de Traefik
+- No pongas `container_name` — rompe funciones de Dokploy como los dominios por servicio
+- Genera credenciales reales antes del primer despliegue (siguiente paso); el compose se niega a arrancar sin ellas
+</Notice>
+
+### Paso 5: Configura las variables de entorno
+
+Abre la pestaña **Environment** y añade tus credenciales. Genéralas en cualquier máquina con OpenSSL:
+
+```sh
+# Access key: uppercase letters and digits only, no slashes (SigV4-safe)
+openssl rand -hex 12 | tr 'a-f' 'A-F'
+
+# Secret key: long random string
+openssl rand -base64 32
+```
+
+Después define:
+
+```sh
+RUSTFS_ACCESS_KEY=A3F91C2E8B7D4056A9E1
+RUSTFS_SECRET_KEY=<the base64 output from above>
+```
+
+<Notice type="info" title="Reglas de credenciales de la documentación oficial">
+La documentación es explícita: **no uses `rustfsadmin` en ninguna de las dos credenciales** (el entrypoint del contenedor muestra un aviso cuando lo haces). Las access keys no pueden contener `/` — el análisis del scope de SigV4 se rompe — y el base64 en crudo vale para el secret pero no para la access key. Si defines `RUSTFS_SERVER_DOMAINS`, también va aquí; `SERVER_DOMAIN`, de la guía antigua, no existe en la referencia actual.
+</Notice>
+
+### Paso 6: Configura el DNS
+
+Crea dos registros A que apunten a tu VPS:
+
+1. `s3.yourdomain.com` → la IP de tu VPS (API S3)
+2. `storage.yourdomain.com` → la IP de tu VPS (consola)
+
+### Paso 7: Despliega y verifica
+
+1. Haz clic en **«Deploy»** y espera a que arranque el servicio
+2. Vigila la pestaña **Logs** — un arranque sano muestra la API S3 en el 9000 y la consola en el 9001
+3. Añade los dominios del paso 4 y espera ~30 segundos a los certificados de Traefik
+4. Verifica:
+
+```sh
+curl --fail https://s3.yourdomain.com/health
+```
+
+Esperado: una respuesta 200 vacía. Después inicia sesión en `https://storage.yourdomain.com` con tu access key y tu secret key. El healthcheck de Dokploy se pone verde en aproximadamente un minuto.
+
+**Si el stack sale inmediatamente al desplegar**: se disparó el guard `${VAR:?}`, lo que significa que falta una variable de entorno o dejaste los valores por defecto antiguos. Corrige la pestaña Environment y redespliega. Si actualizaste desde la versión anterior de esta guía, ten en cuenta que la vieja variable `SERVER_DOMAIN` no hacía nada — sustitúyela por `RUSTFS_SERVER_DOMAINS`.
+
+## Opción 2: Despliega RustFS con Docker Compose
+
+Para control manual, o en un servidor sin PaaS.
+
+### Paso 1: Prepara tu servidor
+
+```sh
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# Install Docker Compose plugin
+sudo apt install docker-compose-plugin -y
+```
+
+### Paso 2: Crea directorios y ajusta permisos
+
+El contenedor de RustFS se ejecuta como usuario no root `rustfs` con UID `10001`. Los directorios montados por bind mount deben pertenecer a ese UID:
+
+```sh
+mkdir -p ~/rustfs
+cd ~/rustfs
+
+# Data and logs directories
+mkdir -p data logs
+
+# Hand ownership to the container user (UID 10001)
+sudo chown -R 10001:10001 data logs
+```
+
+<Notice type="warning" title="Permisos obligatorios">
+Si te saltas el `chown`, RustFS se encuentra con «permission denied» al escribir datos. El contenedor corre como UID 10001 a propósito — no root es el valor correcto por defecto para un servicio de almacenamiento expuesto a la red.
+</Notice>
+
+### Paso 3: Crea el archivo Docker Compose
+
+```sh
+nano docker-compose.yml
+```
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    container_name: rustfs
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - RUSTFS_VOLUMES=/data
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_CONSOLE_ENABLE=true
+      # Without this, logs go to stdout and ./logs stays empty
+      - RUSTFS_OBS_LOG_DIRECTORY=/app/logs
+      - RUSTFS_ACCESS_KEY=${RUSTFS_ACCESS_KEY:?set_a_non_default_access_key}
+      - RUSTFS_SECRET_KEY=${RUSTFS_SECRET_KEY:?set_a_non_default_secret_key}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:9000/health && curl -f http://localhost:9001/rustfs/console/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4GB
+```
+
+Dos cambios respecto a la versión anterior de esta guía, ambos correcciones: `RUSTFS_OBS_LOG_DIRECTORY=/app/logs` hace que el montaje de logs reciba logs de verdad (en el archivo antiguo el volumen no recogía nada porque el destino de logs por defecto es stdout), y el fallback `:-rustfsadmin` ha desaparecido — ahora el stack se niega a arrancar con credenciales por defecto.
+
+### Paso 4: Crea el archivo de entorno
+
+Genera las credenciales (los mismos comandos que en la Opción 1):
+
+```sh
+openssl rand -hex 12 | tr 'a-f' 'A-F'   # access key
+openssl rand -base64 32                 # secret key
+```
+
+```sh
+nano .env
+```
+
+```sh
+RUSTFS_ACCESS_KEY=A3F91C2E8B7D4056A9E1
+RUSTFS_SECRET_KEY=<generated secret>
+```
+
+<Notice type="warning" title="Advertencia de seguridad">
+Nunca despliegues `rustfsadmin/rustfsadmin`. La documentación oficial dice que no uses `rustfsadmin` en ninguna de las dos credenciales, y los clústeres multinodo rechazan de plano la autenticación RPC derivada de los valores por defecto. Para mejor higiene, carga las credenciales desde archivos con `RUSTFS_ACCESS_KEY_FILE` / `RUSTFS_SECRET_KEY_FILE` — consulta la guía de [secrets de Docker Compose para credenciales sensibles](https://www.bitdoze.com/docker-compose-secrets/) y la sección de seguridad de abajo.
+</Notice>
+
+### Paso 5: Inicia RustFS
+
+```sh
+# Start
+docker compose up -d
+
+# Status — wait for "healthy"
+docker compose ps
+
+# Logs — make sure there's no credential warning
+docker compose logs -f
+
+# Liveness check
+curl --fail http://localhost:9000/health
+```
+
+`docker compose ps` debería mostrar `(healthy)` al cabo de un minuto aproximadamente. Si no es así, revisa la [sección de verificación](#verifica-tu-despliegue-de-rustfs) de abajo.
+
+### Paso 6: Proxy inverso con Nginx
+
+Para dominios en producción y SSL:
+
+```sh
+sudo apt install nginx certbot python3-certbot-nginx -y
+sudo nano /etc/nginx/sites-available/rustfs
+```
+
+```nginx
+# RustFS S3 API
+server {
+    listen 80;
+    server_name s3.yourdomain.com;
+
+    # Allow large file uploads
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://localhost:9000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+
+        # Timeouts for large uploads
+        proxy_connect_timeout 300;
+        proxy_send_timeout 300;
+        proxy_read_timeout 300;
+    }
+}
+
+# RustFS Console
+server {
+    listen 80;
+    server_name storage.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+Actívalo y asegúralo:
+
+```sh
+sudo ln -s /etc/nginx/sites-available/rustfs /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+# SSL certificates
+sudo certbot --nginx -d s3.yourdomain.com -d storage.yourdomain.com
+```
+
+Verifica TLS de extremo a extremo:
+
+```sh
+curl -I https://s3.yourdomain.com/health
+```
+
+Esperado: `HTTP/2 200`. Un `502` aquí suele significar que el contenedor no está sano; si falta `client_max_body_size 0`, las subidas grandes fallan con 413.
+
+## Opción 3: Prueba rápida con docker run
+
+Para una prueba desechable. Los datos siguen cayendo en `$(pwd)/data`, así que el arreglo del UID también se aplica aquí:
+
+```sh
+mkdir -p data logs
+sudo chown -R 10001:10001 data logs
+
+docker run -d \
+  --name rustfs \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v $(pwd)/data:/data \
+  -v $(pwd)/logs:/app/logs \
+  -e RUSTFS_VOLUMES=/data \
+  -e RUSTFS_ADDRESS=0.0.0.0:9000 \
+  -e RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001 \
+  -e RUSTFS_CONSOLE_ENABLE=true \
+  -e RUSTFS_OBS_LOG_DIRECTORY=/app/logs \
+  -e RUSTFS_ACCESS_KEY=testadminkey01 \
+  -e RUSTFS_SECRET_KEY=only-for-local-testing-not-prod \
+  rustfs/rustfs:1.0.0
+```
+
+Verifica:
+
+```sh
+curl --fail http://localhost:9000/health
+```
+
+Consola en `http://localhost:9001`. Desmóntalo con `docker rm -f rustfs`.
+
+**Si el contenedor entra en crash-loop con un error de topología de disco**: las comprobaciones estrictas de disco no aceptan tu configuración de volúmenes. En una máquina de laboratorio puedes poner `RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true` — el nombre dice unsafe, trátalo como solo-para-laboratorio.
+
+## Verifica tu despliegue de RustFS
+
+RustFS expone una familia de endpoints de salud sin autenticación en el puerto 9000. Aprende la diferencia entre liveness y readiness — te ahorra la confusión de «el contenedor está arriba pero el almacenamiento no»:
+
+| Endpoint | Significado |
+|----------|---------|
+| `/health`, `/health/live`, `/minio/health/live` | Liveness — el proceso está corriendo |
+| `/health/ready`, `/minio/health/ready` | Readiness — el almacenamiento, IAM y los peers están inicializados; devuelve **503 hasta entonces** |
+| `/minio/health/cluster` | Salud del clúster para despliegues distribuidos |
+
+Los alias `/minio/health/*` existen por compatibilidad con MinIO, así que tus herramientas actuales siguen funcionando. Todos están activados por defecto; desactívalos con `RUSTFS_HEALTH_ENDPOINT_ENABLE=false`.
+
+Lista de comprobación post-despliegue:
+
+```sh
+# Container running and healthy
+docker ps --filter name=rustfs
+
+# Liveness
+curl --fail http://localhost:9000/health
+
+# Readiness — 200 means fully ready, 503 means still initializing
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9000/health/ready
+```
+
+Después ejercita la ruta S3 con la CLI `rc` (instalada en la siguiente sección):
+
+```sh
+rc alias set local http://localhost:9000 $RUSTFS_ACCESS_KEY $RUSTFS_SECRET_KEY
+rc ping local
+rc ready local
+rc admin info cluster local
+```
+
+<Notice type="info" title="Monitoriza el endpoint de readiness">
+Apunta Uptime Kuma (o cualquier monitor) a `https://s3.yourdomain.com/health/ready`, no a `/health`. El liveness puede estar en verde mientras la capa de almacenamiento sigue mal. Usamos exactamente este patrón en nuestra guía sobre cómo [monitorizar tu servidor con Beszel y Uptime Kuma](https://www.bitdoze.com/es/beszel-uptime-kuma/).
+</Notice>
+
+## Uso de RustFS: consola web, CLI rc, mc y AWS CLI
+
+### Accede a la consola web y crea un bucket
+
+Abre `https://storage.yourdomain.com` (o `http://localhost:9001` en local) e inicia sesión con tu access key y tu secret key.
+
+1. Haz clic en **«Create Bucket»**
+2. Ponle un nombre (p. ej., `my-first-bucket`)
+3. Configura el versionado y el bloqueo de objetos si lo necesitas
+4. Haz clic en **«Create Bucket»**, luego abre el bucket y sube o arrastra y suelta archivos
+
+![Consola web de RustFS mostrando buckets y gestión de objetos tras un despliegue con Docker Compose](@assets/images/25/12/rustfs-ui.webp)
+
+La captura anterior es anterior a la 1.0.0 — la consola GA tiene un aspecto similar, pero el proyecto ahora mantiene la interfaz como repositorio separado, así que espera cambios de pulido visual entre versiones.
+
+### Clientes de línea de comandos: rc, mc o AWS CLI
+
+Instala la CLI propia `rc` (v0.1.30 en el momento de investigar; también existen paquetes para Homebrew y Scoop):
+
+```sh
+curl -fLO https://github.com/rustfs/cli/releases/download/v0.1.30/rustfs-cli-linux-amd64-v0.1.30.tar.gz
+tar -xzf rustfs-cli-linux-amd64-v0.1.30.tar.gz
+sudo install -m 0755 rc /usr/local/bin/rc
+```
+
+Los tres clientes funcionan contra RustFS — `rc` es la propia del proyecto y entiende la salida de administración específica de RustFS, `mc` es el veterano cliente de MinIO que todo lo soporta, y la AWS CLI es a lo que se mapean tus hábitos de boto3/SDK. Elige uno para scripts y quédate con él.
+
+<Tabs>
+<Tab name="RustFS rc CLI">
+
+```sh
+# Configure an alias
+rc alias set local http://localhost:9000 $RUSTFS_ACCESS_KEY $RUSTFS_SECRET_KEY
+
+# Or with your domain
+rc alias set rustfs https://s3.yourdomain.com $RUSTFS_ACCESS_KEY $RUSTFS_SECRET_KEY
+
+# Connectivity and readiness
+rc ping local
+rc ready local
+
+# Cluster and disk status
+rc admin info cluster local
+
+# Bucket and object work
+rc bucket list local
+rc object cp myfile.txt local/my-bucket/
+```
+
+`rc` también gestiona reglas de ciclo de vida — consulta `rc bucket lifecycle --help` y `rc --help` para el árbol completo de comandos.
+
+</Tab>
+<Tab name="MinIO mc">
+
+```sh
+# Install MinIO Client
+curl https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
+chmod +x mc
+sudo mv mc /usr/local/bin/
+
+# Configure alias
+mc alias set rustfs http://localhost:9000 $RUSTFS_ACCESS_KEY $RUSTFS_SECRET_KEY
+
+# Create bucket, upload, list, download
+mc mb rustfs/my-bucket
+mc cp myfile.txt rustfs/my-bucket/
+mc ls rustfs/my-bucket
+mc cp rustfs/my-bucket/myfile.txt ./downloaded.txt
+```
+
+</Tab>
+<Tab name="AWS CLI">
+
+```sh
+aws configure
+# Access Key ID: your RustFS access key
+# Secret Access Key: your RustFS secret key
+# Region: us-east-1 (RustFS accepts any; see RUSTFS_REGION)
+# Output format: json
+
+aws --endpoint-url http://localhost:9000 s3 ls
+aws --endpoint-url http://localhost:9000 s3 mb s3://my-bucket
+aws --endpoint-url http://localhost:9000 s3 cp myfile.txt s3://my-bucket/
+aws --endpoint-url http://localhost:9000 s3 ls s3://my-bucket/
+```
+
+</Tab>
+</Tabs>
+
+Verifica la ruta de lectura/escritura de cualquier forma: un `rc ready local` que devuelve OK más un `mc ls rustfs` que lista tu bucket significa que tienes almacenamiento funcionando.
+
+Una nota honesta: para scripts que no deben romperse, `mc` es el valor por defecto más seguro porque es más viejo y está probado en batalla en almacenes compatibles con S3. `rc` es donde aparecen primero las funciones específicas de RustFS (admin info, lifecycle).
+
+## Integración de RustFS con aplicaciones
+
+La mayoría de aplicaciones que hablan S3 solo necesitan un endpoint, una key, un secret y un bucket:
+
+```sh
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=<your access key>
+S3_SECRET_KEY=<your secret key>
+S3_BUCKET=my-bucket
+S3_REGION=us-east-1
+```
+
+Nota sobre los estilos de URL: RustFS soporta el estilo path (`http://endpoint/bucket`) de fábrica, que es lo que usan la mayoría de las apps autoalojadas. El estilo virtual-hosted (`bucket.s3.yourdomain.com`) requiere definir `RUSTFS_SERVER_DOMAINS=s3.yourdomain.com`. Si una app tiene peculiaridades de path-style de MinIO grabadas a fuego, debería funcionar sin cambios.
+
+### Herramientas de copia de seguridad: Restic
+
+```sh
+export AWS_ACCESS_KEY_ID=<your access key>
+export AWS_SECRET_ACCESS_KEY=<your secret key>
+export RESTIC_REPOSITORY=s3:http://localhost:9000/backups
+
+restic init
+restic backup /path/to/data
+```
+
+RustFS en la 1.0.0 es lo bastante nuevo como para que yo ejecute `restic init`, un `restic backup` real y `restic check` antes de confiarle datos de producción a esta pareja. El flujo completo está en nuestra guía de [copias de seguridad autoalojadas con Restic y Rclone](https://www.bitdoze.com/es/pluton-backup-autoalojado/).
+
+### Docker Registry
+
+```yaml
+services:
+  registry:
+    image: registry:2
+    environment:
+      REGISTRY_STORAGE: s3
+      REGISTRY_STORAGE_S3_ACCESSKEY: <your access key>
+      REGISTRY_STORAGE_S3_SECRETKEY: <your secret key>
+      REGISTRY_STORAGE_S3_REGION: us-east-1
+      REGISTRY_STORAGE_S3_BUCKET: docker-registry
+      REGISTRY_STORAGE_S3_REGIONENDPOINT: http://rustfs:9000
+```
+
+### Cargas de trabajo de IA
+
+Dos novedades que conviene conocer si tiras por ahí: S3 Tables incluye un catálogo REST de Apache Iceberg integrado (Preview), y `RUSTFS_BUFFER_PROFILE=AiTraining` ajusta los búferes de E/S para lecturas secuenciales grandes de entrenamiento de IA. También hay un servidor MCP ([rustfs/mcp](https://github.com/rustfs/mcp)) que permite a los asistentes de IA consultar buckets directamente.
+
+## Configuración de RustFS: variables de entorno
+
+La tabla siguiente refleja la [referencia oficial de variables de entorno](https://docs.rustfs.com/en/reference/environment-variables) a 2026-09-18. Confirma cualquier variable contra esa página antes de fiarte de ella — esta superficie cambió mucho entre las builds alfa y la 1.0.0.
+
+| Variable | Descripción | Valor por defecto |
+|----------|-------------|---------|
+| `RUSTFS_VOLUMES` | Ruta(s) o URLs de almacenamiento; soporta expansión con elipsis `{0...3}` | `/data` en Docker |
+| `RUSTFS_ADDRESS` | Dirección de escucha de la API S3 | `:9000` |
+| `RUSTFS_CONSOLE_ADDRESS` | Dirección de escucha de la consola | `:9001` |
+| `RUSTFS_CONSOLE_ENABLE` | Activa la consola web | `true` |
+| `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | Credenciales root | fallback `rustfsadmin` (docs: no lo uses) |
+| `RUSTFS_ACCESS_KEY_FILE` / `RUSTFS_SECRET_KEY_FILE` | Lee credenciales desde archivos (secrets de Docker/K8s) | — |
+| `RUSTFS_SERVER_DOMAINS` | Dominios separados por comas para el estilo virtual-hosted | — |
+| `RUSTFS_REGION` | Región de reserva para SigV4 | `us-east-1` |
+| `RUSTFS_CORS_ALLOWED_ORIGINS` | Orígenes CORS para la API S3 | — |
+| `RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS` | Orígenes CORS para la consola | `*` |
+| `RUSTFS_HEALTH_ENDPOINT_ENABLE` | Endpoints de salud sin autenticación en el 9000 | `true` |
+| `RUSTFS_OBS_LOG_DIRECTORY` | Directorio de archivos de log | sin definir = stdout |
+| `RUSTFS_OBS_LOG_ROTATION_TIME` / `_KEEP_FILES` / `_MAX_TOTAL_SIZE_BYTES` | Controles de rotación de logs | cada hora / 30 / 2 GiB |
+| `RUSTFS_TLS_PATH` | Directorio con certificados TLS (`rustfs_cert.pem`, `rustfs_key.pem`) | — |
+| `RUSTFS_TLS_RELOAD_ENABLE` | Recarga en caliente de certificados TLS sin reiniciar | — |
+| `RUSTFS_RPC_SECRET` | Auth RPC compartida para clústeres multinodo | — |
+| `RUSTFS_NOTIFY_ENABLE` / `RUSTFS_AUDIT_ENABLE` | Notificaciones de eventos / registro de auditoría | desactivado salvo que lo actives |
+| `RUSTFS_STORAGE_CLASS_STANDARD` / `RUSTFS_STORAGE_CLASS_RRS` | Clases de almacenamiento | auto / EC:1 |
+| `RUSTFS_BUFFER_PROFILE` | Ajuste de búferes de E/S: GeneralPurpose, AiTraining, DataAnalytics, WebWorkload, IndustrialIoT, SecureStorage | GeneralPurpose |
+| `RUSTFS_OUTBOUND_ALLOW_ORIGINS` | Lista de permitidos para el egress de webhook/OIDC/auditoría (ver abajo) | — |
+| `RUSTFS_KMS_*` | Configuración del backend KMS (local, Vault, AWS KMS) | — |
+| `RUSTFS_UNSAFE_BYPASS_DISK_CHECK` | Omite las comprobaciones estrictas de topología de disco | `false` |
+
+Dos correcciones respecto a la versión anterior de este artículo: `RUSTFS_CONSOLE_ENABLE` vale **true** por defecto (antes lo listé como false), y `SERVER_DOMAIN` no es una variable real — usa `RUSTFS_SERVER_DOMAINS`. `RUSTFS_EXTERNAL_ADDRESS` también aparecía en mi tabla antigua pero ya no figura en la referencia actual; verifícalo contra el código fuente de la 1.0.0 antes de usarla.
+
+### Argumentos de línea de comandos
+
+RustFS también acepta flags de CLI (`--address`, `--console-address`, `--console-enable`, `--access-key`, `--secret-key`, `--server-domains`), pero las variables de entorno son la elección correcta para Docker — consulta `rustfs --help` en tu versión para el conjunto exacto.
+
+### Configuración de TLS
+
+Para TLS nativo sin proxy inverso, monta un directorio con dos archivos: **`rustfs_cert.pem`** y **`rustfs_key.pem`**. (Los nombres de certificado de mi guía antigua, `public.crt`/`private.key`, son incorrectos.)
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    volumes:
+      - ./data:/data
+      - ./certs:/certs
+    environment:
+      - RUSTFS_TLS_PATH=/certs
+      - RUSTFS_TLS_RELOAD_ENABLE=true # swap certs without a restart
+```
+
+<Notice type="warning" title="Healthchecks y TLS nativo">
+Los healthchecks de esta guía usan `curl http://localhost:9000/health` a pelo. Una vez activado el TLS nativo, esas sondas hablan HTTP a un puerto HTTPS y el contenedor pasa a unhealthy. Corrige el healthcheck para que coincida (`curl -kf`), o mantén la terminación TLS en el proxy inverso — que sigue siendo mi recomendación por defecto tanto para despliegues con Dokploy como con Compose.
+</Notice>
+
+### Cifrado y KMS
+
+GA en la 1.0.0: SSE-S3 (AES256), SSE-C (claves suministradas por el cliente) y SSE-KMS con backends `local`, `vault`/`vault-kv2` o `vault-transit` (AWS KMS también soportado). El README marca Local/Static KMS como solo para desarrollo — para producción, apúntalo a Vault. Detalles en la [documentación oficial de cifrado](https://docs.rustfs.com/en/security-compliance/encryption). Dos notas de operador: SSE-C significa que el cliente posee la clave — piérdela y el objeto desaparece —; y el cifrado en la capa de RustFS no sustituye a las copias de seguridad.
+
+### Notificaciones de eventos y la trampa de la política de salida
+
+Destinos de eventos en la GA: webhook, Kafka, MQTT, MySQL, Postgres, NATS, Redis, AMQP, Pulsar. Actívalos con `RUSTFS_NOTIFY_ENABLE=true`; el registro de auditoría es aparte (`RUSTFS_AUDIT_ENABLE=true`).
+
+<Notice type="warning" title="Las notificaciones a destinos en LAN/Compose están bloqueadas por defecto">
+Desde la 1.0.0-beta.11, una política de salida SSRF bloquea las llamadas de webhook, webhook de auditoría y descubrimiento OIDC a direcciones privadas y de redes de contenedores. El fallo es silencioso a nivel de S3: las subidas tienen éxito, pero ningún POST llega nunca. La línea de log que hay que buscar es `... is not allowed: private address`.
+
+Solución: incluye el destino exacto en la lista de permitidos — `RUSTFS_OUTBOUND_ALLOW_ORIGINS=http://gotify:8080,http://nats:4222` (`scheme://host:port` exacto, se lee una vez al arrancar, así que reinicia tras cambiarla). La replicación de buckets a direcciones privadas está permitida por defecto; los destinos de loopback necesitan `RUSTFS_REPLICATION_ALLOW_LOOPBACK_TARGET=true`.
+</Notice>
+
+Esta es la trampa número uno para autoalojadores que conectan eventos de RustFS a un stack de notificaciones autoalojado, así que revisa los logs antes de asumir que tu receptor de webhooks está roto.
+
+## Mantenimiento: actualizaciones, copias de seguridad y monitorización
+
+### Actualizar RustFS
+
+Disciplina de fijado: usa `rustfs/rustfs:1.0.0` (o versiones etiquetadas más recientes), no `:latest`, para que una actualización sea una decisión y no una sorpresa.
+
+```sh
+# Compose path
+docker compose pull
+docker compose up -d
+docker image prune -f
+```
+
+En Dokploy, cambia la etiqueta de la imagen en el compose y redespliega — nuestra guía para [actualizar stacks de Docker Compose en Dokploy](https://www.bitdoze.com/es/actualizar-docker-compose-dokploy/) cubre el flujo. Para clústeres distribuidos, sigue el [procedimiento oficial de actualización](https://docs.rustfs.com/en/operations/upgrade): nodo a nodo, verificando la salud del clúster entre nodos.
+
+<Notice type="info" title="Fijación de versiones">
+Fija una etiqueta específica:
+
+```yaml
+image: rustfs/rustfs:1.0.0
+```
+
+Consulta la [página de releases de RustFS](https://github.com/rustfs/rustfs/releases) antes de subir — la 1.0.0 salió el 2026-09-16 y las builds preview se mueven rápido.
+</Notice>
+
+### Copias de seguridad y copias externas
+
+**Bind mounts (Opción 2).** Para el contenedor para una copia consistente y empaqueta con tar:
+
+```sh
+docker compose stop rustfs
+tar -czvf rustfs-backup-$(date +%Y%m%d).tar.gz ./data
+docker compose start rustfs
+```
+
+**Volúmenes con nombre (Opción 1 / Dokploy).** El enfoque de `tar ./data` de arriba no se aplica — tus datos viven en un volumen de Docker. Usa un contenedor auxiliar en su lugar:
+
+```sh
+docker run --rm -v rustfs-data:/data -v $PWD:/backup alpine \
+  tar -czf /backup/rustfs-data-$(date +%F).tar.gz -C /data .
+```
+
+**Automatízalo** con cron (ajusta las rutas):
+
+```sh
+# crontab -e
+0 2 * * * docker run --rm -v rustfs-data:/data -v /backups:/backup alpine tar -czf /backup/rustfs-data-$(date +\%F).tar.gz -C /data .
+```
+
+**Sal fuera del sitio.** Un tarball en el mismo disco no es una copia de seguridad. Envía copias con restic o rclone — consulta [copias de seguridad autoalojadas con Restic y Rclone](https://www.bitdoze.com/es/pluton-backup-autoalojado/) para el montaje, o [copias de seguridad externas de Dokploy en Cloudflare R2](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/) si estás en Dokploy. Para buscar destino, nuestra comparativa del [almacenamiento en la nube más barato para copias de seguridad](https://www.bitdoze.com/es/bunny-storage-vs-s3-vs-backblaze/) cubre Bunny vs S3 vs Backblaze; una [Bunny Storage Zone](https://go.bitdoze.com/bunny) o un bucket B2 funcionan bien como destinos de restic/rclone. Como la replicación ya es GA, una segunda instancia de RustFS como destino de replicación es la vía nativa de alta disponibilidad si prefieres quedarte en un solo ecosistema.
+
+Verifícala: una copia de seguridad que no has restaurado es una esperanza, no una copia. Levanta un contenedor RustFS de prueba, restaura el tarball en un volumen nuevo y lee un objeto.
+
+### Monitorización y logs
+
+El repo de RustFS incluye un perfil de observabilidad con Grafana (3000), Prometheus (9090) y Jaeger (16686):
+
+```sh
+git clone https://github.com/rustfs/rustfs.git
+cd rustfs
+docker compose --profile observability up -d
+```
+
+Más allá de los dashboards: RustFS exporta un pipeline OTLP/HTTP (trazas, métricas, logs) con un conjunto de controles `RUSTFS_OBS_*` por si prefieres alimentar tu propio stack. Por la vía simple, los logs van a stdout por defecto (`docker logs -f rustfs`), o a `RUSTFS_OBS_LOG_DIRECTORY` cuando está definido, con rotación por defecto de archivos por hora, 30 conservados, 2 GiB en total, comprimidos con zstd. Para alertas a nivel de host sobre salud de disco y contenedores, consulta nuestra guía para [monitorizar tu servidor con Beszel y Uptime Kuma](https://www.bitdoze.com/es/beszel-uptime-kuma/).
+
+## Buenas prácticas de seguridad en RustFS
+
+<ListCheck>
+- **Nunca uses `rustfsadmin` en ninguna credencial** — recomendación oficial, y el entrypoint lo advierte
+- **Dale formato correcto a tu access key**: sin `/` (análisis del scope SigV4); quédate con A–Z y 0–9; el base64 en crudo vale para la secret key, no para la access key
+- **Carga credenciales desde archivos** con `RUSTFS_ACCESS_KEY_FILE` / `RUSTFS_SECRET_KEY_FILE` en lugar de variables de entorno — nunca definas a la vez la variable directa y la variante `_FILE` para la misma clave (error duro)
+- **TLS en todas partes**: proxy inverso con certificados automáticos, o TLS nativo con `RUSTFS_TLS_PATH`
+- **Corta fuego en 9000/9001** — y recuerda que Docker publica puertos a través de iptables, así que mira [cómo Docker se salta las reglas de firewall de UFW](https://www.bitdoze.com/docker-bypasses-firewall/) antes de fiarte solo de una regla UFW
+- **Restringe o desactiva la consola**: `RUSTFS_CONSOLE_ENABLE=false` si no la necesitas, o mantén el 9001 fuera de internet pública
+- **Endurece CORS**: quita los `*` por defecto; lista orígenes explícitos solo donde una app de navegador los necesite
+- **Los clústeres multinodo necesitan `RUSTFS_RPC_SECRET`** — los servidores rechazan la auth RPC derivada de valores por defecto
+- **Copias de seguridad más restauraciones probadas, y actualizaciones regulares** — el 20 % aburrido que sostiene el 80 % de la seguridad real
+</ListCheck>
+
+El patrón de secrets en archivos, que además mantiene las credenciales fuera de la salida de `docker inspect`:
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    environment:
+      - RUSTFS_ACCESS_KEY_FILE=/run/secrets/rustfs_access_key
+      - RUSTFS_SECRET_KEY_FILE=/run/secrets/rustfs_secret_key
+    secrets:
+      - rustfs_access_key
+      - rustfs_secret_key
+
+secrets:
+  rustfs_access_key:
+    file: ./secrets/access_key.txt
+  rustfs_secret_key:
+    file: ./secrets/secret_key.txt
+```
+
+Reglas: la primera línea del archivo es el valor, archivos vacíos o ilegibles son un error duro de arranque, y definir a la vez `RUSTFS_ACCESS_KEY` y `RUSTFS_ACCESS_KEY_FILE` también es un error duro — elige uno. Más patrones en nuestra [guía de secrets de Docker Compose](https://www.bitdoze.com/docker-compose-secrets/).
+
+## Escalado horizontal: multidisco y multinodo
+
+<Notice type="warning" title="Los despliegues de un solo volumen no pueden expandirse in situ">
+Los despliegues de un solo nodo y un solo disco no pueden crecer in situ ni añadirse a un pool más adelante. La vía de actualización es un despliegue nuevo más una migración de datos por S3. Decide la topología ahora, mientras aún es gratis.
+</Notice>
+
+![Decisión de topología de almacenamiento de RustFS: un solo nodo y un solo disco vs multidisco vs despliegue distribuido multinodo](@assets/images/25/12/rustfs-topology.svg)
+
+**Multidisco, un solo nodo.** Apunta `RUSTFS_VOLUMES` a un conjunto de rutas expandido con elipsis, como en el `docker-compose-simple.yml` oficial:
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    volumes:
+      - rustfs-data:/data
+    environment:
+      - RUSTFS_VOLUMES=/data/rustfs{0...3}
+```
+
+Esto te da erasure coding en cuatro rutas de disco en un mismo servidor. Las comprobaciones de topología de disco son estrictas por defecto — las rutas deben existir y la geometría tiene que coincidir en todo el conjunto. Si vas a añadir discos físicos o virtuales para esto, nuestra guía para [añadir un segundo disco con LVM](https://www.bitdoze.com/add-new-drive-lvm/) cubre el trabajo de preparación.
+
+**Multinodo.** La red bridge de Docker no puede abarcar hosts, así que el patrón oficial usa red host por nodo:
+
+```sh
+# /etc/hosts on every node:
+# 192.168.1.11 node1
+# 192.168.1.12 node2
+# 192.168.1.13 node3
+# 192.168.1.14 node4
+
+docker run -d --name rustfs --network host \
+  -v /mnt/rustfs/data:/data \
+  -e RUSTFS_ACCESS_KEY=<shared access key> \
+  -e RUSTFS_SECRET_KEY=<shared secret key> \
+  -e RUSTFS_RPC_SECRET=<shared rpc secret> \
+  -e RUSTFS_VOLUMES="http://node{1...4}:9000/data/rustfs{0...3}" \
+  rustfs/rustfs:1.0.0
+```
+
+Restricciones clave: RPC viaja por el puerto 9000 (sin puerto de clúster separado), así que cada nodo debe alcanzar a todos los demás en el 9000; todos los nodos usan las mismas credenciales; y `RUSTFS_RPC_SECRET` es obligatorio aquí. Esto es un aperitivo, no un recorrido completo — la [documentación de alta disponibilidad](https://docs.rustfs.com/en/operations/high-availability) cubre la replicación de sitios, la curación de nodos y la retirada de pools, y la [documentación de escalado](https://docs.rustfs.com/en/operations/scaling) cubre la expansión de pools.
+
+Chequeo de realidad de costes: un clúster con erasure coding de 4 nodos y 4 discos por nodo significa al menos cuatro servidores. Para la mayoría de operadores en solitario es excesivo; un nodo con copias de seguridad externas probadas es una elección de producción legítima.
+
+## Migración de MinIO a RustFS
+
+Dos rutas, y la correcta depende de dónde vivan tus datos.
+
+<Tabs>
+<Tab name="Reemplazo binario (in situ)">
+
+Desde `1.0.0-alpha.89` (marzo de 2026), RustFS lee el formato en disco de MinIO directamente. Apunta RustFS al directorio de datos de MinIO existente, mantén los mismos puertos y credenciales, y tus buckets, objetos e IAM aparecen tal cual:
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.0
+    volumes:
+      # The existing MinIO data directory, untouched
+      - /srv/minio/data:/data
+    environment:
+      - RUSTFS_VOLUMES=/data
+      - RUSTFS_ACCESS_KEY=<same as MinIO>
+      - RUSTFS_SECRET_KEY=<same as MinIO>
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+```
+
+**Advertencias antes de hacerlo:**
+- Los objetos que MinIO **cifró con SSE** no son legibles por las builds por defecto
+- La compatibilidad con el disco de MinIO está marcada como **Preview** (`rio-v2`)
+- Haz una copia de seguridad primero, y mantén el directorio de datos de MinIO intacto hasta haber verificado — el rollback es volver a apuntar MinIO a él
+
+</Tab>
+<Tab name="mc mirror (copia)">
+
+La ruta segura y aburrida: copia los datos por S3 a un RustFS nuevo.
+
+```sh
+# Export from MinIO
+mc mirror minio/my-bucket ./backup/
+
+# Import to RustFS
+mc mirror ./backup/ rustfs/my-bucket/
+```
+
+1. Despliega RustFS con la misma estructura de buckets
+2. Pasa los datos con `mc mirror`
+3. Apunta tus aplicaciones al nuevo endpoint S3
+
+Elige esta ruta para migraciones entre hosts, o siempre que haya dudas de cifrado o compatibilidad de formato en juego.
+
+</Tab>
+</Tabs>
+
+Tras cualquiera de las dos rutas: `mc ls` en ambos lados y compara los recuentos de objetos, descarga un objeto grande de extremo a extremo y verifica su checksum, y confirma que buckets y usuarios se ven bien en la consola. Si te encuentras objetos cifrados ilegibles, la ruta es descifrarlos en MinIO primero y luego hacer el mirror.
+
+## Conclusión: una alternativa a MinIO lista para producción
+
+RustFS pasó de una alfa prometedora a la 1.0 GA en catorce meses, y el momento no pudo ser mejor: MinIO archivó su repositorio justo cuando RustFS maduraba. Para los autoalojadores, ahora es el valor por defecto obvio — licencia Apache 2.0, compatibilidad S3 con consola integrada, modo distribuido y cifrado GA, y operaciones en un solo contenedor que se mantienen aburridas.
+
+### Puntos clave
+
+<ListCheck>
+- **Licencia**: Apache 2.0 — sin restricciones AGPL
+- **Compatibilidad**: compatible con S3 con `mc`, AWS CLI, `rc` y cualquier cosa que hable S3
+- **Funciones GA**: modo distribuido, erasure coding, SSE/KMS, replicación, tiering de ciclo de vida
+- **Operaciones sencillas**: un contenedor, dos puertos, endpoints de salud, imagen de ~110 MB
+- **Ecosistema en crecimiento**: CLI `rc`, chart de Helm, operador de Kubernetes, servidor MCP
+</ListCheck>
+
+### Próximos pasos
+
+<ListCheck>
+- Explora la [documentación de RustFS](https://docs.rustfs.com/) para configuración avanzada
+- Configura copias de seguridad automatizadas con una copia externa, y prueba una restauración
+- Conecta `/health/ready` a tu monitorización
+- Únete a la comunidad de [GitHub Discussions](https://github.com/rustfs/rustfs/discussions)
+</ListCheck>
+
+## Preguntas frecuentes
+
+<Accordion label="¿Está RustFS listo para producción?" group="faq" expanded="true">
+Sí, desde la 1.0.0 GA del 16 de septiembre de 2026, el proveedor considera el motor principal de almacenamiento de objetos listo para producción, y el modo distribuido, el erasure coding y el cifrado son todos funciones GA. La advertencia honesta: RustFS tiene menos años de campo que MinIO o SeaweedFS. Ejecútalo con versiones fijadas, copias de seguridad reales y restauraciones probadas, y es un hogar razonable para datos de producción.
+</Accordion>
+
+<Accordion label="¿Puedo migrar de MinIO a RustFS?" group="faq">
+Sí, de dos formas. Reemplazo binario directo (desde marzo de 2026): apunta RustFS a tu directorio de datos de MinIO existente y lee buckets, objetos e IAM in situ — con la advertencia de que los objetos cifrados con MinIO-SSE no son legibles en las builds por defecto y la compatibilidad en disco es Preview. O usa `mc mirror` para copiar los datos por S3 a un despliegue nuevo. Ambas están cubiertas en la sección de migración de arriba.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre los puertos 9000 y 9001?" group="faq">
+El puerto 9000 es la API S3 — las aplicaciones se conectan aquí, y los endpoints de salud viven en `/health` y `/health/ready`. El puerto 9001 es la consola web, servida bajo `/rustfs/console/`. En despliegues multinodo, el puerto 9000 también transporta el tráfico RPC interno entre nodos, así que cada nodo debe alcanzar a todos los demás en el 9000. Las aplicaciones solo necesitan el 9000; la consola puede quedarse interna.
+</Accordion>
+
+<Accordion label="¿Por qué tengo que hacer chown del directorio de datos al UID 10001?" group="faq">
+RustFS corre como usuario no root dentro del contenedor (UID 10001) por seguridad. Los directorios del host montados por bind mount deben pertenecer a ese UID para que el proceso pueda escribir datos. Los volúmenes con nombre evitan el problema por completo, ya que Docker gestiona los permisos. Si ves «permission denied» en los logs justo tras el arranque con bind mounts, este es el motivo.
+</Accordion>
+
+<Accordion label="¿Cómo se compara RustFS con SeaweedFS?" group="faq">
+RustFS se centra en la experiencia MinIO — consola familiar, compatibilidad S3, buen rendimiento con objetos pequeños. SeaweedFS es más viejo y está centrado en escala con miles de millones de archivos pequeños. Desde que RustFS llegó a GA en septiembre de 2026 la brecha de madurez se ha estrechado, pero SeaweedFS sigue ganando en años de rodaje en producción. Elige RustFS para la vía de reemplazo directo de MinIO; SeaweedFS para escala masiva probada.
+</Accordion>
+
+<Accordion label="¿Soporta RustFS modo distribuido o de clúster?" group="faq">
+Sí — el modo distribuido y el erasure coding son GA desde la 1.0.0. Multidisco en un solo nodo usa `RUSTFS_VOLUMES=/data/rustfs{0...3}`; multinodo usa `RUSTFS_VOLUMES="http://node{1...4}:9000/data/rustfs{0...3}"` con red host y un `RUSTFS_RPC_SECRET` compartido. Recuerda que RPC comparte el puerto 9000 y que los despliegues de un solo disco no pueden expandirse in situ.
+</Accordion>
+
+<Accordion label="¿Puedo usar RustFS con Kubernetes?" group="faq">
+Sí. El chart de Helm vive en el repositorio dedicado [rustfs/helm](https://github.com/rustfs/helm) y está listado en ArtifactHub, y hay un [operador de Kubernetes](https://github.com/rustfs/operator) aparte. También hay un repo de consola independiente. Verifica las coordenadas del chart en ArtifactHub antes de scriptar instalaciones, ya que este ecosistema se movió rápido durante 2026.
+</Accordion>
+
+<Accordion label="¿Cómo activo TLS/HTTPS?" group="faq">
+Dos opciones: terminar TLS en un proxy inverso (Nginx, Traefik, Caddy — mi opción por defecto, y automática con los dominios de Dokploy), o usar TLS nativo montando `rustfs_cert.pem` y `rustfs_key.pem` en el directorio definido con `RUSTFS_TLS_PATH`. El TLS nativo soporta recarga en caliente con `RUSTFS_TLS_RELOAD_ENABLE=true`. Si vas a lo nativo, corrige tu healthcheck — las sondas HTTP a pelo fallan contra un puerto TLS.
+</Accordion>
+
+<Accordion label="¿Puedo mantener las credenciales rustfsadmin por defecto?" group="faq">
+No. La guía oficial de credenciales dice que no uses `rustfsadmin` ni para la access key ni para la secret key, y el contenedor avisa al arrancar. Genera una access key alfanumérica en mayúsculas (sin barras — SigV4 se rompe) y un secret largo y aleatorio. Para clústeres hace falta un `RUSTFS_RPC_SECRET` compartido porque los servidores rechazan la auth RPC derivada de valores por defecto. Prefiere `RUSTFS_ACCESS_KEY_FILE`/`RUSTFS_SECRET_KEY_FILE` con secrets de Docker o Kubernetes.
+</Accordion>

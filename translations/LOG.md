@@ -153,3 +153,53 @@ Tracks EN→ES article translation progress. Regenerate the link/title lookup wi
 
 - ES posts are inconsistent on accents (older ones ASCII-only) — new translations use proper Spanish.
 - Some ES posts lack `canonical` — fine (falls back to `es/<file-slug>`), but new files should set it.
+| 2026-10-24 | best-tech-gadgets-2027 | mejores-gadgets-2027 | 13-product gadget roundup; 2 ES links (docks, headscale); fixed EN/ES 8→13 count drift (subagent) |
+| 2026-10-24 | best-10-inch-mini-rack | mejor-mini-rack-10-pulgadas | 10" mini rack guide; 3 ES links (switches, proxmox, sai); 16 /go/ slugs verified (subagent) |
+| 2026-10-24 | dokploy-update-docker-compose | actualizar-docker-compose-dokploy | Dokploy compose update guide; 3 ES links; 11 code blocks verbatim; TODO image comments preserved (subagent) |
+| 2026-10-24 | best-home-assistant-hardware | mejor-hardware-home-assistant | HA hardware guide; 3 ES links (docker, proxmox, sai); 1 kept EN (plex-jellyfin pending) (subagent) |
+| 2026-10-24 | best-mac-mini-for-openclaw | mejor-mac-mini-openclaw | Mac mini for OpenClaw guide; 13 ES links; code verbatim; kept mini-pc-home-server EN (subagent) |
+| 2026-10-24 | best-mini-pc-plex-jellyfin | mejor-mini-pc-plex-jellyfin | Plex/Jellyfin mini PC guide; 7 ES links incl. disk-found HA sibling; 2 yaml blocks verbatim (subagent) |
+| 2026-10-24 | best-rack-mount-ups-homelab | mejor-ups-rack-homelab | Rack UPS guide; 3 ES links incl. disk-found mini-rack sibling; SAI terminology (subagent) |
+| 2026-10-24 | best-open-source-grok-bot-alternatives | mejores-alternativas-grok-bot-open-source | Grok bot alternatives; 17 ES links, 1 EN kept; 8 anchors re-slugged; 7 code blocks verbatim (subagent) |
+| 2026-10-24 | cloudreve-docker-setup | instalar-cloudreve-docker | Cloudreve 4.19 Docker guide; 8 ES links, 8 EN kept; 24 code blocks verbatim; subagent build passed 1554 pages (subagent) |
+| 2026-10-24 | tern-terminal | terminal-tern | Tern terminal review; 11 ES links; 18 webp refs verified; UI labels kept EN (subagent) |
+| 2026-10-24 | best-woocommerce-barcode-and-qr-code-plugins | mejores-plugins-woocommerce-codigos-barras-qr | WooCommerce barcode plugins; 1 ES link (dashboard-admin); no /go/ links (subagent) |
+| 2026-10-24 | breakdance-builder-review | resena-breakdance-builder | Breakdance review; imports fixed to @components; go.bitdoze.com link kept (subagent) |
+| 2026-10-24 | use-claude-sonnet-4-5-gpt-5-free | usar-claude-sonnet-4-5-gpt-5-gratis | Free Claude/GPT-5 access guide; 9 ES links, 2 EN kept; 9 code blocks verbatim; tags 6→3 (subagent) |
+| 2026-10-24 | breakdance-kinsta-static-site | breakdance-kinsta-sitio-estatico | Breakdance+Kinsta static site; no internal links; git block verbatim (subagent) |
+| 2026-10-24 | choose-domain-name | elegir-nombre-dominio | Domain name guide; 9 external links only; YouTubeEmbed label translated (subagent) |
+| 2026-10-24 | cloudpanel-varnish-cache | varnish-cache-cloudpanel | CloudPanel Varnish guide; 1 ES link (vps prices); code verbatim (subagent) |
+| 2026-10-24 | create-a-sticky-block-in-gutenberg | crear-bloque-fijo-gutenberg | Gutenberg sticky block; no internal links; external only (subagent) |
+| 2026-10-24 | deindexed-in-bing-and-duckduckgo-now-what | desindexado-bing-duckduckgo-que-hacer | Deindexing recovery guide; external links only; support template translated (subagent) |
+| 2026-10-24 | digitalocean-vs-vultr-vs-hetzner | digitalocean-vs-vultr-vs-hetzner | VPS comparison; 1 ES link (vps prices); prices localized; benchmarks verbatim (subagent) |
+| 2026-10-24 | export-wordpress-post-urls-titles | exportar-urls-titulos-wordpress | WP export URLs guide; SQL/WP-CLI verbatim; phpMyAdmin ES labels (subagent) |
+| 2026-10-24 | how-to-setup-smtp-relay-email-on-zeptomail | configurar-relay-smtp-zeptomail | ZeptoMail SMTP relay; external links only; code verbatim (subagent) |
+| 2026-10-24 | hetzner-oracle-arm-performance | rendimiento-arm-hetzner-oracle | ARM VPS benchmark; 1 ES link; prices localized; sibling backlink TODO noted (subagent) |
+| 2026-10-24 | install-uptime-kuma | instalar-uptime-kuma | Uptime Kuma install; 1 ES link; bash/yaml/nginx verbatim; distinct from desplegar-uptime-kuma (subagent) |
+| 2026-10-24 | install-wordpress-on-ubuntu-arm | instalar-wordpress-ubuntu-arm | WP on ARM Ubuntu; 2 ES links (vps prices, disk-found varnish); secure-cloudpanel kept EN (subagent) |
+| 2026-10-24 | safely-update-cloudpanel | actualizar-cloudpanel-seguro | CloudPanel update guide; 1 ES link; bash verbatim; UI labels EN (subagent) |
+| 2026-10-24 | secure-cloudpanel | securizar-cloudpanel | CloudPanel security; 2 ES links (vps prices, disk-found update guide); code verbatim (subagent) |
+| 2026-10-24 | secure-wordpress-2fa | securizar-wordpress-2fa | WP 2FA guide; zoho-smtp link kept EN (file lands later); plugin UI labels EN (subagent) |
+| 2026-10-24 | send-emails-in-wordpress-zoho-smtp-fluentsmtp | enviar-emails-wordpress-zoho-smtp-fluentsmtp | Zoho SMTP+FluentSMTP; 1 ES link; FluentSMTP UI labels EN (subagent) |
+| 2026-10-24 | speed-up-wordpress-with-cloudflare-varnish-and-redis | acelerar-wordpress-cloudflare-varnish-redis | WP speed stack; 2 ES links (vps prices, disk-found varnish); prices localized (subagent) |
+| 2026-10-24 | upload-vcard-vcf-files-to-wordpress | subir-vcard-vcf-wordpress | vCard upload to WP; no internal links; PHP/HTML verbatim; WP UI in es-ES (subagent) |
+| 2026-10-24 | surecart-review | resena-surecart | SureCart review; no internal links; numbers localized; e-comm terms kept EN (subagent) |
+| 2026-10-24 | ai-docker-deploy-skill | skill-despliegue-docker-ia | AI Docker deploy skill; 9 ES links, 5 EN kept; 13 code blocks verbatim (subagent) |
+| 2026-10-24 | create-your-own-ai-agent | crear-tu-propio-agente-ia | Discord AI agent with Agno; 2 ES links, 2 EN kept; code blocks verbatim (subagent) |
+| 2026-10-24 | carrd-dark-mode-toggle | alternador-modo-oscuro-carrd | Carrd dark mode deep-dive (949 lines); 1 ES link; inline SVG text translated; 11 code blocks verbatim (subagent) |
+| 2026-10-24 | carrd-popup-modal | ventana-modal-emergente-carrd | Carrd popup modal (913 lines); 3 ES links incl. disk-found dark-mode; 7 code blocks verbatim (subagent) |
+| 2026-10-24 | carrd-testimonial-slider | slider-testimonios-carrd | Carrd testimonial slider (1050 lines); 3 ES links; 3 anchors re-slugged; 12 code blocks verbatim (subagent) |
+| 2026-10-24 | nextdns-review | resena-nextdns | NextDNS review (460 lines); 6 ES links, 3 EN kept; 6 code blocks verbatim (subagent) |
+| 2026-10-24 | carrd-whatsapp-button | boton-whatsapp-carrd | Carrd WhatsApp button (843 lines); 5 ES links incl. disk-found modal/dark-mode; 15 code blocks verbatim (subagent) |
+| 2026-10-24 | block-ads-malware-dns-protection | bloquear-anuncios-malware-dns | DNS ad-block guide (596 lines); 7 ES links, 6 EN kept; 11 code blocks verbatim (subagent) |
+| 2026-10-24 | tugtainer-docker-autoupdate | tugtainer-autoactualizacion-docker | Tugtainer Watchtower fork (694 lines); 6 ES links; 11 code blocks verbatim; tags 4→3 (subagent) |
+| 2026-10-24 | python-video-intro-editor | editor-intros-video-python | MoviePy intro editor (875 lines); 3 ES links, 7 EN kept; 25 code blocks verbatim (subagent) |
+| 2026-10-24 | termix-self-host | termix-autoalojado | Termix SSH manager (595 lines); 6 ES links, 7 EN kept; 8 code blocks verbatim (subagent) |
+| 2026-10-24 | beszel-uptime-kuma | beszel-uptime-kuma | Beszel+Uptime Kuma monitoring (755 lines); 5 ES links incl. disk-found instalar-uptime-kuma; 14 code blocks verbatim (subagent) |
+| 2026-10-24 | mcp-introduction-beginners | introduccion-mcp-principiantes | MCP intro (512 lines); 12 ES links, 10 EN kept; 10 code blocks verbatim (subagent) |
+| 2026-10-24 | carrd-smooth-scroll | desplazamiento-suave-carrd | Carrd smooth scroll (595 lines); 4 ES links incl. disk-found modal/dark-mode; 1 anchor re-slugged; 5 code blocks verbatim (subagent) |
+| 2026-10-24 | rustfs-self-host | rustfs-autoalojado | RustFS S3 storage (1002 lines); 7 ES links incl. disk-found DO/beszel; 2 anchors re-slugged; 40 code blocks verbatim (subagent) |
+| 2026-10-24 | cognee-self-host | cognee-autoalojado | Cognee memory engine (1392 lines); 7 ES links incl. disk-found beszel; 62 code blocks verbatim; 1 anchor re-slugged (subagent) |
+| 2026-10-24 | convex-self-hosted-benchmark | benchmark-convex-autoalojado | Convex self-hosted benchmark; 8 ES links incl. 2 disk-found; 6 code blocks verbatim (subagent) |
+| 2026-10-24 | dokploy-backups-cloudflare-r2 | backups-dokploy-cloudflare-r2 | Dokploy R2 backups (1102 lines); 11 ES links incl. disk-found rustfs/beszel; 42 code blocks verbatim (subagent) |
+| 2026-10-24 | ai-programming-beginners-guide | guia-programacion-ia-principiantes | AI programming guide (1720 lines); 17 ES links incl. disk-found siblings; 42 code blocks verbatim (subagent) |

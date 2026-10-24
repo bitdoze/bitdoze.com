@@ -1,0 +1,1392 @@
+---
+date: 2025-11-27
+lastmod: 2026-09-15T00:00:00Z
+translationKey: "cognee-self-host"
+title: "Cómo autoalojar Cognee con Dokploy o Docker Compose"
+meta_title: "Autoaloja Cognee: guía de configuración con Dokploy y Docker Compose"
+description: "Aprende a autoalojar Cognee con Dokploy o Docker Compose. Configuración lista para producción con PostgreSQL, pgvector y un servidor MCP para la memoria de asistentes de IA."
+image: "@assets/images/25/11/cognee-self-host.webp"
+imageAlt: "Stack de Cognee autoalojado con la API, el servidor MCP y PostgreSQL con pgvector ejecutándose en Docker"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["self-hosted", "docker", "mcp"]
+canonical: "https://www.bitdoze.com/es/cognee-autoalojado/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Si estás construyendo aplicaciones de IA que necesitan memoria persistente y grafos de conocimiento, [Cognee](https://github.com/topoteretes/cognee) es una plataforma open source que merece la pena conocer. Convierte tus datos en grafos de conocimiento estructurados con búsqueda semántica, y funciona bien para aplicaciones RAG, chatbots y asistentes de IA. Autoalojarlo significa que los datos son tuyos y los costes se mantienen predecibles.
+
+En esta guía te enseño a autoalojar Cognee en tu propia infraestructura usando Dokploy o Docker Compose. Montaremos un despliegue listo para producción con PostgreSQL y pgvector tanto para los metadatos como para el almacenamiento vectorial, usando OpenAI para el modelo de embeddings, además del servidor MCP para la integración con asistentes de IA.
+
+## ¿Qué es Cognee?
+
+[Cognee](https://github.com/topoteretes/cognee) es una plataforma de memoria para IA que organiza tus datos en grafos de conocimiento. Donde las bases de datos vectoriales se quedan en la búsqueda por similitud, Cognee mapea las relaciones entre tus puntos de datos para que las aplicaciones de IA puedan recuperar información conectada y razonar sobre ella.
+
+### Características principales de Cognee
+
+<ListCheck>
+- **Construcción de grafos de conocimiento**: extrae automáticamente entidades y relaciones de tus documentos
+- **Embeddings vectoriales**: búsqueda semántica con proveedores de embeddings configurables (OpenAI, Gemini, Ollama, etc.)
+- **Soporte multi-proveedor de LLM**: funciona con OpenAI, Anthropic, Google Gemini, Ollama y más
+- **Integración MCP**: soporte del Model Context Protocol para asistentes de codificación con IA como Cursor, Claude y VS Code
+- **API REST**: API completa para ingesta, procesamiento y búsqueda de datos
+- **Almacenamiento flexible**: compatible con PostgreSQL, SQLite, Neo4j y varios almacenes vectoriales
+- **Inteligencia de código**: pipelines especiales para analizar y comprender bases de código
+- **Gestión de datasets**: organiza los datos en datasets separados con permisos
+- **Memoria de sesión**: mantiene el contexto conversacional entre interacciones
+</ListCheck>
+
+### ¿Por qué autoalojar Cognee?
+
+**Ventajas del autoalojamiento**:
+
+- Privacidad total de los datos: tus documentos y embeddings nunca salen de tu infraestructura
+- Sin límites de uso ni costes por usuario más allá de lo que cobre tu proveedor de LLM
+- Control total sobre la elección de modelo, embeddings y almacenamiento
+- Se integra con redes privadas, servicios internos y tu sistema de backups actual
+
+**Casos de uso**:
+
+- Crear asistentes de IA con memoria a largo plazo (si buscas una alternativa más ligera, también puedes [desplegar la memoria para agentes Hindsight en Docker](/es/desplegar-hindsight-docker/))
+- Aplicaciones RAG; para un ejemplo práctico, mira cómo [crear agentes de IA con memoria y RAG](https://www.bitdoze.com/agno-get-start/)
+- Herramientas de análisis de código y documentación
+- Gestión del conocimiento y búsqueda con IA sobre documentos internos
+
+## Prerrequisitos
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+- **Un VPS o servidor**: se recomienda un mínimo de 4 GB de RAM y 2 núcleos de CPU
+- **Un nombre de dominio**: para acceder a tu API de Cognee (p. ej., `cognee.yourdomain.com`)
+- **Docker instalado**: Docker y Docker Compose (Dokploy ya lo incluye)
+- **Clave de API de OpenAI**: para los embeddings y las operaciones del LLM (o un proveedor alternativo)
+- **Conocimientos básicos de línea de comandos**: para ejecutar los comandos de despliegue
+</ListCheck>
+
+<Button text="Prueba Hetzner Cloud ahora" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+<Button text="Prueba el VPS de Hostinger" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="info" title="Recomendaciones de hosting">
+Para uso en producción recomiendo un VPS con al menos 4 GB de RAM. Usamos `pgvector/pgvector:pg17`, que es PostgreSQL con la extensión pgvector: esta única base de datos gestiona tanto los datos relacionales (metadatos, usuarios, datasets) COMO los embeddings vectoriales para la búsqueda semántica. Esto simplifica el despliegue considerablemente. Proveedores como Hetzner, [Vultr](https://go.bitdoze.com/vultr) o DigitalOcean funcionan bien.
+</Notice>
+
+## Entender la arquitectura de almacenamiento
+
+Antes de desplegar, ayuda ver cómo encajan las piezas:
+
+![Diagrama de despliegue de Cognee autoalojado con Dokploy, Docker Compose, PostgreSQL, pgvector y servidor MCP](@assets/images/25/11/cognee-self-host-architecture.svg)
+
+<Notice type="info" title="Tres capas de almacenamiento">
+Cognee usa tres capas de almacenamiento, y nuestro Docker Compose las cubre todas:
+
+1. **Base de datos relacional** (`DB_PROVIDER=postgres`): almacena metadatos, cuentas de usuario, datasets, información de documentos y el estado de los pipelines
+2. **Base de datos vectorial** (`VECTOR_DB_PROVIDER=pgvector`): almacena los embeddings para la búsqueda semántica por similitud usando la extensión pgvector
+3. **Base de datos de grafos** (`GRAPH_DATABASE_PROVIDER=kuzu`): almacena los datos del grafo de conocimiento (entidades y relaciones) en un directorio basado en archivos
+
+Usamos `pgvector/pgvector:pg17` — PostgreSQL 17 con la extensión pgvector — tanto para el almacenamiento relacional como para el vectorial. Si quieres trastear con esta base de datos fuera de Cognee, tengo una guía para [desplegar pgvector con Docker (y pgAdmin)](https://www.bitdoze.com/deploy-pgvector-pgadmin-docker/). El enfoque de un solo Postgres es deliberado: es la misma filosofía detrás de [lo que Postgres puede reemplazar en tu stack](/es/que-reemplaza-postgres/): menos piezas móviles significa menos cosas de las que hacer backup y que puedan romperse. Para la base de datos de grafos, **Kuzu guarda los datos dentro del sistema de archivos del contenedor**, así que necesitamos un volumen para persistirlos entre reinicios del contenedor.
+</Notice>
+
+## Opción 1: Desplegar con Dokploy
+
+Dokploy es una Plataforma como Servicio (PaaS) open source que simplifica el despliegue de aplicaciones Docker. Si aún no has configurado Dokploy, consulta nuestra [guía de instalación de Dokploy](https://www.bitdoze.com/dokploy-install/).
+
+### Paso 1: Instalar Dokploy
+
+Si aún no lo tienes instalado:
+
+```sh
+curl -sSL https://dokploy.com/install.sh | sh
+```
+
+Accede a Dokploy en `http://your-vps-ip:3000` y completa la configuración.
+
+### Paso 2: Crear un proyecto nuevo
+
+1. Inicia sesión en el panel de Dokploy
+2. Haz clic en **"Create Project"** y dale un nombre (p. ej., "Cognee")
+3. Dentro del proyecto, haz clic en **"Add Service"** → **"Compose"**
+4. Selecciona el tipo **"Docker Compose"** (no Stack)
+5. Nómbralo "cognee-stack"
+
+### Paso 3: Añadir la configuración de Docker Compose
+
+Ve a la pestaña **General** y pega la siguiente configuración de Docker Compose. Si te atascas con la parte de Dokploy, el tutorial sobre cómo [desplegar una app de Docker Compose en Dokploy](https://www.bitdoze.com/dokploy-docker-compose-app/) cubre el flujo de la interfaz en detalle.
+
+```yaml
+services:
+  cognee:
+    image: cognee/cognee:main
+    networks:
+      - dokploy-network
+      - cognee-network
+    volumes:
+      - cognee-data:/app/.cognee_system
+    environment:
+      - HOST=0.0.0.0
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      # Authentication (REQUIRED for public deployment)
+      - REQUIRE_AUTHENTICATION=true
+      # LLM Configuration
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      # Embedding Configuration (OpenAI)
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-1536}
+      - EMBEDDING_API_KEY=${LLM_API_KEY}
+      # Database Configuration (PostgreSQL for relational data)
+      - DB_PROVIDER=postgres
+      - DB_HOST=cognee-postgres
+      - DB_PORT=5432
+      - DB_NAME=cognee_db
+      - DB_USERNAME=cognee
+      - DB_PASSWORD=${DB_PASSWORD}
+      # Vector Database (pgvector - uses SAME PostgreSQL instance)
+      - VECTOR_DB_PROVIDER=pgvector
+      # Graph Database (default Kuzu - file-based)
+      - GRAPH_DATABASE_PROVIDER=${GRAPH_DATABASE_PROVIDER:-kuzu}
+    depends_on:
+      cognee-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4GB
+
+  cognee-mcp:
+    image: cognee/cognee-mcp:main
+    networks:
+      - dokploy-network
+      - cognee-network
+    environment:
+      - TRANSPORT_MODE=http
+      - API_URL=http://cognee:8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      cognee:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cognee-postgres:
+    image: pgvector/pgvector:pg17
+    networks:
+      - cognee-network
+    environment:
+      - POSTGRES_USER=cognee
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=cognee_db
+    volumes:
+      - cognee-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cognee -d cognee_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  cognee-network:
+    name: cognee-network
+  dokploy-network:
+    external: true
+
+volumes:
+  cognee-data:
+  cognee-postgres-data:
+```
+
+<Notice type="info" title="Explicación de los volúmenes">
+- `cognee-data:/app/.cognee_system` - Persiste la base de datos de grafos Kuzu y los archivos del sistema
+- `cognee-postgres-data:/var/lib/postgresql/data` - Persiste los datos de PostgreSQL (relacionales + vectoriales)
+
+Los volúmenes con nombre conservan los datos entre despliegues de Dokploy.
+</Notice>
+
+<Notice type="warning" title="La interfaz web no está disponible en Docker">
+La imagen Docker del frontend de Cognee (`cognee-frontend`) es experimental y actualmente no está bien soportada. **Para la interfaz de Cognee**, necesitas ejecutar `cognee-cli -ui` en local con una instalación de Python, que lanza tanto el frontend como el backend. Para despliegues en Docker, usa la interfaz Swagger en `https://cognee.yourdomain.com/docs` para acceso completo a la API.
+</Notice>
+
+<Notice type="info" title="Configurar dominios en Dokploy">
+Esta configuración de Docker Compose no incluye etiquetas de Traefik ni puertos expuestos. En su lugar, configura los dominios desde la **pestaña Domains de Dokploy**:
+
+1. Después de desplegar, ve a la pestaña **Domains** de tu servicio compose
+2. Haz clic en **Add Domain** y configura:
+   - **Domain**: `cognee.yourdomain.com`
+   - **Container**: selecciona el servicio `cognee`
+   - **Port**: `8000`
+   - Activa **HTTPS** para SSL automático
+3. Repite para el servicio MCP:
+   - **Domain**: `mcp.yourdomain.com`
+   - **Container**: selecciona el servicio `cognee-mcp`
+   - **Port**: `8000`
+
+Este enfoque es más limpio que las etiquetas de Traefik en línea y permite gestionar los dominios desde la interfaz de Dokploy.
+</Notice>
+
+<Notice type="warning" title="Notas importantes">
+- La red `dokploy-network` es necesaria para el enrutado de Traefik
+- No configures `container_name`, ya que causa problemas con las funciones de Dokploy
+- La misma instancia de PostgreSQL (`cognee-postgres`) se usa TANTO para los datos relacionales COMO para el almacenamiento vectorial vía pgvector
+</Notice>
+
+### Paso 4: Configurar las variables de entorno
+
+Ve a la pestaña **Environment** y añade estas variables:
+
+```sh
+# OpenAI API Key (required for LLM and embeddings)
+LLM_API_KEY=sk-your-openai-api-key-here
+
+# Database Password (generate a strong password)
+DB_PASSWORD=your-secure-database-password-here
+
+# Optional: LLM Configuration
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+
+# Optional: Embedding Configuration
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=openai/text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+
+# Optional: Graph Database (kuzu is default, can use neo4j or falkordb)
+GRAPH_DATABASE_PROVIDER=kuzu
+```
+
+Genera una contraseña segura para la base de datos:
+```sh
+openssl rand -base64 32
+```
+
+### Paso 5: Configurar el DNS
+
+Antes de desplegar, configura tus registros DNS tipo A:
+
+1. `cognee.yourdomain.com` → La IP de tu VPS
+2. `mcp.yourdomain.com` → La IP de tu VPS
+
+### Paso 6: Desplegar y configurar los dominios
+
+1. Haz clic en **"Deploy"** y espera a que arranquen los servicios
+2. Vigila los logs en la pestaña **Deployments** o **Logs**
+3. Ve a la pestaña **Domains** y añade los dominios para cada servicio (ver notas anteriores)
+4. Espera unos 30 segundos a que Traefik genere los certificados SSL
+
+Una vez desplegado, verifica:
+
+```sh
+# Check API health (expect HTTP 200)
+curl https://cognee.yourdomain.com/health
+
+# Per-component status (database, vector store, etc.)
+curl https://cognee.yourdomain.com/health/detailed
+
+# Check MCP health
+curl https://mcp.yourdomain.com/health
+
+# Access API documentation
+open https://cognee.yourdomain.com/docs
+```
+
+Si `/health` devuelve 200, todo va bien. Si se queda colgado o devuelve 502, el contenedor aún está arrancando o se ha caído; revisa la pestaña **Logs** en Dokploy. Si `/health/detailed` marca algún componente como caído, normalmente significa que las credenciales o el host de la base de datos no coinciden, que es la primera entrada de la sección de solución de problemas.
+
+## Opción 2: Desplegar solo con Docker Compose
+
+Para un control más manual o para prescindir de Dokploy, así se despliega directamente con Docker Compose.
+
+### Paso 1: Preparar el servidor
+
+Actualiza el sistema e instala Docker:
+
+```sh
+# Update packages
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# Install Docker Compose plugin
+sudo apt install docker-compose-plugin -y
+```
+
+### Paso 2: Crear el directorio del proyecto
+
+```sh
+mkdir -p ~/cognee
+cd ~/cognee
+```
+
+### Paso 3: Crear el archivo Docker Compose
+
+```sh
+nano docker-compose.yml
+```
+
+Pega la siguiente configuración:
+
+```yaml
+services:
+  cognee:
+    image: cognee/cognee:main
+    container_name: cognee
+    networks:
+      - cognee-network
+    volumes:
+      - cognee-data:/app/.cognee_system
+    environment:
+      - HOST=0.0.0.0
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      # Authentication (REQUIRED for public deployment)
+      - REQUIRE_AUTHENTICATION=true
+      # LLM Configuration
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      # Embedding Configuration (OpenAI)
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-1536}
+      - EMBEDDING_API_KEY=${LLM_API_KEY}
+      # Database Configuration (PostgreSQL for relational data)
+      - DB_PROVIDER=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=cognee_db
+      - DB_USERNAME=cognee
+      - DB_PASSWORD=${DB_PASSWORD}
+      # Vector Database (pgvector - uses SAME PostgreSQL instance)
+      - VECTOR_DB_PROVIDER=pgvector
+      # Graph Database
+      - GRAPH_DATABASE_PROVIDER=${GRAPH_DATABASE_PROVIDER:-kuzu}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4GB
+
+  cognee-mcp:
+    image: cognee/cognee-mcp:main
+    container_name: cognee-mcp
+    networks:
+      - cognee-network
+    environment:
+      - TRANSPORT_MODE=http
+      - API_URL=http://cognee:8000
+      - LOG_LEVEL=INFO
+    ports:
+      - "8001:8000"
+    depends_on:
+      cognee:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: cognee-postgres
+    networks:
+      - cognee-network
+    environment:
+      - POSTGRES_USER=cognee
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=cognee_db
+    volumes:
+      - cognee-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cognee -d cognee_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  cognee-network:
+    name: cognee-network
+
+volumes:
+  cognee-postgres-data:
+  cognee-data:
+```
+
+<Notice type="info" title="Explicación de los volúmenes">
+- `cognee-data:/app/.cognee_system` - Persiste la base de datos de grafos Kuzu y los archivos del sistema de Cognee
+- `cognee-postgres-data:/var/lib/postgresql/data` - Persiste los datos de PostgreSQL (relacionales + vectoriales vía pgvector)
+
+La imagen `pgvector/pgvector:pg17` es PostgreSQL 17 con la extensión pgvector. Al configurar `DB_PROVIDER=postgres` y `VECTOR_DB_PROVIDER=pgvector`, Cognee usa la **misma base de datos PostgreSQL** tanto para el almacenamiento relacional como para el vectorial.
+</Notice>
+
+<Notice type="warning" title="La interfaz web no está disponible en Docker">
+La imagen Docker del frontend de Cognee es experimental y actualmente no está bien soportada. **Para acceder a la interfaz de Cognee**, necesitas ejecutar `cognee-cli -ui` en local con una instalación de Python. Para despliegues en Docker, usa la interfaz Swagger en `http://localhost:8000/docs` para acceso completo a la API.
+</Notice>
+
+### Paso 4: Crear el archivo de entorno
+
+```sh
+nano .env
+```
+
+Añade tu configuración:
+
+```sh
+# OpenAI API Key (required)
+LLM_API_KEY=sk-your-openai-api-key-here
+
+# LLM Configuration
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+
+# Embedding Configuration
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=openai/text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+
+# Database Configuration
+DB_PASSWORD=your-secure-database-password
+
+# Graph Database Provider (kuzu, neo4j, or falkordb)
+GRAPH_DATABASE_PROVIDER=kuzu
+```
+
+### Paso 5: Arrancar Cognee
+
+```sh
+# Start services
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Check status
+docker compose ps
+```
+
+### Paso 6: Configurar el proxy inverso con Nginx
+
+Para producción con dominios personalizados y SSL:
+
+```sh
+sudo apt install nginx certbot python3-certbot-nginx -y
+```
+
+Crea la configuración de Nginx:
+
+```sh
+sudo nano /etc/nginx/sites-available/cognee
+```
+
+Pega:
+
+```nginx
+# Cognee API
+server {
+    listen 80;
+    server_name cognee.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300;
+        proxy_connect_timeout 300;
+        proxy_send_timeout 300;
+    }
+}
+
+# MCP Server
+server {
+    listen 80;
+    server_name mcp.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300;
+        proxy_connect_timeout 300;
+        proxy_send_timeout 300;
+    }
+}
+```
+
+Activa el sitio y consigue el SSL:
+
+```sh
+# Enable site
+sudo ln -s /etc/nginx/sites-available/cognee /etc/nginx/sites-enabled/
+
+# Test configuration
+sudo nginx -t
+
+# Reload Nginx
+sudo systemctl reload nginx
+
+# Get SSL certificates (add --dry-run the first time to avoid rate limits)
+sudo certbot --nginx -d cognee.yourdomain.com -d mcp.yourdomain.com
+```
+
+Dos apuntes sobre certbot antes de ejecutarlo. Primero, añade `--dry-run` en tu primer intento: Let's Encrypt limita las validaciones fallidas a 5 por semana y dominio, y el dry-run usa el servidor de staging. Segundo, si prefieres no mantener archivos de configuración de Nginx en absoluto, un [proxy inverso Traefik para servicios Docker](https://www.bitdoze.com/traefik-proxy-docker/) detecta los contenedores mediante etiquetas, que es el mismo modelo que usa Dokploy.
+
+### Paso 7: Verificar el despliegue
+
+```sh
+# All three containers should show "healthy" or "running"
+docker compose ps
+
+# API, direct and through the proxy
+curl http://localhost:8000/health
+curl https://cognee.yourdomain.com/health
+
+# MCP server
+curl http://localhost:8001/health
+
+# Swagger UI should load in your browser
+open https://cognee.yourdomain.com/docs
+```
+
+El aspecto de un sistema sano: `docker compose ps` lista `cognee`, `cognee-mcp` y `postgres` sin contadores de reinicio, y ambas llamadas a `/health` devuelven HTTP 200. Si `cognee` aparece como `unhealthy` o se reinicia constantemente, salta a la sección de solución de problemas más abajo.
+
+## Opción 3: Ejecutar el servidor MCP de Cognee en standalone (sin la API completa)
+
+Si solo necesitas el servidor MCP para asistentes de codificación con IA como Cursor o Claude Code, puedes ejecutar el servidor MCP en standalone **sin el stack completo de la API de Cognee**. Es una opción ligera perfecta para entornos de desarrollo personales.
+
+<Notice type="info" title="Cuándo usar el modo solo MCP">
+El servidor MCP standalone es ideal cuando:
+- Solo necesitas las funciones de memoria para asistentes de IA (no la API REST completa)
+- Quieres un despliegue mínimo de un solo contenedor
+- Lo usas para desarrollo personal, no para grafos de conocimiento compartidos en equipo
+- Quieres una configuración rápida sin gestionar PostgreSQL
+
+Cada instancia MCP mantiene sus propios datos separados en este modo.
+</Notice>
+
+### Inicio rápido con Docker
+
+```sh
+# Set your API key
+export LLM_API_KEY=your_openai_api_key_here
+
+# Create env file
+echo "LLM_API_KEY=$LLM_API_KEY" > .env
+
+# Start MCP server
+docker run -e TRANSPORT_MODE=http --env-file ./.env -p 8000:8000 --rm -it cognee/cognee-mcp:main
+```
+
+### Verificar el servidor
+
+```sh
+curl http://localhost:8000/health
+```
+
+### Conectar con clientes de IA
+
+Una vez en marcha, conecta tu asistente de codificación con IA:
+
+**Cursor IDE:**
+```json
+{
+  "mcpServers": {
+    "cognee": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+**Claude Code:**
+```sh
+claude mcp add --transport http cognee http://localhost:8000/mcp -s project
+```
+
+Otros editores compatibles con MCP como [Windsurf](https://go.bitdoze.com/windsurf) hablan el mismo protocolo, así que el patrón es idéntico: apunta el cliente a la URL del servidor terminada en `/mcp`.
+
+### Docker Compose para solo MCP (con persistencia)
+
+Para almacenamiento persistente con el servidor MCP standalone:
+
+```yaml
+services:
+  cognee-mcp:
+    image: cognee/cognee-mcp:main
+    container_name: cognee-mcp
+    environment:
+      - TRANSPORT_MODE=http
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - LOG_LEVEL=INFO
+    volumes:
+      - cognee-mcp-data:/app/.cognee_system
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  cognee-mcp-data:
+```
+
+Crea el archivo `.env`:
+```sh
+LLM_API_KEY=sk-your-openai-api-key-here
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+```
+
+Arráncalo con:
+```sh
+docker compose up -d
+```
+
+La diferencia entre los dos modos, en visual:
+
+![Modo MCP standalone de Cognee frente a modo API con almacenamiento PostgreSQL compartido](@assets/images/25/11/cognee-mcp-standalone-vs-api.svg)
+
+<Notice type="warning" title="Modo standalone vs modo API">
+**Modo standalone** (mostrado arriba): cada instancia MCP tiene su propia base de datos. Los datos no se comparten entre instancias.
+
+**Modo API** (Opciones 1 y 2): varios clientes MCP se conectan a un backend de Cognee compartido con almacenamiento PostgreSQL centralizado. Úsalo para colaboración en equipo o cuando necesites la API REST completa.
+</Notice>
+
+## Opciones de configuración
+
+Cognee es muy configurable. Estas son las opciones clave que puedes personalizar.
+
+### Proveedores de LLM
+
+Cognee soporta varios proveedores de LLM. Actualiza las variables de entorno según corresponda:
+
+<Tabs>
+<Tab name="OpenAI (predeterminado)">
+
+```sh
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY=sk-your-key
+```
+
+El camino más fácil. `gpt-4o-mini` mantiene bajos los costes de cognify con conjuntos grandes de documentos.
+
+</Tab>
+<Tab name="Anthropic Claude">
+
+```sh
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-3-5-sonnet-20241022
+LLM_API_KEY=sk-ant-your-key
+```
+
+</Tab>
+<Tab name="Google Gemini">
+
+```sh
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini/gemini-2.0-flash
+LLM_API_KEY=AIza-your-key
+```
+
+</Tab>
+<Tab name="Ollama (local)">
+
+Primero ejecuta Ollama en el host; mi guía para [ejecutar Ollama con Docker Compose](/es/ollama-docker-instalacion/) cubre la configuración. Después apunta Cognee hacia él:
+
+```sh
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.1:8b
+LLM_ENDPOINT=http://host.docker.internal:11434/v1
+LLM_API_KEY=ollama
+```
+
+En Linux, `host.docker.internal` no se resuelve por defecto. Añade esto al servicio `cognee` en tu archivo Compose:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Sin esto obtendrás `Connection refused` desde dentro del contenedor (entrada de solución de problemas más abajo).
+
+</Tab>
+</Tabs>
+
+### Proveedores de embeddings
+
+Configura los modelos de embeddings para la búsqueda vectorial:
+
+<Tabs>
+<Tab name="OpenAI small (predeterminado)">
+
+```sh
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=openai/text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+```
+
+</Tab>
+<Tab name="OpenAI large">
+
+Mejor calidad de recuperación, mayor coste por llamada:
+
+```sh
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=openai/text-embedding-3-large
+EMBEDDING_DIMENSIONS=3072
+```
+
+</Tab>
+<Tab name="Google Gemini">
+
+```sh
+EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=gemini/text-embedding-004
+EMBEDDING_DIMENSIONS=768
+EMBEDDING_API_KEY=AIza-your-key
+```
+
+</Tab>
+</Tabs>
+
+Para una configuración totalmente local, Cognee también soporta Fastembed, que ejecuta modelos de embeddings ligeros para CPU en el mismo host. Puedes mezclar proveedores, por ejemplo un LLM local de Ollama con embeddings de OpenAI.
+
+<Notice type="warning" title="Consistencia de dimensiones">
+Si cambias las dimensiones de los embeddings, debes reiniciar tu base de datos vectorial. Las dimensiones deben coincidir entre tu proveedor de embeddings y la configuración del almacén vectorial. Como usamos pgvector (el mismo PostgreSQL), reiniciar significa eliminar y recrear las tablas de vectores.
+</Notice>
+
+### Opciones de base de datos de grafos
+
+Cognee soporta distintas bases de datos de grafos para el almacenamiento del grafo de conocimiento:
+
+**Kuzu (predeterminada - basada en archivos):**
+```sh
+GRAPH_DATABASE_PROVIDER=kuzu
+```
+
+**Neo4j (para producción/multi-agente):**
+```sh
+GRAPH_DATABASE_PROVIDER=neo4j
+GRAPH_DATABASE_URL=bolt://neo4j:7687
+GRAPH_DATABASE_USERNAME=neo4j
+GRAPH_DATABASE_PASSWORD=your-password
+```
+
+Para añadir Neo4j a tu Docker Compose:
+
+```yaml
+  neo4j:
+    image: neo4j:latest
+    container_name: cognee-neo4j
+    networks:
+      - cognee-network
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/your-password
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+    volumes:
+      - neo4j-data:/data
+```
+
+Mi recomendación: empieza con Kuzu, ya que está basada en archivos y no necesita ningún servicio extra. Pasa a Neo4j cuando tengas escritores concurrentes, varios agentes consultando el grafo a la vez, o grafos lo bastante grandes como para querer las herramientas operativas de Neo4j.
+
+## Solución de errores comunes
+
+La mayoría de los problemas al desplegar Cognee se reducen a dos cosas: un desajuste entre las variables de entorno y lo que ya hay en un volumen, o problemas de alcance de red entre contenedores. Empieza cada diagnóstico de la misma forma:
+
+```sh
+docker compose logs -f cognee        # API container
+docker compose logs -f cognee-mcp    # MCP container
+docker compose ps                    # health/restart status
+```
+
+Estos son los fallos con los que más probablemente te encontrarás, con la solución de cada uno.
+
+### Postgres rechaza la contraseña después de cambiar `DB_PASSWORD`
+
+**Síntoma**: los logs de `cognee` muestran fallos de autenticación repetidos:
+
+```
+FATAL: password authentication failed for user "cognee"
+```
+
+**Causa**: `POSTGRES_PASSWORD` solo tiene efecto la primera vez que se inicializa el volumen `cognee-postgres-data`. Editar `DB_PASSWORD` en tu `.env` después cambia lo que Cognee envía, pero la base de datos sigue teniendo la contraseña antigua.
+
+**Solución** (conservando tus datos): cambia la contraseña dentro de Postgres para que coincida con tu `.env`:
+
+```sh
+docker compose exec postgres psql -U cognee -d cognee_db \
+  -c "ALTER USER cognee WITH PASSWORD 'your-secure-database-password';"
+```
+
+**Solución** (borrar y empezar de cero): si no te importan los datos, elimina el volumen para que Postgres se reinicialice con la nueva contraseña:
+
+```sh
+docker compose down
+docker volume rm cognee_cognee-postgres-data   # project prefix may differ; check `docker volume ls`
+docker compose up -d
+```
+
+Esto elimina todos los usuarios, datasets y embeddings. Haz primero un `pg_dump` si tienes cualquier duda (ver Mantenimiento más abajo).
+
+**Verificación**: `docker compose logs cognee` deja de mostrar errores de autenticación y `curl http://localhost:8000/health` devuelve 200.
+
+### `port is already allocated` en el 8000 o el 8001
+
+**Síntoma**: `docker compose up -d` falla con:
+
+```
+Error response from daemon: driver failed programming external connectivity on endpoint cognee:
+Bind for 0.0.0.0:8000 failed: port is already allocated
+```
+
+**Causa**: otro contenedor o servicio ya ocupa el puerto del host. El sospechoso habitual es un contenedor obsoleto de un proyecto compose anterior; en segundo lugar, algo más escuchando en el 8000.
+
+**Solución**: encuentra quién lo ocupa y deténlo o mueve Cognee:
+
+```sh
+# What's using the port?
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep 8000
+sudo ss -ltnp | grep 8000
+
+# If it's a stale compose project
+docker compose down && docker compose up -d
+
+# Or change only the host-side port in docker-compose.yml
+#   ports:
+#     - "18000:8000"
+```
+
+**Verificación**: `docker compose ps` muestra todos los servicios activos y `curl http://localhost:8000/health` devuelve 200. Si cambiaste el puerto del host, recuerda actualizar el `proxy_pass` de Nginx para que coincida.
+
+### El contenedor de Cognee se reinicia o falla su health check al arrancar
+
+**Síntoma**: `docker compose ps` muestra `cognee` como `unhealthy` o `Restarting`, o sale con el código 137.
+
+**Causas comunes y soluciones**:
+
+- **Falta la clave de API**: los logs muestran un error de validación sobre `LLM_API_KEY`. Comprueba que la variable llegó al contenedor: `docker compose exec cognee env | grep LLM_API_KEY`. Con Dokploy, confirma que la pestaña Environment se guardó antes de desplegar.
+- **OOM kill (salida 137)**: el límite de memoria de 4 GB es un techo, y un VPS de 4 GB ejecutando Postgres, Cognee y MCP dentro del mismo presupuesto va justo. Compruébalo con `docker inspect cognee --format '{{.State.OOMKilled}}'`. Soluciones: añade swap (`fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`), o pásate a un VPS de 8 GB si los trabajos de cognify mueren con regularidad.
+- **Primer arranque lento**: el primer inicio inicializa el esquema de la base de datos y descarga artefactos del modelo, lo que puede superar el `start_period` de 40 s en discos lentos. Si los logs muestran la app viva pero los health checks fallan de forma intermitente, sube `start_period` a `120s`.
+
+**Verificación**: tras la corrección, `docker compose ps` muestra `(healthy)` en un par de minutos y la interfaz Swagger en `/docs` carga.
+
+### Ollama connection refused desde dentro del contenedor (Linux)
+
+**Síntoma**: cognify falla con `httpx.ConnectError: [Errno 111] Connection refused` mientras `LLM_ENDPOINT=http://host.docker.internal:11434/v1` funciona bien desde la shell de tu host.
+
+**Causa**: Docker en Linux no proporciona el nombre DNS `host.docker.internal` por defecto (macOS y Windows sí).
+
+**Solución**: añade el mapeo host-gateway al servicio `cognee`:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Después, `docker compose up -d` para recrear el contenedor. Si Ollama solo escucha en `127.0.0.1`, reconfigúralo para escuchar en `0.0.0.0` o usa la IP del bridge de Docker (`172.17.0.1`) en `LLM_ENDPOINT`.
+
+**Verificación**:
+
+```sh
+docker compose exec cognee curl -s http://host.docker.internal:11434/api/tags
+```
+
+Una lista de modelos en JSON significa que el camino está libre; `Connection refused` significa que Ollama no está escuchando en la interfaz a la que llegó el contenedor.
+
+### Desajuste de dimensiones de embeddings tras cambiar de modelo
+
+**Síntoma**: cognify o la búsqueda fallan con un error de pgvector sobre el número de dimensiones, p. ej. quejándose de que el vector tiene 768 dimensiones cuando se esperaban 1536 (o viceversa).
+
+**Causa**: las tablas de vectores en Postgres se crearon con las dimensiones del modelo anterior. Las columnas de pgvector son de ancho fijo; no se redimensionan.
+
+**Solución**: reinicia el almacenamiento vectorial y vuelve a ingerir. Los pasos exactos están en la entrada de FAQ ["¿Cómo reinicio la base de datos y empiezo de cero?"](#preguntas-frecuentes) más abajo. Tras el reinicio, ejecuta cognify de nuevo para que los documentos se re-embeban con el nuevo modelo.
+
+**Prevención**: elige tu modelo de embeddings antes de cargar datos reales, y trata un cambio de `EMBEDDING_DIMENSIONS` como una migración, no como un ajuste de configuración.
+
+### El cliente MCP no alcanza `https://mcp.yourdomain.com/mcp`
+
+Tres formas de fallo distintas aquí, en el orden en que las comprobaría:
+
+- **404 en la URL**: la URL del cliente debe terminar en `/mcp`. Apuntar Cursor o Claude Code al dominio pelado te da un servidor válido sin herramientas.
+- **Errores de TLS o de conexión justo después de desplegar**: puede que el certificado aún no exista. Dale a Traefik o certbot unos 30 segundos, y luego `curl -v https://mcp.yourdomain.com/health` para ver el resultado real del handshake.
+- **Servicio activo pero las herramientas fallan**: el contenedor MCP no alcanza la API. Revisa `docker compose logs cognee-mcp` y confirma `API_URL=http://cognee:8000` (el nombre de red de Docker, no `localhost`).
+
+## Usar la API de Cognee
+
+Una vez desplegado, puedes interactuar con Cognee a través de su API REST. Con la autenticación activada, primero necesitas registrarte e iniciar sesión.
+
+<Notice type="info" title="Acceder a Cognee">
+Cognee ofrece varias formas de interactuar con él:
+
+1. **Interfaz Swagger** - Documentación interactiva de la API en `/docs` (p. ej., `https://cognee.yourdomain.com/docs`) - **Recomendada para despliegues en Docker**
+2. **API REST** - Todas las operaciones vía endpoints HTTP
+3. **Integración MCP** - A través de asistentes de codificación con IA como Cursor o Claude
+4. **CLI con interfaz web** - Ejecuta `cognee-cli -ui` en local para lanzar una interfaz web completa (requiere una instalación local de Python)
+
+**Nota**: la interfaz web de Cognee actualmente solo está disponible a través de la CLI (`cognee-cli -ui`), no vía Docker. Para despliegues en Docker, usa la interfaz Swagger en `/docs` para acceso completo a la API.
+</Notice>
+
+### Comprobar el estado
+
+```sh
+curl https://cognee.yourdomain.com/health
+```
+
+### Registrar un usuario
+
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "your-strong-password"}'
+```
+
+### Iniciar sesión y obtener el token
+
+```sh
+TOKEN=$(curl -s -X POST "https://cognee.yourdomain.com/api/v1/auth/login" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=user@example.com&password=your-strong-password" | jq -r .access_token)
+
+echo $TOKEN
+```
+
+### Crear un dataset
+
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/datasets" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name": "my_documents"}'
+```
+
+### Añadir datos
+
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/add" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "data=@/path/to/document.pdf" \
+  -F "datasetName=my_documents"
+```
+
+### Construir el grafo de conocimiento (Cognify)
+
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/cognify" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"datasets": ["my_documents"]}'
+```
+
+Cognify se ejecuta de forma asíncrona; en un VPS de 4 GB, espera que un conjunto pequeño de documentos tarde unos minutos, ya que cada fragmento pasa por el LLM y la API de embeddings. Sigue el progreso en `docker compose logs -f cognee` o consulta el endpoint de estado del dataset.
+
+### Buscar
+
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/search" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"query": "What are the main topics?", "datasets": ["my_documents"], "top_k": 10}'
+```
+
+### Ver la documentación de la API (interfaz Swagger)
+
+La **interfaz Swagger** es tu principal punto de entrada para explorar y probar la API:
+```
+https://cognee.yourdomain.com/docs
+```
+
+Esta documentación interactiva te permite:
+- Explorar todos los endpoints disponibles
+- Probar llamadas a la API directamente en el navegador
+- Ver los esquemas de petición/respuesta
+- Autenticarte y gestionar tu sesión
+
+## Usar MCP con Cognee autoalojado
+
+La integración del Model Context Protocol (MCP) de Cognee permite que asistentes de codificación con IA como Cursor, Claude Code y las extensiones de VS Code usen Cognee como memoria persistente.
+
+### ¿Qué es MCP?
+
+MCP (Model Context Protocol) es un estándar para conectar asistentes de IA con herramientas y fuentes de datos externas. El servidor MCP de Cognee expone un conjunto de herramientas de memoria. Las que más usarás:
+
+- **add**: guarda documentos y datos en la memoria
+- **cognify**: transforma datos en grafos de conocimiento
+- **search**: búsqueda semántica sobre tu conocimiento
+- **codify**: analiza e indexa repositorios de código
+- **save_interaction**: guarda el contexto de la conversación
+- **get_developer_rules**: recupera patrones y reglas de codificación
+- **list_datasets**: muestra todos los datasets almacenados
+- **prune**: borra toda la memoria para empezar de cero
+
+### ¡MCP ya viene incluido!
+
+Si seguiste las configuraciones de Docker Compose anteriores, el servidor MCP ya se está ejecutando como parte de tu despliegue:
+
+- **Dokploy**: disponible en `https://mcp.yourdomain.com`
+- **Docker Compose**: disponible en `http://localhost:8001` (o tu dominio configurado)
+
+El servidor MCP se conecta al backend de Cognee internamente a través de la red de Docker (`http://cognee:8000`).
+
+### Conectar Cursor IDE
+
+1. Abre Cursor Settings → Tools & MCP
+2. Haz clic en **+ Add MCP Server**
+3. Añade esta configuración a `mcp.json`:
+
+Para desarrollo local:
+```json
+{
+  "mcpServers": {
+    "cognee": {
+      "url": "http://localhost:8001/mcp"
+    }
+  }
+}
+```
+
+Para tu servidor MCP público:
+```json
+{
+  "mcpServers": {
+    "cognee": {
+      "url": "https://mcp.yourdomain.com/mcp"
+    }
+  }
+}
+```
+
+4. Actualiza la conexión MCP en Cursor
+5. Usa el modo Agent para acceder a las herramientas de Cognee
+
+### Conectar Claude Code
+
+```sh
+# For local development
+claude mcp add --transport http cognee http://localhost:8001/mcp -s project
+
+# For remote server
+claude mcp add --transport http cognee https://mcp.yourdomain.com/mcp -s project
+```
+
+### Usar las herramientas MCP
+
+Una vez conectado, puedes pedirle a tu asistente de IA cosas como:
+
+- "Añade este archivo a la memoria de Cognee"
+- "Busca patrones de autenticación en Cognee"
+- "Ejecuta codify sobre este repositorio para construir un grafo de conocimiento"
+- "Guarda nuestra conversación como reglas de desarrollador"
+- "Lista todos mis datasets de Cognee"
+
+La IA usará automáticamente las herramientas MCP de Cognee apropiadas.
+
+<Notice type="info" title="Autenticación MCP">
+El servidor MCP se conecta a tu backend de Cognee internamente. Si necesitas autenticar las peticiones MCP hacia la API de Cognee, puedes añadir la variable de entorno `API_TOKEN` a la configuración del servicio MCP.
+</Notice>
+
+## Mantenimiento y backups
+
+### Backups periódicos
+
+**Para despliegues con Dokploy**, configura los backups automáticos desde la interfaz de Dokploy o sigue nuestra [guía de backups en Dokploy](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/).
+
+**Para Docker Compose con PostgreSQL:**
+
+```sh
+# Manual backup (includes both relational data AND vector embeddings)
+docker compose exec postgres pg_dump -U cognee cognee_db > backup-$(date +%Y%m%d).sql
+
+# Restore backup
+cat backup-20241127.sql | docker compose exec -T postgres psql -U cognee cognee_db
+```
+
+**Script de backup automático** (`backup.sh`):
+
+```bash
+#!/bin/bash
+BACKUP_DIR="/backups/cognee"
+DATE=$(date +%Y%m%d-%H%M)
+mkdir -p $BACKUP_DIR
+
+# Backup PostgreSQL (contains both relational and vector data)
+docker compose exec -T postgres pg_dump -U cognee cognee_db | gzip > $BACKUP_DIR/cognee-$DATE.sql.gz
+
+# Keep only last 7 days
+find $BACKUP_DIR -name "cognee-*.sql.gz" -mtime +7 -delete
+```
+
+Añádelo al crontab:
+```sh
+chmod +x backup.sh
+crontab -e
+# Add: 0 2 * * * /path/to/backup.sh
+```
+
+Una laguna que debes conocer: `pg_dump` captura los datos relacionales y vectoriales, pero los archivos del grafo Kuzu viven en el volumen `cognee-data`. Si tus grafos de conocimiento importan, haz backup también de ese directorio del volumen (o saca todo fuera del servidor con la ruta de backups de Dokploy, que cubre los volúmenes).
+
+### Actualizar Cognee
+
+**Con Dokploy:**
+1. Ve a tu servicio
+2. Haz clic en **"Redeploy"**
+3. Dokploy descarga la imagen más reciente
+
+El mismo flujo aplica para [actualizar stacks de Docker Compose en Dokploy](/es/actualizar-docker-compose-dokploy/) cuando has editado el propio archivo compose.
+
+**Con Docker Compose:**
+```sh
+cd ~/cognee
+docker compose pull
+docker compose up -d
+```
+
+Como los datos viven en volúmenes con nombre, una actualización de imagen no toca tus datos. También es la razón por la que haces un backup primero: un salto de versión mayor puede cambiar el esquema que Cognee espera.
+
+<Notice type="info" title="Fijar la versión">
+Para estabilidad en producción, fija una etiqueta de versión concreta en lugar de `:main`:
+
+```yaml
+image: cognee/cognee:1.5.4
+image: cognee/cognee-mcp:latest
+```
+
+En el momento de esta actualización (septiembre de 2026), la versión estable actual es la v1.5.4 y `cognee/cognee` publica etiquetas de versión correspondientes en Docker Hub. La imagen `cognee/cognee-mcp` publica sobre todo builds `main-*` y `latest`, así que fija la imagen de la API a una etiqueta de versión y deja la imagen MCP en `latest`, a menos que encuentres una etiqueta de versión coincidente en ambas [páginas de tags](https://hub.docker.com/r/cognee/cognee/tags). Consulta los [releases de GitHub](https://github.com/topoteretes/cognee/releases) para las versiones actuales.
+</Notice>
+
+### Desmontar Cognee de forma segura
+
+Cuando necesites eliminar el despliegue (o reconstruirlo desde cero):
+
+```sh
+# Stop and remove containers + networks, KEEP all data
+docker compose down
+
+# Stop and remove containers AND volumes (destroys all data)
+docker compose down -v
+```
+
+<Notice type="warning" title="Down vs down -v">
+`docker compose down` conserva tus volúmenes con nombre, así que puedes levantar el stack de nuevo con `docker compose up -d` sin perder nada. `docker compose down -v` elimina `cognee-postgres-data` y `cognee-data`: cada usuario, dataset, embedding y grafo de conocimiento desaparece sin marcha atrás. Lee el comando dos veces antes de pulsar intro y, si los datos importan lo más mínimo, haz un `pg_dump` primero.
+</Notice>
+
+En Dokploy, eliminar el servicio compose desde el panel tira los contenedores, pero los volúmenes con nombre pueden quedar rezagados; límpialos manualmente desde la vista de volúmenes de Dokploy o con `docker volume ls | grep cognee`. Termina el desmontaje eliminando los registros DNS de `cognee.yourdomain.com` y `mcp.yourdomain.com`, y revocando cualquier clave de API que hayas creado para este despliegue.
+
+Si estás migrando en lugar de eliminando, la ruta es: haz un `pg_dump` nuevo, ejecuta el mismo archivo Compose en el nuevo host y vuelca el dump de vuelta (`cat backup.sql | docker compose exec -T postgres psql -U cognee cognee_db`). Copia también el contenido del volumen `cognee-data` si tus grafos importan.
+
+## Buenas prácticas de seguridad
+
+<ListCheck>
+- **Autenticación activada**: configuramos `REQUIRE_AUTHENTICATION=true` - nunca lo desactives en despliegues públicos
+- **Usa HTTPS**: siempre SSL/TLS en producción (Traefik/Certbot se encarga de esto)
+- **Contraseñas fuertes**: usa contraseñas complejas para la base de datos y las cuentas de usuario
+- **Variables de entorno**: nunca subas archivos `.env` al control de versiones
+- **Firewall**: expón solo los puertos necesarios (80, 443)
+- **Actualizaciones periódicas**: mantén Cognee y las imágenes de Docker al día
+- **Cifrado de backups**: cifra los backups de la base de datos en reposo
+- **Aislamiento de red**: usa redes de Docker para aislar los servicios
+- **Vigila los logs**: configura monitorización de logs para eventos de seguridad
+- **Limitación de tasa**: considera añadir rate limits vía Nginx o Traefik
+</ListCheck>
+
+## Conclusión
+
+Con esta configuración, los datos son tuyos y eliges la infraestructura que se ajusta a tus necesidades. PostgreSQL con pgvector mantiene las cosas simples al gestionar tanto los datos relacionales como los embeddings vectoriales en una sola base de datos, y OpenAI cubre la parte de los embeddings.
+
+Lo que obtienes:
+- **Una única instancia de PostgreSQL** con pgvector gestiona tanto los metadatos COMO el almacenamiento vectorial
+- **Servidor MCP incluido** para que los asistentes de IA se conecten nada más instalar
+- **Autenticación activada** para un despliegue público seguro
+- **Listo para producción** con health checks, límites de recursos y una red bien montada
+
+Dokploy o Docker Compose a pelo — en ambos casos puedes tener Cognee funcionando en minutos. El servidor MCP es la verdadera ventaja aquí: tus asistentes de codificación mantienen memoria persistente entre sesiones sin configuración extra.
+
+### Próximos pasos
+
+<ListCheck>
+- Explora la [documentación de Cognee](https://docs.cognee.ai/) para funciones avanzadas
+- Configura backups automáticos con nuestra [guía de backups en Dokploy](https://www.bitdoze.com/dokploy-backups-cloudflare-r2/)
+- Prueba la integración MCP con Cursor o Claude Code
+- Experimenta con distintos proveedores de LLM y embeddings
+- Construye pipelines personalizados para tus casos de uso concretos
+- Compara con [Hindsight](/es/cognee-vs-hindsight/) para ver qué sistema de memoria para agentes encaja mejor con tu caso
+</ListCheck>
+
+<Button link="https://github.com/topoteretes/cognee" text="Ver Cognee en GitHub" />
+
+¿Tienes preguntas sobre autoalojar Cognee? ¡Deja un comentario abajo!
+
+## Preguntas frecuentes
+
+<Accordion label="¿Cuál es la diferencia entre Cognee y una base de datos vectorial normal?" group="faq" expanded="true">
+Las bases de datos vectoriales como Pinecone o Weaviate almacenan embeddings para búsqueda semántica. Cognee también hace eso (vía pgvector en nuestra configuración), pero además construye grafos de conocimiento que mapean las relaciones entre entidades. El resultado es una recuperación que entiende el contexto y las conexiones por encima de las puntuaciones de similitud.
+
+Cognee añade:
+- Extracción de entidades y mapeo de relaciones
+- Razonamiento basado en grafos
+- Consultas multi-salto sobre datos relacionados
+- Resumen y fragmentación automáticos
+</Accordion>
+
+<Accordion label="¿Por qué usar pgvector en lugar de una base de datos vectorial dedicada?" group="faq">
+Usar `pgvector/pgvector:pg17` te da PostgreSQL con la extensión pgvector, que sirve para ambos propósitos:
+
+**Ventajas:**
+- Una sola base de datos que gestionar, respaldar y mantener
+- Transacciones ACID sobre datos relacionales y vectoriales a la vez
+- Menor consumo de recursos que ejecutar bases de datos separadas
+- Despliegue y red más sencillos
+
+**Cuándo considerar alternativas:**
+- Datasets vectoriales muy grandes (miles de millones de vectores)
+- Necesidad de funciones especializadas de búsqueda vectorial
+- Si ya tienes infraestructura de Qdrant/Weaviate/Pinecone
+
+Para la mayoría de los despliegues autoalojados, pgvector funciona bien y mantiene la operativa simple.
+</Accordion>
+
+<Accordion label="¿Necesito OpenAI o puedo usar otros proveedores?" group="faq">
+OpenAI es la opción predeterminada y la más fácil, pero Cognee soporta varios proveedores:
+
+**Proveedores de LLM:**
+- OpenAI (GPT-4, GPT-4o-mini)
+- Anthropic (Claude)
+- Google Gemini
+- Ollama (modelos locales)
+- Cualquier endpoint compatible con OpenAI
+
+**Proveedores de embeddings:**
+- OpenAI (text-embedding-3-small/large)
+- Google Gemini
+- Ollama
+- Fastembed (local, ligero para CPU)
+
+Puedes mezclar proveedores; por ejemplo, usar un LLM local de Ollama con embeddings de OpenAI.
+</Accordion>
+
+<Accordion label="¿Cuánto cuesta el autoalojamiento?" group="faq">
+**Costes mensuales** (ejemplo):
+- VPS con 4 GB de RAM (Hetzner): $8/mes
+- Dominio: $1/mes
+- Uso de la API de OpenAI: variable ($5-50/mes según el uso)
+
+**Total**: $15-60/mes dependiendo del uso
+
+El principal coste variable es el uso de la API de LLM/embeddings. Usar modelos locales con Ollama puede reducirlo a casi cero.
+</Accordion>
+
+<Accordion label="¿Puedo usar Cognee sin la integración MCP?" group="faq">
+¡Por supuesto! El servidor MCP es opcional. Puedes quitar el servicio `cognee-mcp` del Docker Compose y usar Cognee puramente como API REST para:
+- Construir aplicaciones RAG
+- Crear asistentes de IA con memoria
+- Análisis y búsqueda de documentos
+- Sistemas de gestión del conocimiento
+
+La integración MCP es específicamente útil para asistentes de codificación con IA como Cursor y Claude Code.
+</Accordion>
+
+<Accordion label="¿Cuál es la mejor base de datos de grafos para producción?" group="faq">
+**Kuzu (predeterminada)** funciona bien para despliegues de un solo servidor y es la más fácil de configurar (basada en archivos, sin servicios adicionales).
+
+**Neo4j** está recomendada para:
+- Despliegues multi-agente (acceso concurrente)
+- Grafos de conocimiento a gran escala
+- Cuando necesitas las herramientas de visualización de Neo4j
+- Funciones empresariales y soporte
+
+**FalkorDB** es un buen punto intermedio que ofrece capacidades de grafo y vectoriales a la vez.
+
+Empieza con Kuzu y migra a Neo4j si necesitas más escalabilidad.
+</Accordion>
+
+<Accordion label="¿Cómo reinicio la base de datos y empiezo de cero?" group="faq">
+Para reiniciar Cognee por completo:
+
+```sh
+# Stop services
+docker compose down
+
+# Remove volumes (WARNING: deletes all data including vectors)
+docker volume rm cognee_cognee-postgres-data
+docker volume rm cognee_cognee-data
+
+# Start fresh
+docker compose up -d
+```
+
+Para un reinicio suave (conserva los datos de usuario pero limpia los grafos de conocimiento), usa la API de Cognee:
+```sh
+curl -X POST "https://cognee.yourdomain.com/api/v1/prune" \
+  -H "Authorization: Bearer $TOKEN"
+```
+</Accordion>
+
+<Accordion label="¿Puedo migrar desde otra base de datos vectorial a Cognee?" group="faq">
+Cognee no importa directamente desde otras bases de datos vectoriales, pero puedes:
+
+1. Exportar tus documentos desde el sistema de origen
+2. Reingerirlos en Cognee usando el endpoint `/add`
+3. Ejecutar `cognify` para construir el grafo de conocimiento
+
+La estructura de grafo de conocimiento que crea Cognee es distinta de los embeddings vectoriales en bruto, así que reprocesar suele ser el mejor enfoque de todos modos.
+</Accordion>
+
+<Accordion label="¿Cómo monitorizo Cognee en producción?" group="faq">
+Cognee ofrece varias opciones de monitorización:
+
+1. **Endpoint de salud**: `GET /health` para comprobaciones básicas de liveness
+2. **Salud detallada**: `GET /health/detailed` para el estado de los componentes
+3. **Logs**: los logs del contenedor muestran el estado del procesamiento y los errores
+4. **Estado del dataset**: `GET /api/v1/datasets/{id}/status` para el estado de procesamiento
+
+Para monitorización en producción:
+- Configura chequeos de uptime contra `/health` (una combinación autoalojada que funciona bien: [monitoriza tu servidor con Beszel y Uptime Kuma](/es/beszel-uptime-kuma/))
+- Configura agregación de logs (Loki, ELK)
+- Monitoriza las métricas de PostgreSQL
+- Sigue los tiempos de respuesta de la API
+</Accordion>
+
+<Accordion label="¿Puedo ejecutar Cognee en un servidor casero en lugar de un VPS?" group="faq">
+Sí. Cualquier cosa que ejecute Docker con 4 GB+ de RAM sirve, y una máquina compacta como un [GMKtec M6 Ultra](/go/gmktec-m6-ultra/) maneja este stack con comodidad. Las concesiones son operativas, no técnicas: sin SLA de datacenter ni alimentación redundante, el acceso remoto normalmente limitado por tu ancho de banda de subida, y la disciplina de backups es completamente tuya. El modo solo MCP (Opción 3) encaja especialmente bien en una máquina casera, ya que solo tu editor local habla con él.
+</Accordion>
