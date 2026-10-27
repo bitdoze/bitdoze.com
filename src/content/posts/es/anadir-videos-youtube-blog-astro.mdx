@@ -1,0 +1,817 @@
+---
+date: 2025-07-30
+lastmod: 2026-09-01T00:00:00Z
+translationKey: "add-youtube-videos-astro-blog"
+title: "Cómo añadir vídeos de YouTube a tu blog de Astro (SSG + SSR)"
+meta_title: "Añade vídeos de YouTube a tu blog de Astro (guía SSG + SSR)"
+description: "Aprende a añadir vídeos de YouTube a tu blog de Astro con loaders de la Content Layer (SSG) e islas de servidor server:defer (SSR), además de caché, miniaturas y resolución de problemas."
+image: "@assets/images/25/07/astro-add-yt-videos.jpg"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["astro"]
+canonical: "https://www.bitdoze.com/es/anadir-videos-youtube-blog-astro/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+¿Quieres añadir vídeos de YouTube a tu blog de Astro sin actualizar nada a mano? Esta guía muestra cómo traer automáticamente los últimos vídeos de un canal a tu sitio con Astro 7 en tiempo de build con loaders de la Content Layer (SSG) o bajo demanda con islas de servidor `server:defer` (SSR).
+
+Ambos métodos usan el feed RSS gratuito de YouTube (sin clave de API), y cubriré los problemas del mundo real: por qué el endpoint RSS a veces devuelve 404, por qué `maxresdefault.jpg` puede romper tu build y cómo migrar a la YouTube Data API cuando necesites más fiabilidad.
+
+Tanto si usas el [tema gratuito de blog de Astro](https://www.bitdoze.com/es/crear-blog-astro-gratis/) como tu propia configuración, esta guía incluye código listo para copiar y pegar para ambos métodos.
+
+## 🎯 Lo que aprenderás
+
+<ListCheck>
+
+- **SSG con loader personalizado de la Content Layer**: el método recomendado en tiempo de build, con seguridad de tipos
+- **SSR con islas de servidor `server:defer`**: renderizado bajo demanda para actualizaciones en tiempo real
+- **Feed RSS de YouTube**: cómo funciona, por qué puede dar 404 y cómo hacerlo resistente
+- **Optimización de miniaturas**: el fallback `hqdefault.jpg` para evitar imágenes rotas
+- **Ruta de actualización a la YouTube Data API**: sigue siendo gratuita a escala de blog y es más fiable que el RSS
+- **Resolución de problemas**: caídas del RSS, miniaturas que faltan, fallos de islas
+
+</ListCheck>
+
+## 🛠️ Requisitos previos
+
+<ListCheck>
+
+- **Node.js 22.12.0+.** Astro 6+ abandonó Node 18 y 20. Fíjalo en `.nvmrc`:
+  ```
+  22.12.0
+  ```
+- **Astro 7.x.** Esta guía apunta a la versión estable actual (7.2.10 a agosto de 2026). Si empiezas desde cero, consulta la [guía gratuita de blog con Astro](https://www.bitdoze.com/es/crear-blog-astro-gratis/).
+- **Conocimientos básicos de JavaScript/TypeScript**
+- **Un canal de YouTube** con el ID del canal (ver abajo)
+- **Un adaptador** (Node o Cloudflare). Solo es necesario para el método SSR/islas de servidor.
+
+</ListCheck>
+
+<Notice type="info" title="Astro 7 endurece el HTML">
+
+Astro 7 usa un compilador basado en Rust y Vite 8. Los tiempos de build bajan entre un 15 y un 61 %, pero las etiquetas HTML sin cerrar ahora **rompen el build** en lugar de corregirse en silencio. Si vas a copiar y pegar bloques de código, revisa bien tu marcado. Consulta [qué cambió en Astro 7](https://www.bitdoze.com/es/astro-7-compilaciones-mas-rapidas/) para el desglose completo.
+
+</Notice>
+
+### Encuentra el ID de tu canal de YouTube desde un @handle
+
+<Notice type="warning" title="Las URL de canal ahora muestran @handles, no IDs">
+
+Las URL de los canales de YouTube tienen el formato `youtube.com/@tucanal`. Eso es un handle, no el ID `UC...` que necesita el feed RSS. Así se encuentra el ID real:
+
+1. Abre la página de tu canal en un navegador
+2. Clic derecho → **Ver código fuente de la página**
+3. Busca (Ctrl+F) `"channelId":"UC` o `"externalId":"UC`
+4. Copia la cadena `UC...`
+
+Alternativamente, abre cualquier vídeo del canal y busca en el código fuente de la misma forma. El feed RSS solo devuelve los **~15 vídeos más recientes** por canal.
+
+</Notice>
+
+### Vídeo complementario
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/x6pjyeQ_6V0"
+  label="Cómo añadir vídeos de YouTube a tu blog de Astro (SSG + SSR)"
+/>
+
+## 📡 Cómo funciona el feed RSS de YouTube (y por qué puede dar 404)
+
+Ambos métodos de esta guía usan el mismo endpoint sin coste:
+
+```
+https://www.youtube.com/feeds/videos.xml?channel_id=YOUR_CHANNEL_ID
+```
+
+Sin clave de API, sin autenticación, sin cuota. Devuelve un feed Atom XML con los ~15 vídeos más recientes del canal: ID de vídeo, título, fecha de publicación, URL de la miniatura y más.
+
+<Notice type="warning" title="Fiabilidad del feed RSS">
+
+El endpoint RSS de YouTube tiene errores 404 y 500 intermitentes documentados. Estas caídas suelen concentrarse entre las 09:00 y las 12:00 UTC, afectan a canales distintos de forma aleatoria y pueden durar horas. Un header User-Agent de navegador **no** lo arregla de forma fiable.
+
+Esto significa que un fetch ingenuo en tiempo de build puede fallar en un despliegue normal. La mitigación: usa `AbortSignal.timeout()` para acotar el tiempo del fetch, añade un reintento con backoff y, para SSG, guarda en el repo una copia JSON del último estado válido para que un tropiezo de YouTube nunca rompa tu build.
+
+</Notice>
+
+<Notice type="success" title="¿Por qué RSS y no la API?">
+
+El RSS es gratuito y no requiere clave, pero no tiene SLA y está limitado a ~15 vídeos. La YouTube Data API es el camino resistente y de nivel profesional, y sigue siendo gratuita a escala de blog (1-3 unidades de API por actualización de las 10.000 diarias). Cubro la ruta de actualización en la [sección de la Data API](#-ruta-de-actualización-a-la-youtube-data-api-resistente-y-sigue-gratis) más abajo.
+
+</Notice>
+
+## 🏗️ Método 1: SSG con loader de la Content Layer (recomendado)
+
+El enfoque moderno de SSG usa la **Content Layer API** de Astro con un loader personalizado. Esto sustituye al patrón antiguo de hacer fetch del RSS en el frontmatter de un componente y parsearlo con regex. Ventajas: seguridad de tipos con Zod, caché en el data store, tipos con `astro sync` y un componente que solo se ocupa de la presentación.
+
+### Paso 1: Crea el loader de contenido de YouTube
+
+Instala el parser de XML:
+
+```bash
+npm install fast-xml-parser
+```
+
+Crea el loader en `src/loaders/youtube.ts`:
+
+```ts
+// src/loaders/youtube.ts
+import type { Loader } from 'astro/loaders';
+import { z } from 'astro/zod';
+import { XMLParser } from 'fast-xml-parser';
+
+export function youtubeVideosLoader(options: {
+  channelId: string;
+  maxVideos?: number;
+}): Loader {
+  return {
+    name: 'youtube-videos-loader',
+    load: async ({ store, parseData, logger }) => {
+      const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${options.channelId}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+
+      if (!res.ok) {
+        logger.error(`YouTube feed returned ${res.status}`);
+        return; // keeps prior data in store, build won't fail
+      }
+
+      const xml = new XMLParser({ ignoreAttributes: false }).parse(
+        await res.text()
+      );
+      const entries = (xml.feed?.entry ?? []).slice(0, options.maxVideos ?? 6);
+
+      store.clear();
+      for (const entry of entries) {
+        const id = entry['yt:videoId'];
+        const data = await parseData({
+          id,
+          data: {
+            id,
+            title: entry.title,
+            published: new Date(entry.published),
+            thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+            url: `https://www.youtube.com/watch?v=${id}`,
+          },
+        });
+        store.set({ id, data, digest: JSON.stringify(data) });
+      }
+    },
+    schema: z.object({
+      id: z.string(),
+      title: z.string(),
+      published: z.date(),
+      thumbnail: z.string(),
+      url: z.url(),
+    }),
+  } satisfies Loader;
+}
+```
+
+<Notice type="info" title="¿Por qué un loader de la Content Layer?">
+
+Un loader de la Content Layer te da seguridad de tipos (esquema Zod), caché en el data store (los datos anteriores sobreviven a un fetch fallido) y `astro sync` genera los tipos de la colección. El componente que renderiza los vídeos se queda simple: solo llama a `getCollection()`. Es el patrón que Astro recomienda para datos externos en tiempo de build.
+
+</Notice>
+
+### Paso 2: Registra el loader en `content.config.ts`
+
+```ts
+// src/content.config.ts
+import { defineCollection } from 'astro:content';
+import { youtubeVideosLoader } from './loaders/youtube';
+
+export const collections = {
+  youtube: defineCollection({
+    loader: youtubeVideosLoader({
+      channelId: import.meta.env.YOUTUBE_CHANNEL_ID,
+      maxVideos: 6,
+    }),
+  }),
+};
+```
+
+Añade el ID de tu canal a `.env`:
+
+```bash
+YOUTUBE_CHANNEL_ID=UCGsUtKhXsRrMvYAWm8q0bCg
+```
+
+Después genera los tipos de la colección:
+
+```bash
+npx astro sync
+```
+
+<Notice type="info" title="Ejecuta astro sync tras conectar el loader">
+
+`npx astro sync` genera los tipos de TypeScript para tus colecciones. Ejecútalo tras cualquier cambio en `content.config.ts`. Los tipos te dan autocompletado y detectan errores en tiempo de build.
+
+</Notice>
+
+### Paso 3: Renderiza los vídeos con `<Image>`
+
+Ahora el componente solo llama a `getCollection('youtubeVideos')` y renderiza. Sin fetch, sin parseo: ese es el trabajo del loader.
+
+```astro
+---
+// src/components/YouTubeVideosSSG.astro
+import { Icon } from "astro-icon/components";
+import { Image } from "astro:assets";
+import { getCollection } from "astro:content";
+
+const videos = await getCollection("youtubeVideos");
+const channelId = import.meta.env.YOUTUBE_CHANNEL_ID;
+---
+
+<section class="py-8 bg-white dark:bg-gray-900 rounded-lg">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6">
+    <div class="text-center mb-8">
+      <h2 class="text-2xl md:text-3xl font-bold text-gray-900 dark:text-white mb-4">
+        Latest YouTube Videos
+      </h2>
+      <p class="text-lg text-gray-600 dark:text-gray-300">
+        Check out our latest content on YouTube
+      </p>
+    </div>
+
+    {videos.length === 0 ? (
+      <div class="text-center py-8">
+        <p class="text-gray-600 dark:text-gray-400">
+          No videos found.
+        </p>
+      </div>
+    ) : (
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {videos.map((video) => (
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1 border border-gray-200 dark:border-gray-700">
+            <div class="relative">
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
+                <Image
+                  src={video.data.thumbnail}
+                  alt={video.data.title}
+                  width={320}
+                  height={180}
+                  class="w-full h-48 object-cover rounded-t-lg"
+                  loading="lazy"
+                  format="webp"
+                />
+              </a>
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
+                <Icon
+                  name="mdi:play-circle"
+                  class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white w-16 h-16 drop-shadow-lg opacity-80 hover:opacity-100 transition-opacity"
+                />
+              </a>
+            </div>
+            <div class="p-4">
+              <a href={video.data.url} target="_blank" rel="noopener noreferrer">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white line-clamp-2 mb-2 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+                  {video.data.title}
+                </h3>
+              </a>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                {video.data.published.toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "short",
+                  day: "numeric",
+                })}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+
+    <div class="text-center mt-8">
+      <a
+        href={`https://www.youtube.com/channel/${channelId}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="inline-flex items-center px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors duration-300"
+      >
+        <Icon name="mdi:youtube" class="w-5 h-5 mr-2" />
+        View All Videos
+      </a>
+    </div>
+  </div>
+</section>
+
+<style>
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>
+```
+
+Añade el componente a cualquier página:
+
+```astro
+---
+// src/pages/index.astro
+import YouTubeVideosSSG from '../components/YouTubeVideosSSG.astro';
+---
+
+<html>
+  <body>
+    <YouTubeVideosSSG />
+  </body>
+</html>
+```
+
+Esto funciona con el [tema gratuito de blog de Astro](https://www.bitdoze.com/es/crear-blog-astro-gratis/): suelta el componente en tu layout o en tu página de inicio.
+
+## 🚀 Método 2: SSR, islas de servidor con server:defer
+
+El enfoque SSR usa `server:defer` para crear una **isla de servidor**. La página carga al instante con HTML estático y el componente de YouTube se renderiza bajo demanda en el servidor. No hace falta JavaScript en el cliente.
+
+### Paso 1: Instala un adaptador
+
+`server:defer` requiere un adaptador de servidor. **No** necesitas `output: 'server'`: mantén la salida `'static'` por defecto y solo la isla se renderiza bajo demanda. Es más ligero que renderizar en servidor todas las páginas.
+
+<Tabs>
+<Tab name="Adaptador Node">
+
+```bash
+npx astro add node
+```
+
+Esto configura `astro.config.mjs`:
+
+```js
+// astro.config.mjs
+import { defineConfig } from 'astro/config';
+import node from '@astrojs/node';
+
+export default defineConfig({
+  adapter: node({
+    mode: 'standalone',
+  }),
+});
+```
+
+Compila y ejecuta:
+
+```bash
+astro build && node dist/server/entry.mjs
+```
+
+Para producción, [despliega el build SSR en un VPS](https://www.bitdoze.com/es/desplegar-astro-en-vps/): un VPS económico como [Hetzner](https://go.bitdoze.com/hetzner) o [Hostinger](https://go.bitdoze.com/hostinger-vps) funciona bien para esto.
+
+_Los precios de los VPS subieron en 2026 — si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+</Tab>
+<Tab name="Adaptador Cloudflare">
+
+```bash
+npx astro add cloudflare
+```
+
+<Notice type="warning" title="Cambios del adaptador de Cloudflare en Astro 6+">
+
+El adaptador de Cloudflare tiene cambios importantes desde Astro 6: el servidor de desarrollo ahora corre sobre `workerd` para mantener paridad y necesitas **Wrangler `^4.125.0`**. Revisa la `compatibility_date` generada en tu `wrangler.toml`. Consulta [desplegar tu blog de Astro en Cloudflare Pages](https://www.bitdoze.com/deploy-astrojs-cloudflare/) para la configuración completa.
+
+</Notice>
+
+</Tab>
+</Tabs>
+
+### Paso 2: Crea el componente SSR con server:defer
+
+```astro
+---
+// src/components/YouTubeVideosSSR.astro
+import { Icon } from "astro-icon/components";
+
+export interface Props {
+  channelId: string;
+  maxVideos?: number;
+}
+
+const { channelId, maxVideos = 6 } = Astro.props;
+
+let videos: Array<{
+  id: string;
+  title: string;
+  published: Date;
+  thumbnail: string;
+  url: string;
+}> = [];
+let error: string | null = null;
+
+try {
+  const response = await fetch(
+    `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`,
+    { signal: AbortSignal.timeout(10_000) }
+  );
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  const xmlText = await response.text();
+
+  // Parse XML to extract video data
+  const videoRegex =
+    /<entry>.*?<yt:videoId>(.*?)<\/yt:videoId>.*?<title>(.*?)<\/title>.*?<published>(.*?)<\/published>.*?<\/entry>/gs;
+
+  let match;
+  while (
+    (match = videoRegex.exec(xmlText)) !== null &&
+    videos.length < maxVideos
+  ) {
+    const [, videoId, title, published] = match;
+    videos.push({
+      id: videoId,
+      title: title
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/g, "'"),
+      published: new Date(published),
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+    });
+  }
+} catch (err: any) {
+  console.error("Error fetching YouTube videos:", err);
+  error = err.message;
+}
+---
+
+<section class="py-8 bg-white dark:bg-gray-900 rounded-lg">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6">
+    <div class="text-center mb-8">
+      <h2 class="text-2xl md:text-3xl font-bold text-gray-900 dark:text-white mb-4">
+        Latest YouTube Videos
+      </h2>
+      <p class="text-lg text-gray-600 dark:text-gray-300">
+        Check out our latest content on YouTube
+      </p>
+    </div>
+
+    {error ? (
+      <div class="text-center py-8">
+        <p class="text-red-600 dark:text-red-400">
+          Unable to load YouTube videos. Please try again later.
+        </p>
+      </div>
+    ) : videos.length === 0 ? (
+      <div class="text-center py-8">
+        <p class="text-gray-600 dark:text-gray-400">
+          No videos found.
+        </p>
+      </div>
+    ) : (
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {videos.map((video) => (
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1 border border-gray-200 dark:border-gray-700">
+            <div class="relative">
+              <a href={video.url} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={video.thumbnail}
+                  alt={video.title}
+                  width={320}
+                  height={180}
+                  class="w-full h-48 object-cover rounded-t-lg"
+                  loading="lazy"
+                />
+              </a>
+              <a href={video.url} target="_blank" rel="noopener noreferrer">
+                <Icon
+                  name="mdi:play-circle"
+                  class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white w-16 h-16 drop-shadow-lg opacity-80 hover:opacity-100 transition-opacity"
+                />
+              </a>
+            </div>
+            <div class="p-4">
+              <a href={video.url} target="_blank" rel="noopener noreferrer">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white line-clamp-2 mb-2 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+                  {video.title}
+                </h3>
+              </a>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                {video.published.toLocaleDateString("en-US", {
+                  year: "numeric",
+                  month: "short",
+                  day: "numeric",
+                })}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+
+    <div class="text-center mt-8">
+      <a
+        href={`https://www.youtube.com/channel/${channelId}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="inline-flex items-center px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors duration-300"
+      >
+        <Icon name="mdi:youtube" class="w-5 h-5 mr-2" />
+        View All Videos
+      </a>
+    </div>
+  </div>
+</section>
+
+<style>
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>
+```
+
+Úsalo con `server:defer` y un slot de fallback:
+
+```astro
+---
+// src/pages/index.astro
+import YouTubeVideosSSR from '../components/YouTubeVideosSSR.astro';
+---
+
+<html>
+  <body>
+    <!-- The server:defer directive makes this a server island -->
+    <YouTubeVideosSSR
+      server:defer
+      channelId="UCGsUtKhXsRrMvYAWm8q0bCg"
+      maxVideos={6}
+    >
+      <!-- Fallback content shown while the island loads -->
+      <div class="text-center py-8">
+        <p class="text-gray-500">Loading videos...</p>
+      </div>
+    </YouTubeVideosSSR>
+  </body>
+</html>
+```
+
+<Notice type="info" title="Props serializables">
+
+Las props que se pasan a una isla `server:defer` deben ser serializables. Si la URL de props serializadas supera los 2048 bytes, la isla cambia a POST y pierde la caché del navegador. Con un string `channelId` y un número `maxVideos`, estás muy por debajo del límite.
+
+</Notice>
+
+### Paso 3: Notas de operación y caché
+
+Algunas cuestiones de producción para las islas de servidor:
+
+**Los despliegues continuos necesitan `ASTRO_KEY`.** Si despliegas en varias regiones o haces reinicios escalonados, las props cifradas y el contenido del slot (cifrados desde Astro 6) necesitan una clave estable:
+
+```bash
+npx astro create-key
+```
+
+Establece la salida como variable de entorno `ASTRO_KEY` en tu CI o plataforma de hosting.
+
+**Dentro de una isla, `Astro.url` apunta a `/_server-islands/...`**, no a la URL real de la página. Si necesitas la URL real, léela del header `Referer`.
+
+**La caché de rutas de Astro 7** ya es estable. Puedes cachear la respuesta de la isla a nivel de CDN o de memoria:
+
+```js
+// astro.config.mjs
+import { defineConfig, memoryCache } from 'astro/config';
+
+export default defineConfig({
+  cache: { provider: memoryCache() },
+  routeRules: {
+    '/': { maxAge: 300, swr: 60 },
+  },
+});
+```
+
+Esto es más idiomático que una caché `Map` hecha a mano (que falla en silencio en serverless/edge porque solo existe por proceso).
+
+## 🔑 Ruta de actualización a la YouTube Data API (resistente y sigue gratis)
+
+Cuando el RSS se queda corto —necesitas más historial, recuentos de visitas, duraciones o simplemente más fiabilidad— la YouTube Data API v3 es la actualización. A escala de blog, es prácticamente gratuita.
+
+La cadena de llamadas:
+
+1. `channels.list` → obtiene el ID de la playlist de subidas (1 unidad)
+2. `playlistItems.list` → obtiene los IDs de vídeo de la playlist de subidas (1 unidad)
+3. `videos.list` → obtiene títulos, miniaturas, duraciones y recuentos de visitas (1 unidad)
+
+Total: **2-3 unidades por actualización** de una cuota por defecto de 10.000 unidades/día. Tendrías que actualizar miles de veces al día para llegar al límite.
+
+<Notice type="success" title="Sigue siendo gratuita a escala de blog">
+
+Un canal, un par de llamadas a la API por build = 1-3 unidades de 10.000/día. Nunca llegarás al límite. No hay opción de pagar por más cuota, solo un formulario de auditoría manual si necesitas más.
+
+</Notice>
+
+Gestiona la clave de API con `astro:env`:
+
+```js
+// astro.config.mjs
+import { defineConfig, envField } from 'astro/config';
+
+export default defineConfig({
+  env: {
+    schema: {
+      YOUTUBE_API_KEY: envField.string({
+        context: 'server',
+        access: 'secret',
+      }),
+      YOUTUBE_CHANNEL_ID: envField.string({
+        context: 'server',
+        access: 'public',
+      }),
+    },
+  },
+});
+```
+
+Después, en tu loader o código de servidor:
+
+```ts
+import { YOUTUBE_API_KEY, YOUTUBE_CHANNEL_ID } from 'astro:env/server';
+
+const res = await fetch(
+  `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${YOUTUBE_CHANNEL_ID}&key=${YOUTUBE_API_KEY}`
+);
+const data = await res.json();
+const uploadsPlaylistId =
+  data.items[0].contentDetails.relatedPlaylists.uploads;
+```
+
+<Accordion label="¿Cómo funciona la cuota de la API de YouTube?" group="faq">
+
+La cuota por defecto es de 10.000 unidades al día por proyecto de Google Cloud, y se reinicia a medianoche (hora del Pacífico). Llamadas baratas: `playlistItems.list`, `videos.list` y `channels.list` cuestan 1 unidad cada una. Llamada cara: `search.list` cuesta 100 unidades por llamada (o, según la documentación más reciente, tiene su propio cupo de 100 llamadas/día a 1 unidad cada una; el modelo de cuotas tiene algo de ambigüedad). Si recibes un 403 con `quotaExceeded`, has alcanzado el límite diario. Para el caso de este artículo (un canal, 2-3 llamadas por build), ni te acercarás.
+
+</Accordion>
+
+## 🖼️ Miniaturas y optimización de imágenes
+
+<Notice type="warning" title="maxresdefault puede romper tu build">
+
+`maxresdefault.jpg` (1280 px) **no está disponible para todos los vídeos**. Las subidas antiguas, los originales en baja resolución y algunos contenidos en directo o restringidos devuelven un 404. En el camino SSG con el componente `<Image>` de Astro, una miniatura remota que falta puede **romper el build**, porque `<Image>` descarga la imagen remota en tiempo de build.
+
+Usa `hqdefault.jpg` (480 px) como opción segura: siempre está presente. También disponibles: `mqdefault.jpg` (320 px) y `default.jpg` (120 px).
+
+</Notice>
+
+<Accordion label="¿Qué tamaño de miniatura de YouTube debería usar?" group="faq">
+
+| Tamaño | Resolución | ¿Siempre disponible? | Caso de uso |
+|------|-----------|-------------------|----------|
+| `default.jpg` | 120×90 | Sí | Vistas previas diminutas, no recomendado |
+| `mqdefault.jpg` | 320×180 | Sí | Tarjetas pequeñas, móvil |
+| `hqdefault.jpg` | 480×360 | **Sí** | **Opción recomendada** |
+| `sddefault.jpg` | 640×480 | Normalmente | Buen equilibrio, 404 raros |
+| `maxresdefault.jpg` | 1280×720 | **No** | Solo si verificas disponibilidad |
+
+Para el camino SSG, usa `<Image format="webp" loading="lazy">` para optimización automática en tiempo de build. Para la isla SSR, un simple `<img loading="lazy">` con `i.ytimg.com` es más sencillo, ya que la optimización remota ocurre en tiempo de petición. Consulta [acelerar los builds de Astro](https://www.bitdoze.com/es/astro-ssg-optimizacion-build/) para más sobre el rendimiento del build.
+
+</Accordion>
+
+## ⚖️ Cuándo usar SSG frente a islas de servidor
+
+### Usa SSG cuando:
+
+<ListCheck>
+
+- **El rendimiento es crítico**: el HTML estático carga al instante
+- **No necesitas actualizaciones en tiempo real**: los vídeos se actualizan al recompilar
+- **Quieres cero costes de servidor**: sin runtime, solo archivos estáticos
+- **El SEO importa**: el contenido estático es fácil de rastrear
+- **Prefieres la simplicidad**: sin adaptador ni infraestructura de servidor
+
+</ListCheck>
+
+### Usa islas de servidor cuando:
+
+<ListCheck>
+
+- **Las actualizaciones en tiempo real importan**: los vídeos aparecen justo tras publicarse
+- **Ya tienes infraestructura de servidor**: un servidor Node.js o Cloudflare Workers
+- **Quieres caché por componente**: `Cache-Control` en el endpoint de la isla
+- **Necesitas los datos más recientes sin recompilar**: sin triggers de CI/CD
+
+</ListCheck>
+
+## 🖼️ Insertar vídeos individuales en MDX
+
+Esta guía cubre mostrar una **cuadrícula de vídeos de un canal**. Si necesitas incrustar **un solo vídeo de YouTube** dentro de un artículo, usa `@astro-community/astro-embed-youtube`: envuelve lite-youtube-embed para incrustaciones respetuosas con la privacidad y optimizadas en rendimiento (el iframe solo carga tras el clic, ~229 mil descargas semanales).
+
+```bash
+npm install @astro-community/astro-embed-youtube
+```
+
+```mdx
+import { YouTube } from '@astro-community/astro-embed-youtube';
+
+<YouTube id="x6pjyeQ_6V0" />
+```
+
+Para un recorrido completo sobre incrustaciones responsive de vídeos individuales en MDX de Astro, consulta [incrustar vídeos individuales en tu MDX de Astro con astro-embed](https://www.bitdoze.com/es/youtube-responsive-astrojs/).
+
+## 🔍 Resolución de problemas comunes
+
+### El feed RSS no carga (404/500)
+
+<Notice type="warning" title="Este es el problema nº 1 en producción">
+
+El endpoint RSS de YouTube tiene caídas intermitentes documentadas; no es un problema de CORS. El riesgo real es un 404 durante tu build o el renderizado de la isla.
+
+**Mitigación:**
+- Usa `AbortSignal.timeout(5000)` para acotar el tiempo del fetch
+- Añade un reintento con backoff exponencial (1 s, 2 s, 4 s)
+- Para SSG: guarda en el repo una copia JSON del último estado válido y úsala cuando el feed falle
+- Verifica que el feed responde antes de desplegar: `curl "https://www.youtube.com/feeds/videos.xml?channel_id=UC..."`
+
+</Notice>
+
+### Los vídeos no se muestran / miniaturas rotas
+
+1. **Revisa el ID de tu canal**: usa el método del código fuente de los [requisitos previos](#encuentra-el-id-de-tu-canal-de-youtube-desde-un-handle). Un ID incorrecto devuelve un feed vacío, no un error.
+2. **Revisa las URL de las miniaturas**: busca `hqdefault` o `maxresdefault` en el HTML generado. Si ves 404 de `maxresdefault`, cambia a `hqdefault` en tu loader.
+3. **Revisa los logs del build**: el loader de la Content Layer registra errores con `logger.error()`. Busca `YouTube feed returned 4xx/5xx`.
+4. **Comprueba el feed RSS directamente**: abre la URL en un navegador. Si da 404, espera y reintenta (las ventanas de caída suelen ser cortas).
+
+### La isla de servidor no se renderiza
+
+1. **Adaptador no instalado**: `server:defer` requiere un adaptador. Ejecuta `npx astro add node` o `npx astro add cloudflare`.
+2. **`ASTRO_KEY` no definida**: en despliegues continuos o multirregión, las props cifradas no se pueden descifrar sin una clave estable. Ejecuta `npx astro create-key` y define la variable de entorno.
+3. **Props demasiado grandes**: si las props serializadas superan los 2048 bytes, la isla cambia a POST y pierde la caché del navegador. Mantén las props pequeñas (ID de canal + número máximo está bien).
+4. **Comprueba el endpoint directamente**: visita `/_server-islands/YouTubeVideosSSR` (o el nombre de tu componente) para ver si la isla responde.
+
+### quotaExceeded de la API de YouTube
+
+Un 403 con `quotaExceeded` significa que has alcanzado el límite diario de 10.000 unidades. A escala de blog (1-3 unidades/build) no debería pasar. Si pasa, busca llamadas accidentales a `search.list` (100 unidades cada una). No hay forma de pagar por más cuota, solo un formulario de auditoría manual para ampliaciones.
+
+## ✅ Lista de verificación
+
+<ListCheck>
+
+1. `curl "https://www.youtube.com/feeds/videos.xml?channel_id=UC..."`: confirma un 200 e inspecciona los campos XML
+2. `npx astro sync` tras conectar el loader: confirma que los tipos se generan sin errores
+3. `astro build`: confirma que no hay errores de build y revisa la salida por 404 de miniaturas
+4. Ejecuta el servidor standalone en local: confirma que `/_server-islands/<Component>` devuelve HTML
+5. Busca `hqdefault`/`maxres` en el HTML generado: detecta cualquier URL de miniatura rota
+6. Abre la página desplegada en un navegador: los vídeos se renderizan, las miniaturas cargan y el slot de fallback se sustituye
+
+</ListCheck>
+
+## 🎉 Conclusión
+
+El enfoque SSG con un loader de la Content Layer es el camino recomendado para la mayoría de los blogs: es rápido, con seguridad de tipos, y el componente queda limpio. Las islas de servidor con `server:defer` son la opción correcta cuando necesitas actualizaciones en tiempo real sin recompilar.
+
+Ambos métodos funcionan con el [tema gratuito de blog de Astro](https://www.bitdoze.com/es/crear-blog-astro-gratis/), así que puedes añadir vídeos de YouTube a tu blog de Astro desde ya.
+
+<Notice type="success" title="Consejo pro">
+
+Combina ambos enfoques: usa el loader de la Content Layer para tu página principal de vídeos y una isla `server:defer` para un widget de "Último vídeo" en la barra lateral que se actualice en tiempo real.
+
+</Notice>
+
+¿Quieres ir más allá? Echa un vistazo a las [opciones de CMS headless para tu blog de Astro](https://www.bitdoze.com/es/mejores-cms-headless-astro/) o a [alojar vídeo sin YouTube con Bunny Stream](https://www.bitdoze.com/es/guia-bunny-stream/). Para servir miniaturas más rápido a escala, considera una CDN como [Bunny.net](https://go.bitdoze.com/bunny).
+
+---
+
+## Preguntas frecuentes
+
+<Accordion label="¿Necesito una clave de API de YouTube?" group="faq">
+
+No: el feed RSS (`/feeds/videos.xml`) funciona sin autenticación. Solo necesitas una clave de API si migras a la YouTube Data API v3 para más historial, recuentos de visitas o mayor fiabilidad. A escala de blog, la Data API es gratuita (1-3 unidades de 10.000/día).
+
+</Accordion>
+
+<Accordion label="¿Cuántos vídeos devuelve el feed RSS?" group="faq">
+
+El feed RSS devuelve los **~15 vídeos más recientes** por canal. Si necesitas más, usa el endpoint `playlistItems.list` de la YouTube Data API, que puede paginar por toda la playlist de subidas.
+
+</Accordion>
+
+<Accordion label="¿Puedo usar esto con Cloudflare Pages?" group="faq">
+
+Sí: instala el adaptador de Cloudflare con `npx astro add cloudflare`. Desde Astro 6, el servidor de desarrollo corre sobre `workerd` para mantener paridad. Necesitas **Wrangler `^4.125.0`** y debes verificar la `compatibility_date` generada. Consulta [desplegar tu blog de Astro en Cloudflare Pages](https://www.bitdoze.com/deploy-astrojs-cloudflare/) para la guía completa.
+
+</Accordion>
+
+<Accordion label="¿Qué versión de Astro necesito?" group="faq">
+
+Los loaders de la Content Layer funcionan desde Astro 5.0 (diciembre de 2024). Las islas de servidor también funcionan desde Astro 5. Esta guía apunta a **Astro 7** (estable actual). A partir de Astro 6 se requiere **Node 22.12.0+**.
+
+</Accordion>
+
+<Accordion label="¿Funcionará esto con Astro 5?" group="faq">
+
+Los loaders de la Content Layer funcionan desde Astro 5.0. Las islas de servidor también están soportadas. Sin embargo, Astro 6+ requiere Node 22.12.0+ e introdujo cambios importantes en el adaptador de Cloudflare. Si estás en Astro 5, el código funciona pero no obtendrás las mejoras de velocidad de build del compilador Rust de Astro 7.
+
+</Accordion>

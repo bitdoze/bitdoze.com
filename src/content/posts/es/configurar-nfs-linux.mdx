@@ -1,0 +1,827 @@
+---
+date: 2025-07-29
+lastmod: 2026-08-29T00:00:00Z
+translationKey: "setup-nfs-linux"
+title: "Configurar NFS en Linux: guía completa para una unidad de red compartida"
+meta_title: "Configurar NFS en Linux: comparte unidades en tu red local"
+description: "Guía para configurar NFS en Linux: monta un servidor NFS y comparte recursos en los clientes con automontaje de systemd, NFSv4.2 seguro y solución a los errores de permisos más comunes en fstab."
+image: "@assets/images/25/07/setup-nfs-linux.webp"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["home-server", "homelab", "nfs"]
+canonical: "https://www.bitdoze.com/es/configurar-nfs-linux/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Tengo NFS funcionando en mi mini PC N100. Sirve el contenido multimedia de Jellyfin, gestiona las copias de seguridad de todas las máquinas de mi red y almacena documentos compartidos. Esta guía de configuración de NFS en Linux te lleva paso a paso por la puesta en marcha de un servidor NFS y el montaje de recursos compartidos en clientes Linux: desde una instalación básica funcional hasta el blindaje con NFSv4.2, el automontaje con systemd y la integración con contenedores.
+
+NFSv4.2 es el valor predeterminado en los clientes Linux modernos (negocian primero la versión 4.2), así que esta guía lo fija desde el principio. NFS es gratuito, está integrado en el kernel y es la forma más eficiente de compartir archivos en una red doméstica solo con Linux. Si aún estás comparando hardware, echa un vistazo a los [mejores mini PC para servidores domésticos](https://www.bitdoze.com/best-mini-pc-home-server/).
+
+## ¿Qué es NFS y por qué usarlo?
+
+<Notice type="info" title="Qué es NFS">
+Network File System (NFS) es un protocolo que te permite acceder a archivos a través de una red del mismo modo que accedes al almacenamiento local. NFSv4.2 es el estándar actual: añade operaciones con archivos dispersos, copia del lado del servidor y reserva de espacio. Todas las distribuciones Linux importantes incluyen soporte para NFS integrado en el kernel.
+</Notice>
+
+### Ventajas clave de NFS
+
+<ListCheck>
+- **Soporte nativo en Linux**: integrado en todas las distribuciones importantes; en los clientes no hay que instalar nada más que `nfs-common`
+- **Alto rendimiento**: implementación a nivel de kernel con sobrecarga mínima; los clientes modernos negocian automáticamente búferes de lectura/escritura de 1 MiB
+- **Escalabilidad**: gestiona múltiples conexiones simultáneas; ajusta los hilos del servidor para cargas más pesadas
+- **Flexibilidad**: admite varias opciones de montaje, configuraciones de seguridad y estrategias de automontaje
+- **Económico**: código abierto y sin licencias; los costes reales son el hardware y la electricidad
+</ListCheck>
+
+### NFS frente a SMB: ¿qué protocolo para compartir archivos deberías usar?
+
+| Protocolo | Ideal para | Rendimiento | Seguridad | Complejidad |
+|----------|----------|-------------|----------|------------|
+| NFS | Entornos solo con Linux | Alto (a nivel de kernel) | Moderada (confianza por IP) | Baja |
+| SMB/CIFS | Windows/Linux mixto | Moderado | Alta (autenticación de usuarios) | Moderada |
+| FTP | Transferencias de archivos heredadas | Bajo | Variable | Baja |
+| SSH/SFTP | Transferencias puntuales seguras | Moderado | Alta | Alta |
+| WebDAV | Acceso a archivos por HTTP | Moderado | Moderada | Moderada |
+
+**Recomendación:** usa NFS en redes domésticas solo con Linux. Es más rápido y sencillo que SMB. Para entornos mixtos Windows/Linux, usa SMB/CIFS. Consulta [cómo configurar Samba para redes mixtas Windows/Linux](https://www.bitdoze.com/setup-samba-linux/). Para acceso a archivos por HTTP, revisa [nuestra guía de WebDAV en Nginx](https://www.bitdoze.com/setup-webdav-nginx/).
+
+## Requisitos previos y planificación de la red
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+- **Dos o más máquinas Linux** (un servidor y uno o más clientes)
+- **Acceso root o sudo** en todas las máquinas
+- **Conectividad de red** entre los dispositivos en la misma LAN
+- **Direcciones IP estáticas** en el servidor y los clientes (te ahorra dolores de cabeza después)
+- **Conocimientos de configuración del firewall** de tu distribución (UFW o firewalld)
+</ListCheck>
+
+<Notice type="warning" title="Nunca expongas NFS a internet">
+NFS no tiene autenticación de usuarios: confía en las direcciones IP. Nunca expongas los puertos de NFS a internet público. Si necesitas NFS entre redes remotas, hazlo a través de un túnel VPN como WireGuard. Considera [autoalojar tu propio servidor de control de Tailscale con Headscale](/es/headscale-tailscale-autoalojado/) para tener una VPN de malla gestionada.
+</Notice>
+
+### Resumen de la arquitectura de red
+
+![Diagrama de la arquitectura de red NFS con un servidor NFS Linux exportando recursos compartidos /srv/nfs a máquinas cliente Linux en una red local](@assets/images/25/07/nfs-network.svg)
+
+## Paso 1: Configura el servidor NFS en Linux
+
+### Instala el paquete del servidor NFS
+
+<Tabs>
+<Tab name="Ubuntu/Debian">
+```bash
+sudo apt update && sudo apt install nfs-kernel-server -y
+```
+Ubuntu 24.04 incluye nfs-utils 2.6.4. El nombre del servicio es `nfs-kernel-server`.
+</Tab>
+<Tab name="RHEL/Fedora">
+```bash
+sudo dnf install nfs-utils -y
+```
+En sistemas CentOS antiguos usa `yum install nfs-utils -y`. El nombre del servicio es `nfs-server`.
+</Tab>
+</Tabs>
+
+### Crea los directorios compartidos
+
+Define una estructura de directorios para tus recursos compartidos NFS. Yo los organizo por propósito:
+
+```bash
+# Create main NFS directory (FHS-compliant location)
+sudo mkdir -p /srv/nfs
+
+# Create specific share directories
+sudo mkdir -p /srv/nfs/media
+sudo mkdir -p /srv/nfs/backups
+sudo mkdir -p /srv/nfs/documents
+```
+
+<Notice type="warning" title="Ubicación del directorio">
+Usar `/srv/nfs` sigue los estándares de la jerarquía del sistema de archivos de Linux. No uses `/media` ni `/mnt` para las exportaciones NFS: están reservados para montajes temporales.
+</Notice>
+
+### Configura los permisos y entiende el mapeo UID/GID
+
+Establece la propiedad y los permisos:
+
+```bash
+# Set ownership to nobody:nogroup for security
+sudo chown -R nobody:nogroup /srv/nfs
+
+# Set permissions (755 for directories)
+sudo chmod -R 755 /srv/nfs
+```
+
+<Notice type="warning" title="La trampa de escritura de UID/GID">
+Esta es la sorpresa n.º 1 de «permission denied» con NFS. Con el `root_squash` predeterminado, el usuario root de un cliente se mapea a `nobody` (UID 65534). Como `nobody` es el propietario del recurso compartido, los clientes root pueden escribir. Pero un usuario normal del cliente (p. ej., UID 1000) pasa a ser «otros» con permisos `r-x` y **no puede escribir**.
+
+NFS usa AUTH_SYS, que confía en los UID que envía el cliente. El servidor y el cliente deben coincidir en los UID/GID, o tendrás que mapearlos explícitamente.
+</Notice>
+
+<Notice type="info" title="Arreglar los permisos para usuarios normales">
+Dos enfoques para permitir que los usuarios normales escriban:
+
+**1. Iguala los UID entre las máquinas:** crea el mismo usuario con el mismo UID tanto en el servidor como en los clientes, y luego haz `chown` del recurso compartido a ese usuario.
+
+**2. Usa `all_squash` con UID/GID explícitos:** mapea todos los usuarios cliente a un único UID/GID del servidor:
+```bash
+# In /etc/exports, squash everyone to UID 1000, GID 1000
+/srv/nfs/media  192.168.1.0/24(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+```
+Es el enfoque más sencillo para redes domésticas donde todos los clientes confían entre sí.
+</Notice>
+
+### Configura las exportaciones NFS en /etc/exports
+
+El archivo `/etc/exports` define qué directorios se comparten y con qué permisos:
+
+```bash
+sudo nano /etc/exports
+```
+
+Añade tus configuraciones de exportación:
+
+```bash
+# Media share, read-write for the whole LAN (root_squash is the default)
+/srv/nfs/media     192.168.1.0/24(rw,sync,no_subtree_check)
+
+# Backup share, read-write for the whole LAN
+/srv/nfs/backups   192.168.1.0/24(rw,sync,no_subtree_check)
+
+# Documents, read-write for one machine, read-only for another
+/srv/nfs/documents 192.168.1.101(rw,sync,no_subtree_check) 192.168.1.102(ro,sync,no_subtree_check)
+
+# Container share, squash all users to UID/GID 1000
+/srv/nfs/appdata   192.168.1.0/24(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+
+# Optional: NFSv4 root export (lets clients mount server:/media instead of server:/srv/nfs/media)
+/srv/nfs           192.168.1.0/24(rw,sync,no_subtree_check,fsid=0,crossmnt)
+```
+
+<Notice type="error" title="Evita no_root_squash">
+No uses `no_root_squash` salvo que tengas una razón concreta (como clientes sin disco). Con `no_root_squash`, un usuario root remoto puede modificar cualquier archivo del recurso compartido y plantar binarios troyanizados o con setuid. La guía de seguridad de Red Hat lo advierte explícitamente. `root_squash` es el valor predeterminado: quédate con él.
+</Notice>
+
+### Opciones de exportación explicadas
+
+| Opción | Descripción | Caso de uso |
+|--------|-------------|----------|
+| `rw` | Acceso de lectura y escritura | Acceso completo para clientes de confianza |
+| `ro` | Acceso de solo lectura | Compartir contenido de solo lectura |
+| `sync` | Escrituras síncronas | Integridad de los datos (predeterminado desde nfs-utils 1.0.0) |
+| `async` | Escrituras asíncronas | Mejor rendimiento en discos mecánicos, pero con riesgo de pérdida de datos tras un fallo |
+| `no_subtree_check` | Desactiva la comprobación de subárboles | Mayor fiabilidad (predeterminado desde nfs-utils 1.1.0) |
+| `root_squash` | Mapea root al usuario anónimo | Seguridad (predeterminado; úsalo siempre) |
+| `no_root_squash` | Permite el acceso de root | Solo para clientes sin disco; un riesgo de seguridad en redes compartidas |
+| `all_squash` | Mapea todos los usuarios al anónimo | Máxima seguridad o recursos para contenedores |
+| `anonuid` | Define el UID anónimo | Úsalo con `all_squash` para controlar la propiedad |
+| `anongid` | Define el GID anónimo | Úsalo con `all_squash` para controlar el grupo propietario |
+| `fsid=0` | Exportación raíz de NFSv4 | Permite a los clientes montar rutas más cortas |
+| `crossmnt` | Sigue los puntos de montaje | Necesario con `fsid=0` para los subdirectorios |
+
+### Aplica las exportaciones e inicia el servicio
+
+Tras configurar las exportaciones, aplica los cambios en caliente, sin reiniciar el servicio:
+
+```bash
+# Apply exports (re-exports all directories, re-reads /etc/exports)
+sudo exportfs -arv
+```
+
+Salida esperada:
+```
+exporting 192.168.1.0/24:/srv/nfs/media
+exporting 192.168.1.0/24:/srv/nfs/backups
+exporting 192.168.1.101:/srv/nfs/documents
+exporting 192.168.1.102:/srv/nfs/documents
+```
+
+Activa el servicio para que arranque con el sistema:
+
+```bash
+sudo systemctl enable --now nfs-kernel-server
+```
+
+Verifica las exportaciones activas:
+
+```bash
+sudo exportfs -v
+```
+
+Deberías ver cada recurso compartido con sus opciones (rw, sync, no_subtree_check, root_squash).
+
+### Configura el firewall
+
+NFSv4 solo necesita **el puerto TCP 2049**. Los antiguos puertos 111 (rpcbind), mountd, statd y lockd son de la era NFSv2/v3: no los necesitas si solo usas NFSv4.
+
+<Tabs>
+<Tab name="UFW (Ubuntu/Debian)">
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 2049 proto tcp
+sudo ufw reload
+```
+</Tab>
+<Tab name="firewalld (RHEL/Fedora)">
+```bash
+sudo firewall-cmd --permanent --add-service=nfs
+sudo firewall-cmd --reload
+```
+Añade los servicios `nfs3`, `mountd` y `rpc-bind` solo si todavía usas NFSv3.
+</Tab>
+</Tabs>
+
+Verifica que el puerto está a la escucha:
+
+```bash
+sudo ss -tuln | grep :2049
+```
+
+### Restringe a NFSv4 y ajusta el servidor
+
+<Notice type="info" title="Ubuntu 22.04+ usa /etc/nfs.conf">
+En Ubuntu 22.04+, Debian 12+ y las distribuciones modernas, la configuración de NFS usa `/etc/nfs.conf` (formato INI). Los antiguos indicadores `NEED_*` de `/etc/default/nfs-kernel-server` no tienen efecto en las instalaciones basadas en systemd.
+</Notice>
+
+Edita `/etc/nfs.conf` para desactivar las versiones antiguas de NFS y ajustar el servidor:
+
+```bash
+sudo nano /etc/nfs.conf
+```
+
+Añade o actualiza la sección `[nfsd]`:
+
+```ini
+[nfsd]
+# Disable NFSv2 and NFSv3, NFSv4 only
+vers3=n
+# Optional: disable NFSv4.0 and 4.1 if you only need 4.2
+vers4.0=n
+vers4.1=n
+# Increase worker threads (default is 8; raise for multiple clients)
+threads=16
+# Bind to LAN IP only (replace with your server's IP)
+host=192.168.1.100
+```
+
+Reinicia el servidor NFS para aplicar los cambios:
+
+```bash
+sudo systemctl restart nfs-kernel-server
+```
+
+Verifica las versiones habilitadas:
+
+```bash
+cat /proc/fs/nfsd/versions
+```
+
+Salida esperada:
+```
+-2 -3 +4 +4.1 +4.2
+```
+
+Consulta la configuración efectiva:
+
+```bash
+sudo nfsconf --dump
+```
+
+En un servidor solo con v4 puedes enmascarar rpcbind, porque NFSv4 no lo usa:
+
+```bash
+sudo systemctl mask rpcbind.service rpcbind.socket
+```
+
+Nota: enmascarar rpcbind rompe `showmount -e` en el servidor. Desenmascáralo si lo necesitas.
+
+## Paso 2: Monta los recursos compartidos NFS en los clientes Linux
+
+### Instala el paquete del cliente NFS
+
+En las máquinas cliente:
+
+```bash
+sudo apt update && sudo apt install nfs-common -y
+```
+
+Para clientes RHEL/Fedora:
+
+```bash
+sudo dnf install nfs-utils -y
+```
+
+### Verifica las exportaciones del servidor
+
+Antes de montar, verifica que el servidor es accesible y que las exportaciones son visibles:
+
+```bash
+# List exports from the server
+showmount -e 192.168.1.100
+```
+
+Salida esperada:
+```
+Export list for 192.168.1.100:
+/srv/nfs        192.168.1.0/24
+/srv/nfs/media  192.168.1.0/24
+/srv/nfs/backups 192.168.1.0/24
+```
+
+Nota: si enmascaraste rpcbind en el servidor, `showmount` puede fallar; no pasa nada. El montaje usa directamente el puerto 2049.
+
+### Crea los puntos de montaje y prueba un montaje NFS manual
+
+```bash
+# Create mount points
+sudo mkdir -p /mnt/server-media
+sudo mkdir -p /mnt/server-backups
+sudo mkdir -p /mnt/server-docs
+```
+
+Prueba un montaje manual:
+
+```bash
+sudo mount -t nfs 192.168.1.100:/srv/nfs/media /mnt/server-media
+```
+
+Verifica el montaje:
+
+```bash
+df -h | grep nfs
+ls -la /mnt/server-media
+```
+
+<Notice type="success" title="Verificación">
+Si el montaje NFS aparece en la salida de `df -h` y puedes listar los archivos del directorio montado, la configuración básica funciona. Comprueba la versión de NFS negociada y los tamaños de búfer:
+```bash
+grep server-media /proc/mounts
+```
+Deberías ver `nfsvers=4.2` y `rsize=1048576,wsize=1048576` (1 MiB, el valor predeterminado moderno).
+</Notice>
+
+### Montajes NFS persistentes con /etc/fstab
+
+Edita `/etc/fstab` para el montaje automático al arrancar:
+
+```bash
+sudo nano /etc/fstab
+```
+
+<Tabs>
+<Tab name="Montaje permanente">
+Úsalo cuando el servidor NFS está siempre disponible (p. ej., en la misma máquina que tu router o en un NAS siempre encendido):
+
+```bash
+# NFS mounts, always-on
+192.168.1.100:/srv/nfs/media     /mnt/server-media    nfs  _netdev,nfsvers=4.2,hard,timeo=600,retrans=2  0 0
+192.168.1.100:/srv/nfs/backups   /mnt/server-backups  nfs  _netdev,nfsvers=4.2,hard,timeo=600,retrans=2  0 0
+192.168.1.100:/srv/nfs/documents /mnt/server-docs     nfs  _netdev,nfsvers=4.2,hard,timeo=600,retrans=2,ro  0 0
+```
+</Tab>
+<Tab name="Automontaje bajo demanda">
+Úsalo cuando el servidor NFS podría no estar en marcha al arrancar: evita bloqueos durante el arranque y desmonta tras la inactividad:
+
+```bash
+# NFS mounts, on-demand automount via systemd
+192.168.1.100:/srv/nfs/media     /mnt/server-media    nfs  _netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=30,x-systemd.idle-timeout=10min,nfsvers=4.2,hard,timeo=600,retrans=2  0 0
+192.168.1.100:/srv/nfs/backups   /mnt/server-backups  nfs  _netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=30,x-systemd.idle-timeout=10min,nfsvers=4.2,hard,timeo=600,retrans=2  0 0
+192.168.1.100:/srv/nfs/documents /mnt/server-docs     nfs  _netdev,noauto,x-systemd.automount,x-systemd.mount-timeout=30,x-systemd.idle-timeout=10min,nfsvers=4.2,hard,timeo=600,retrans=2,ro  0 0
+```
+</Tab>
+</Tabs>
+
+Tras editar fstab, recarga systemd y prueba:
+
+```bash
+sudo systemctl daemon-reload
+sudo mount -a
+mount | grep nfs
+```
+
+### Opciones de montaje explicadas
+
+| Opción | Descripción | Notas |
+|--------|-------------|-------|
+| `_netdev` | Dispositivo de red | Espera a la red antes de montar (implícito para nfs en systemd, pero incluirlo no estorba) |
+| `nfsvers=4.2` | Fija la versión de NFS | Predeterminado moderno; el cliente negocia 4.2 primero de todos modos, pero fijarlo evita sorpresas |
+| `hard` | Montaje duro | Reintenta indefinidamente ante fallos del servidor; **recomendado para la integridad de los datos** |
+| `soft` | Montaje blando | Devuelve un error tras el tiempo de espera; ver la advertencia de abajo |
+| `timeo=600` | Tiempo de espera en décimas de segundo | 60 segundos; un buen valor para LAN |
+| `retrans=2` | Número de reintentos | 2 reintentos antes de notificar un error |
+| `nconnect=4` | Múltiples conexiones TCP | Mayor rendimiento en NIC modernas (de 1 a 16; predeterminado 1) |
+| `noauto` | No montar al arrancar | Se usa con `x-systemd.automount` |
+| `x-systemd.automount` | Automontaje de systemd | Monta en el primer acceso y desmonta tras la inactividad |
+| `x-systemd.mount-timeout=30` | Tiempo de espera del montaje | Segundos de espera para el montaje |
+| `x-systemd.idle-timeout=10min` | Tiempo de inactividad | Desmonta tras este periodo sin actividad |
+
+<Notice type="warning" title="Los montajes soft pueden corromper datos">
+De la página de manual nfs(5): «Un tiempo de espera "soft" puede causar corrupción silenciosa de datos en ciertos casos. Usa la opción soft o softerr solo cuando la capacidad de respuesta del cliente sea más importante que la integridad de los datos».
+
+Usa `hard` para los recursos de copias de seguridad y documentos. `soft` es aceptable en recursos multimedia de solo lectura, donde un tiempo de espera es preferible a un proceso colgado.
+</Notice>
+
+Nota sobre rsize/wsize: los kernels modernos negocian automáticamente el tamaño de búfer máximo soportado (1 MiB). **No** fuerces `rsize=8192` ni `rsize=32768`: en realidad reduce el rendimiento. Déjalos sin definir y verifica con `grep server-media /proc/mounts`.
+
+### Automontaje de NFS con systemd
+
+La opción `x-systemd.automount` mostrada arriba es la forma moderna de gestionar los montajes NFS en clientes de una sola máquina. Es más simple que AutoFS y evita bloqueos en el arranque cuando el servidor NFS está apagado.
+
+Verifica que la unidad de automontaje está activa:
+
+```bash
+systemctl status mnt-server\\x2dmedia.automount
+```
+
+La salida esperada debería mostrar `Active: active (waiting)`.
+
+Cómo funciona: systemd crea un disparador de automontaje en el punto de montaje. La primera vez que accedes a `/mnt/server-media`, systemd monta el recurso NFS. Tras el `x-systemd.idle-timeout` de inactividad, lo desmonta automáticamente. Si el servidor NFS está apagado al arrancar, el sistema arranca con normalidad, sin bloqueos.
+
+**No** añadas `x-systemd.requires=network-online.target`: provoca ciclos de ordenación en systemd (según systemd.automount(5)). Mantén los números de paso de fstab en `0 0`; ejecutar fsck sobre NFS al arrancar puede colgar el sistema.
+
+## Paso 3: Configuración avanzada de NFS
+
+### AutoFS para el montaje bajo demanda
+
+AutoFS sigue siendo válido para configuraciones complejas con varios mapas de montaje. Instálalo:
+
+```bash
+sudo apt install autofs -y
+```
+
+Configura el mapa maestro:
+
+```bash
+sudo nano /etc/auto.master
+```
+
+Añade esta línea:
+
+```bash
+/mnt/auto /etc/auto.nfs --timeout=60 --ghost
+```
+
+Crea el archivo de mapa de AutoFS:
+
+```bash
+sudo nano /etc/auto.nfs
+```
+
+Configura tus montajes automáticos:
+
+```bash
+media     -fstype=nfs,nfsvers=4.2,rw,hard,timeo=600   192.168.1.100:/srv/nfs/media
+backups   -fstype=nfs,nfsvers=4.2,rw,hard,timeo=600   192.168.1.100:/srv/nfs/backups
+documents -fstype=nfs,nfsvers=4.2,ro,hard,timeo=600   192.168.1.100:/srv/nfs/documents
+```
+
+Arranca y habilita AutoFS:
+
+```bash
+sudo systemctl restart autofs
+sudo systemctl enable autofs
+```
+
+Nota: usa `-fstype=nfs,nfsvers=4.2`; la antigua sintaxis `-fstype=nfs4` está obsoleta según la página de manual nfs(5).
+
+### Funciones de NFSv4.2 y la exportación raíz
+
+NFSv4.2 añade varias funciones sobre la 4.1:
+
+- **Operaciones con archivos dispersos** (SEEK/HOLE): gestión eficiente de archivos con huecos
+- **Copia/clonación del lado del servidor**: `copy_file_range()` funciona en el servidor; genial para rsync y cp dentro del mismo recurso
+- **Reserva de espacio**: soporte de `fallocate()`
+- **NFS etiquetado**: etiquetas de seguridad para el control de acceso obligatorio
+
+La exportación raíz `fsid=0` mostrada antes permite a los clientes montar rutas más cortas. Con esta exportación:
+
+```bash
+# Instead of:
+sudo mount -t nfs 192.168.1.100:/srv/nfs/media /mnt/server-media
+
+# You can mount:
+sudo mount -t nfs 192.168.1.100:/media /mnt/server-media
+```
+
+La opción `crossmnt` sigue los puntos de montaje dentro de la exportación. Sin ella, los subdirectorios que sean sistemas de archivos independientes (como los volúmenes LVM) no serán visibles.
+
+### Ajuste del rendimiento
+
+<Notice type="info" title="Los valores predeterminados modernos ya son rápidos">
+Los kernels de Linux modernos negocian automáticamente búferes de lectura/escritura de 1 MiB. Forzar valores más bajos (como el antiguo consejo de `rsize=8192`) en realidad reduce el rendimiento. Deja rsize/wsize sin definir, salvo que tengas una razón concreta para limitarlos.
+</Notice>
+
+**TCP multiconexión (`nconnect`):** para un mayor rendimiento de un solo cliente en NIC modernas, añade `nconnect=4` (hasta 16) a tus opciones de montaje:
+
+```bash
+192.168.1.100:/srv/nfs/media /mnt/server-media nfs _netdev,nfsvers=4.2,hard,timeo=600,retrans=2,nconnect=4  0 0
+```
+
+Nota: `nconnect` se fija en el primer montaje y no se puede cambiar sin remontar.
+
+**Hilos del servidor:** el valor predeterminado son 8 hilos de trabajo de nfsd. Para varios clientes, súbelo a 16 o más en `/etc/nfs.conf`:
+
+```ini
+[nfsd]
+threads=16
+```
+
+**Exportaciones asíncronas:** usar `async` en lugar de `sync` en `/etc/exports` puede mejorar el rendimiento en discos mecánicos, pero con riesgo de pérdida de datos si el servidor falla. Úsalo solo para datos no críticos, como cachés multimedia.
+
+### Protege NFS con Kerberos, TLS y VPN
+
+<Notice type="warning" title="NFS no tiene autenticación de usuarios">
+NFS en claro (AUTH_SYS) confía en los UID y las direcciones IP que envía el cliente. No hay autenticación de usuarios: cualquier máquina de la red permitida puede reclamar cualquier UID. Por eso nunca debes exponer NFS a internet público.
+</Notice>
+
+**Kerberos:** para autenticación y cifrado reales, NFS soporta `sec=krb5`, `sec=krb5i` (integridad) y `sec=krb5p` (privacidad). Requiere un KDC de Kerberos, un principal `nfs/<server-fqdn>`, la extracción del keytab y la configuración de `gssproxy`/`rpc-gssd` tanto en el servidor como en los clientes. Es la opción correcta para entornos de producción, pero compleja para redes domésticas. Consulta la [guía oficial de NFS con Kerberos de Ubuntu](https://ubuntu.com/server/docs/how-to/networking/install-nfs/) para el procedimiento completo.
+
+**NFS sobre TLS:** disponible desde el kernel 6.4 de Linux (RFC 9289, RPC-with-TLS). Requiere `ktls-utils`/`tlshd` y certificados. RHEL 9.6+ lo soporta oficialmente. Todavía está madurando para uso general.
+
+**VPN WireGuard (recomendada para redes domésticas):** la forma más sencilla de proteger NFS a través de redes no fiables. Ejecuta NFS dentro de un túnel WireGuard: todo el tráfico va cifrado y solo los pares de la VPN pueden alcanzar el puerto 2049. Si necesitas un VPS barato como relevo de WireGuard o nodo de copias externas, [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) parte de unos pocos euros al mes en centros de datos de la UE.
+
+_Los precios de los VPS subieron en general en 2026; si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+### Mapeo UID/GID en contenedores
+
+Cuando ejecutas contenedores Docker que acceden a recursos NFS, tienes que hacer coincidir el UID del contenedor con la propiedad de la exportación.
+
+**Uso de `all_squash` con PUID/PGID:**
+
+Exporta con UID/GID explícitos:
+```bash
+/srv/nfs/appdata  192.168.1.0/24(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+```
+
+Para las imágenes de linuxserver.io (Jellyfin, Plex, etc.), define `PUID=1000` y `PGID=1000` para que coincidan.
+
+**Volumen NFS con nombre en Docker Compose:**
+
+```yaml
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    volumes:
+      - media:/media:ro
+      - ./config:/config
+
+volumes:
+  media:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.168.1.100,rw,nfsvers=4.2,hard,timeo=600,retrans=2
+      device: ":/srv/nfs/media"
+```
+
+Esto es mejor que un bind-mount del host porque el volumen con nombre sobrevive a configuraciones multi-host y las opciones de NFS se declaran en el propio archivo compose.
+
+## Paso 4: Monitoriza y mantén NFS
+
+### Comprueba el estado de NFS y las exportaciones
+
+```bash
+# Check NFS server status
+sudo systemctl status nfs-kernel-server
+
+# View active exports with options
+sudo exportfs -v
+
+# Check active connections on port 2049
+sudo ss -tuln | grep :2049
+```
+
+### Estadísticas y registros de NFS
+
+```bash
+# Server statistics
+nfsstat -s
+
+# Client statistics
+nfsstat -c
+
+# Real-time I/O statistics (install nfs-common if not present)
+nfsiostat 1
+
+# NFS-related kernel messages
+dmesg | grep -i nfs
+
+# Server logs
+sudo journalctl -u nfs-kernel-server
+
+# Verify effective server configuration
+sudo nfsconf --dump
+```
+
+### Mantente parcheado: CVE recientes de NFS
+
+<Notice type="warning" title="Mantén NFS actualizado">
+Dos CVE destacados de 2025 a 2026 afectan a NFS:
+
+**CVE-2025-12801** (rpc.mountd, CVSS 6.5): un cliente NFSv3 puede acceder a cualquier subárbol de un directorio exportado sin importar los permisos y sin importar `root_squash`/`all_squash`. Ejecutar solo NFSv4 lo evita por completo, ya que NFSv4 no usa rpc.mountd.
+
+**CVE-2025-38571** (cliente NFS-over-TLS, CVSS 5.5): un servidor NFS remoto puede tumbar el cliente con una alerta TLS manipulada. Solo afecta a las configuraciones de NFS-over-TLS.
+
+Mantén `nfs-utils` y tu kernel actualizados. Ejecutar solo NFSv4 (desactivando v2/v3) elimina la superficie de ataque de rpc.mountd.
+</Notice>
+
+## Solución de problemas comunes de NFS
+
+### Connection refused
+
+<Notice type="error" title="Error común: Connection refused">
+Normalmente significa que el firewall está bloqueando el puerto 2049 o que el servicio NFS no está en marcha.
+</Notice>
+
+**Lista de verificación:**
+
+<ListCheck>
+- **Verifica que los servicios NFS están en marcha**: `sudo systemctl status nfs-kernel-server`
+- **Revisa las reglas del firewall**: solo se necesita TCP 2049 para NFSv4; consulta [cómo comprobar puertos remotos con el comando nc](https://www.bitdoze.com/check-remote-port-in-linux-nc/)
+- **Prueba la conectividad de red**: `ping 192.168.1.100` entre el servidor y el cliente
+- **Verifica las exportaciones**: `sudo exportfs -v` en el servidor
+- **Comprueba si rpcbind está enmascarado**: si lo enmascaraste para usar solo NFSv4, `showmount` fallará, pero los montajes deberían seguir funcionando
+</ListCheck>
+
+### mount.nfs: access denied by server
+
+**Síntoma:** `mount.nfs: access denied by server` al intentar montar.
+
+**Causa:** un error de sintaxis en la exportación, una IP/subred que no coincide, o la IP del cliente no está en la lista de exportación.
+
+**Solución:**
+```bash
+# On the server, check what's actually exported
+sudo exportfs -v
+
+# Verify /etc/exports syntax (no missing parentheses, correct IPs)
+cat /etc/exports
+
+# Re-apply after fixing
+sudo exportfs -arv
+```
+
+### Permission denied (mapeo UID/GID)
+
+**Síntoma:** puedes montar el recurso compartido, pero recibes «Permission denied» al escribir.
+
+**Causa:** el clásico desajuste de UID/GID. Con propiedad `nobody:nogroup` y `chmod 755`, un usuario normal (UID 1000) en el cliente pasa a ser «otros», con solo lectura y ejecución.
+
+**Solución:**
+```bash
+# Check your UID on the client
+id
+
+# Option 1: Match UIDs, create the same user on the server
+sudo useradd -u 1000 myuser
+
+# Option 2: Use all_squash in /etc/exports
+/srv/nfs/media  192.168.1.0/24(rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+sudo exportfs -arv
+```
+
+### Stale file handle
+
+**Síntoma:** error `Stale file handle` al acceder a los archivos.
+
+**Causa:** el sistema de archivos del servidor fue reemplazado (restauración de un snapshot de LVM, rollback de btrfs) o la exportación se eliminó y se recreó mientras los clientes la tenían montada.
+
+**Solución:**
+```bash
+# On the client, lazy unmount and remount
+sudo umount -l /mnt/server-media
+sudo mount -a
+```
+
+### Protocol not supported
+
+**Síntoma:** `mount.nfs: Protocol not supported`
+
+**Causa:** desajuste de versiones de NFS: el cliente pide una versión que el servidor no soporta (o al revés).
+
+**Solución:**
+```bash
+# Check supported versions on the server
+cat /proc/fs/nfsd/versions
+
+# Explicitly set the version in fstab
+nfsvers=4.2
+```
+
+### Rendimiento lento o bloqueos al arrancar
+
+**Bloqueos al arrancar:** el servidor NFS no es accesible durante el arranque y el montaje bloquea el proceso. Solución: usa `x-systemd.automount` o añade `nofail` a las opciones de fstab.
+
+**Rendimiento lento:**
+```bash
+# Check negotiated buffer sizes and version
+grep server-media /proc/mounts
+
+# Try adding nconnect for parallel TCP connections
+# In /etc/fstab: add nconnect=4
+
+# Real-time I/O stats
+nfsiostat 1
+```
+
+## NFS en un servidor doméstico
+
+### Estructura de directorios para un servidor multimedia
+
+```bash
+/srv/nfs/media/
+├── movies/
+├── tv-shows/
+├── music/
+└── photos/
+```
+
+Esta estructura funciona bien con Jellyfin, Plex o Emby. El mini PC N100 sirve estos archivos por la red: cualquier máquina con un montaje NFS puede acceder a toda la biblioteca multimedia. Si buscas un [mini PC compacto para tu servidor doméstico](/go/gmktec-m5-ultra/), hay muchas opciones de bajo consumo que manejan NFS y Docker sin despeinarse.
+
+### Estrategia de copias de seguridad con NFS
+
+Combinado con [añadir un disco nuevo a Ubuntu LVM](https://www.bitdoze.com/add-new-drive-lvm/) para ampliar el almacenamiento:
+
+```bash
+# Backup scripts can target NFS shares
+rsync -av /home/user/documents/ /mnt/server-backups/user-docs/
+
+# Exclude unnecessary files, see [excluding files and directories with rsync](https://www.bitdoze.com/exclude-directories-files-copy-remote-machine/)
+rsync -av --exclude='.cache' --exclude='node_modules' /home/user/ /mnt/server-backups/user-home/
+```
+
+<Notice type="warning" title="NFS no es una copia de seguridad">
+Un `rm -rf` desde un cliente en un montaje NFS es instantáneo y permanente. Los recursos NFS deben respaldarse en el lado del servidor hacia una ubicación separada. Considera copias externas o cifradas para los datos críticos. El servidor NFS también es un punto único de fallo: no hay HA integrada (pNFS queda fuera del alcance de esta guía).
+</Notice>
+
+### Integración con contenedores Docker
+
+Para ejecutar [contenedores Docker en un servidor doméstico](/es/contenedores-docker-servidor-casa/) que necesitan multimedia compartida:
+
+```yaml
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - media:/media:ro
+      - ./config:/config
+    ports:
+      - 8096:8096
+
+volumes:
+  media:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.168.1.100,rw,nfsvers=4.2,hard,timeo=600,retrans=2
+      device: ":/srv/nfs/media"
+```
+
+Si usas `all_squash`, haz coincidir los valores `PUID`/`PGID` con `anonuid`/`anongid` de tus exportaciones.
+
+## Buenas prácticas y consideraciones de seguridad
+
+### Buenas prácticas de seguridad
+
+<ListCheck>
+- **Usa NFSv4.2**; desactiva NFSv2/v3 en `/etc/nfs.conf` para eliminar la exposición de rpc.mountd
+- **Usa `root_squash`** de forma predeterminada (es el valor por defecto; no lo sobrescribas)
+- **Restringe las exportaciones por IP**: usa `/32` para un solo cliente o `/24` para la LAN
+- **Firewall: solo TCP 2049**; NFSv4 no necesita los puertos 111, mountd ni statd
+- **Nunca expongas NFS a internet público**; usa WireGuard para el acceso remoto
+- **Mantén nfs-utils y el kernel parcheados**; vigila los CVE en rpc.mountd y sunrpc
+- **Revisa los registros** en busca de actividad sospechosa con `journalctl -u nfs-kernel-server`
+- **Considera Kerberos** para entornos de producción donde la confianza por IP no es suficiente
+</ListCheck>
+
+### Copias de seguridad y redundancia
+
+<Notice type="warning" title="NFS no es una copia de seguridad">
+El servidor NFS es un punto único de fallo. Respalda los datos compartidos en el lado del servidor hacia un disco separado o una ubicación externa. Un `rm -rf` de un cliente en un recurso NFS es inmediato: no hay papelera ni deshacer. Planifica tu estrategia de copias de seguridad en consecuencia.
+</Notice>
+
+### Consideraciones de red
+
+- **Usa conexiones por cable** cuando sea posible; NFS sobre WiFi funciona, pero es menos fiable
+- **Configura la monitorización de la red**; consulta la [guía completa de monitorización de servidores](https://www.bitdoze.com/sever-monitoring/)
+- **Considera la segmentación de red** por seguridad; aísla el tráfico NFS en una VLAN si tu switch lo permite
+- **Sin cifrado por defecto**: el tráfico NFS va en texto plano. Usa WireGuard si cruza redes no fiables
+
+## Conclusión
+
+NFS en Linux te da un uso compartido de archivos rápido y a nivel de kernel en toda tu red. Llevo tiempo ejecutándolo en mi mini PC N100 junto a Jellyfin, y gestiona el streaming multimedia, las copias de seguridad y el intercambio de documentos sin problemas.
+
+Empieza por lo básico: instala `nfs-kernel-server`, configura `/etc/exports` con `root_squash` y monta desde tus clientes. Cuando funcione, añade el automontaje de systemd para evitar bloqueos en el arranque y restríngelo a NFSv4-only para una mayor seguridad. Todo el montaje lleva menos de 30 minutos.
+
+Para seguir montando tu servidor doméstico, consulta los [mejores mini PC para servidores domésticos](https://www.bitdoze.com/best-mini-pc-home-server/), los [contenedores Docker para un servidor doméstico](/es/contenedores-docker-servidor-casa/) y [por qué necesitas un servidor doméstico en 2026](https://www.bitdoze.com/why-need-home-server/).
+
+<Button text="Empieza a montar tu configuración NFS" size="lg" color="blue" variant="solid" />

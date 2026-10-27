@@ -1,0 +1,374 @@
+---
+date: 2025-04-24
+lastmod: 2026-08-22T00:00:00Z
+translationKey: "agno-mcp-tools-context7"
+title: "Context7 MCP: cómo crear un agente de IA con Agno (2026)"
+meta_title: "Context7 MCP + Agno: crea un agente de IA (guía 2026)"
+description: "Conecta Agno al servidor MCP de Context7 y crea un agente de IA que obtiene documentación actualizada de bibliotecas y fragmentos de código. Guía completa de Python paso a paso."
+image: "@assets/images/25/04/agno-mcp-tools.jpeg"
+categories: ["ai"]
+authors: ["Dragos"]
+series: ["Agno Agents Tutorials", "4"]
+tags: ["ai-agents", "agno", "mcp"]
+canonical: "https://www.bitdoze.com/es/agno-herramientas-mcp-context7/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+La mayoría de los asistentes de código con IA te dan respuestas basadas en datos de entrenamiento de hace meses o años. Si alguna vez has recibido una llamada a una API alucinada o el nombre de una función obsoleta de ChatGPT, conoces el problema. **Context7 MCP** lo soluciona dando a tu agente de IA acceso en vivo a la documentación actual de las bibliotecas y a fragmentos de código, y **Agno** es el framework de agentes que lo une todo.
+
+MCP son las siglas de [Model Context Protocol](/es/introduccion-mcp-principiantes/), un estándar abierto que permite a los agentes de IA llamar a herramientas externas a través de una interfaz uniforme. Context7 es un servicio (de Upstash) que expone la documentación de miles de bibliotecas a través de MCP. Agno es un framework de agentes en Python que gestiona el bucle del agente, la orquestación de herramientas y la salida en streaming.
+
+Esta guía te lleva paso a paso por la creación de un agente de IA funcional en Python que obtiene documentación actualizada de bibliotecas bajo demanda. Al final tendrás un agente interactivo en funcionamiento.
+
+## ¿Por qué usar Context7 con Agno?
+
+Context7 ofrece documentación actualizada y ejemplos de código optimizados para LLMs. Combinado con Agno, obtienes un agente que:
+
+- **Obtiene dinámicamente** la documentación más reciente de la API de cualquier biblioteca.
+- **Recupera fragmentos de código relevantes** para demostrar el uso de la biblioteca.
+- **Responde a consultas complejas** sobre funciones de la biblioteca, patrones de uso o resolución de problemas.
+- **Agiliza los flujos de trabajo de los desarrolladores** proporcionando asistencia instantánea y consciente del contexto.
+
+Así es como funciona: tu script de Python lanza el servidor MCP de Context7 como un subproceso local de `npx` (transporte stdio). La clase `MCPTools` de Agno actúa como cliente MCP, conectándose a ese subproceso. Cuando le haces una pregunta al agente, este llama a las herramientas de Context7 (`resolve-library-id` y luego `query-docs`) y devuelve los resultados en formato Markdown.
+
+## Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Python 3.12+ con <a href="/uv-get-start/">uv instalado</a></li>
+<li>Node.js 18+ y npm (necesarios para el comando npx de Context7)</li>
+<li>Una clave de API de OpenAI (para GPT-5.4-mini a través de la Responses API)</li>
+<li>Opcional: clave de API de Context7 (gratis en <a href="https://context7.com" target="_blank" rel="noopener">context7.com</a>/dashboard) para límites de peticiones más altos</li>
+<li>Familiaridad básica con Python y la línea de comandos</li>
+</ul>
+</ListCheck>
+
+Si eres nuevo en Agno, empieza primero con [Primeros pasos con los agentes de Agno](/agno-get-start/). Cubre la instalación, la memoria y los conceptos básicos de RAG.
+
+## Paso 1: Configura tu entorno
+
+Crea un entorno virtual e instala los paquetes necesarios:
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -U "agno[mcp]" openai
+```
+
+<Notice type="info" title="agno[mcp] es un extra, no un paquete independiente">
+El extra `mcp` del paquete `agno` incluye el cliente MCP. No instales el paquete de Python `mcp` independiente por separado: es el *SDK de servidor* de MCP y puede causar conflictos de versiones con el cliente incluido en Agno.
+</Notice>
+
+Verifica que Node.js esté disponible y sea lo suficientemente reciente:
+
+```bash
+node --version   # need 18+
+npm --version
+```
+
+Configura tus claves de API:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+# optional: higher Context7 rate limits
+export CONTEXT7_API_KEY="ctx7_..."
+```
+
+<Tabs>
+<Tab name="Linux / macOS">
+```bash
+source .venv/bin/activate
+export OPENAI_API_KEY="sk-..."
+```
+</Tab>
+<Tab name="Windows">
+```cmd
+.venv\Scripts\activate
+set OPENAI_API_KEY=sk-...
+```
+</Tab>
+</Tabs>
+
+Verifica la instalación:
+
+```bash
+python -c "import agno; print(agno.__version__)"
+```
+
+Deberías ver un número de versión `2.x`. Si obtienes `ModuleNotFoundError`, el entorno virtual no está activo o la instalación falló.
+
+## Paso 2: Entiende las herramientas MCP de Context7
+
+El servidor MCP de Context7 expone dos herramientas:
+
+| Herramienta | Parámetros | Devuelve |
+|---|---|---|
+| `resolve-library-id` | `libraryName` (obligatorio), `query` (obligatorio) | Un ID de biblioteca con prefijo de barra (p. ej., `/psf/requests`) |
+| `query-docs` | `libraryId` (obligatorio), `query` (obligatorio) | Documentación y fragmentos de código de la biblioteca |
+
+<Notice type="warning" title="Los nombres de las herramientas cambiaron en Context7 v4">
+Si estás siguiendo un tutorial antiguo, ten en cuenta que las herramientas fueron renombradas. La antigua `get-library-docs` ahora es `query-docs`. El antiguo `context7CompatibleLibraryID` ahora es `libraryId`. Los parámetros `topic` y `tokens` desaparecieron, reemplazados por `query`. Estos cambios llegaron con Context7 v4.0.0 (agosto de 2026).
+</Notice>
+
+El flujo consta siempre de dos pasos: resolver el nombre de la biblioteca a un ID y luego consultar ese ID para obtener la documentación. El agente gestiona esto automáticamente basándose en sus instrucciones.
+
+Context7 también ofrece un endpoint MCP alojado en `https://mcp.context7.com/mcp` si prefieres no ejecutar el subproceso local de `npx`. Para esta guía usaremos el enfoque local, ya que es más sencillo de configurar.
+
+## Paso 3: Crea el agente de IA
+
+### Agente mínimo (una sola ejecución)
+
+Empieza con el script funcional más corto posible para verificar la integración:
+
+```python
+import asyncio
+from agno.agent import Agent
+from agno.models.openai import OpenAIResponses
+from agno.tools.mcp import MCPTools
+
+async def main():
+    mcp_tools = MCPTools(command="npx -y @upstash/context7-mcp@latest")
+    await mcp_tools.connect()
+
+    try:
+        agent = Agent(
+            model=OpenAIResponses(id="gpt-5.4-mini"),
+            tools=[mcp_tools],
+            markdown=True,
+            show_tool_calls=True,
+        )
+        await agent.aprint_response(
+            "How do I make a GET request with the requests library?", stream=True
+        )
+    finally:
+        await mcp_tools.close()
+
+asyncio.run(main())
+```
+
+Guárdalo como `main.py` y ejecútalo:
+
+```bash
+python main.py
+```
+
+<Notice type="info" title="OpenAIResponses vs OpenAIChat">
+La clase `OpenAIResponses` de Agno usa la Responses API de OpenAI (la sucesora de Chat Completions). La clase anterior `OpenAIChat` sigue funcionando pero apunta a la antigua API de Chat Completions. GPT-4.1-mini y GPT-4.1 fueron retirados de ChatGPT en febrero de 2026. `gpt-5.4-mini` es el modelo rápido y económico actual. Usa `gpt-5.4` para consultas más difíciles.
+</Notice>
+
+Si esto se ejecuta y ves llamadas a herramientas seguidas de la documentación, la integración funciona. Pasa al script interactivo completo.
+
+### Script interactivo completo
+
+Aquí está el script completo con un bucle interactivo, manejo de errores y un ciclo de vida de conexión limpio:
+
+```python
+import os
+import asyncio
+from agno.agent import Agent
+from agno.models.openai import OpenAIResponses
+from agno.tools.mcp import MCPTools
+
+if "OPENAI_API_KEY" not in os.environ:
+    raise ValueError("OPENAI_API_KEY environment variable is not set.")
+
+INSTRUCTIONS = '''
+You help users find up-to-date library documentation and code snippets via Context7.
+
+When a user asks about a library:
+1. Call `resolve-library-id` with `libraryName` set to the library name
+   and `query` set to the user's full question.
+2. Take the Context7 library ID it returns (slash-prefixed) and call
+   `query-docs` with `libraryId` set to that ID and `query` set to the
+   user's question/topic.
+3. Return the documentation and code snippets in clear, concise Markdown.
+Always explain which tools you called and show the results.
+'''
+
+async def main():
+    mcp_tools = MCPTools(command="npx -y @upstash/context7-mcp@latest")
+    await mcp_tools.connect()
+
+    try:
+        agent = Agent(
+            name="Agno Context7 Doc Agent",
+            role="An AI assistant that fetches up-to-date docs and code snippets using Context7 MCP.",
+            model=OpenAIResponses(id="gpt-5.4-mini"),
+            tools=[mcp_tools],
+            instructions=INSTRUCTIONS,
+            show_tool_calls=True,
+            add_state_in_messages=True,
+            markdown=True,
+        )
+        print("Agno Context7 Documentation Agent\n---------------------------------")
+        print("Ask about a library. Type 'exit' or 'quit' to stop.\n")
+        while True:
+            user_input = input("\nYou: ").strip()
+            if user_input.lower() in {"exit", "quit"}:
+                print("Goodbye!")
+                break
+            try:
+                await agent.aprint_response(user_input, stream=True)
+            except Exception as e:
+                print(f"\nError: {e}")
+    finally:
+        await mcp_tools.close()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted. Exiting.")
+```
+
+Algunas cosas a tener en cuenta sobre este script:
+
+- **`try/finally`** garantiza que `mcp_tools.close()` se ejecute incluso si el script se interrumpe. Sin esto, el subproceso `npx` puede quedar huérfano.
+- **Las instrucciones son agnósticas a las herramientas.** Hacen referencia a los nombres de las herramientas pero no fijan los esquemas de parámetros. Si Context7 renombra un parámetro en una versión futura, el agente seguirá funcionando porque lee las descripciones de las herramientas del servidor MCP.
+- **`add_state_in_messages=True`** permite al agente mantener el contexto de la conversación entre turnos.
+
+### Cómo pasar una clave de API de Context7
+
+Si tienes una clave de API de Context7 (gratis en context7.com/dashboard), pásala al servidor MCP mediante el parámetro `env`:
+
+```python
+mcp_tools = MCPTools(
+    command="npx -y @upstash/context7-mcp@latest",
+    env={"CONTEXT7_API_KEY": os.getenv("CONTEXT7_API_KEY")},
+)
+```
+
+Esto te da límites de peticiones más altos en el nivel gratuito.
+
+## Paso 4: Verifica que funciona
+
+Después de ejecutar el script completo, prueba con algunas consultas:
+
+```
+You: requests how to make a GET request
+```
+
+Deberías ver:
+
+1. El agente llama a `resolve-library-id` con `libraryName="requests"` y `query="how to make a GET request"`.
+2. Recibe un ID de biblioteca con prefijo de barra (algo como `/psf/requests`; el ID exacto depende del índice de Context7).
+3. Llama a `query-docs` con ese ID de biblioteca y la consulta.
+4. Devuelve en streaming la documentación formateada y los fragmentos de código.
+
+<Notice type="success" title="Funciona correctamente">
+Si ves las llamadas a herramientas listadas (con `show_tool_calls=True`) seguidas de la salida de documentación en Markdown, el agente funciona. Prueba algunas consultas más: `numpy array operations`, `fastapi dependency injection`, `react useEffect cleanup`.
+</Notice>
+
+Si el agente responde sin llamar a ninguna herramienta, comprueba que `tools=[mcp_tools]` esté configurado y que `mcp_tools.connect()` se haya completado sin errores.
+
+## Solución de problemas y costes
+
+<Accordion label="Error: npx: command not found" group="faq">
+Node.js no está instalado o no está en tu PATH. Instala Node 18+ con nvm:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+nvm install 22
+```
+
+Verifícalo con `node --version`.
+</Accordion>
+
+<Accordion label="Error ModuleNotFoundError: agno" group="faq">
+No instalaste el extra `agno[mcp]`, o el entorno virtual no está activo. Ejecuta:
+
+```bash
+source .venv/bin/activate
+uv pip install -U "agno[mcp]" openai
+```
+</Accordion>
+
+<Accordion label="Límite de peticiones / errores HTTP 429" group="faq">
+Has alcanzado el límite del nivel gratuito de Context7 (1.000 llamadas a la API al mes). Obtén una clave de API gratuita en context7.com/dashboard y pásala mediante el parámetro `env` como se muestra en el Paso 3. La clave aumenta tus límites de peticiones. Si necesitas más, el plan Pro cuesta 10 $/asiento/mes con 5.000 llamadas por asiento incluidas.
+</Accordion>
+
+<Accordion label="Errores de llamadas a herramientas / esquema incompatible" group="faq">
+Context7 se actualizó a v4.0.0 en agosto de 2026 con nuevos esquemas de herramientas. Si fijas `@upstash/context7-mcp@3.x` pero tus instrucciones hacen referencia a los nombres de herramientas de v4 (o viceversa), las llamadas a herramientas fallarán. La solución: usa `@latest` o fija `@4.0.3`, y mantén las instrucciones agnósticas a las herramientas como se muestra en el Paso 3.
+</Accordion>
+
+<Accordion label="Servidor MCP inaccesible" group="faq">
+El subproceso `npx` falló o Node es demasiado antiguo. Agno v2.7.3+ muestra un mensaje de error claro. Comprueba que `node --version` indique 18+ y que tengas una conexión a internet activa (la primera ejecución de `npx` descarga el paquete).
+</Accordion>
+
+<Accordion label="Subproceso residual / fuga de conexión" group="faq">
+Si no llamas a `mcp_tools.close()`, el subproceso stdio puede quedar colgado. Usa siempre el patrón `try/finally` que se muestra en el Paso 3. El gestor de contexto `async with MCPTools(command) as mcp_tools:` es una alternativa válida que lo gestiona automáticamente.
+</Accordion>
+
+### Precios de Context7
+
+| Plan | Llamadas a la API/mes | Precio |
+|---|---|---|
+| Gratuito | 1.000 (solo repositorios públicos) | 0 $ |
+| Pro | 5.000/asiento + 10 $/1.000 adicionales | 10 $/asiento/mes |
+
+El nivel gratuito se redujo a principios de 2026. Se recomienda encarecidamente una clave de API incluso en el plan gratuito, ya que te da límites de peticiones más altos. Consigue una en context7.com/dashboard.
+
+### Costes del modelo
+
+GPT-5.4-mini cuesta aproximadamente 0,75 $ por millón de tokens de entrada y 4,50 $ por millón de tokens de salida. Una consulta de documentación típica de ida y vuelta (2-3 llamadas a herramientas más la respuesta final) cuesta fracciones de céntimo. Para razonamientos complejos con varias bibliotecas, `gpt-5.4` está disponible pero es más caro.
+
+### Fijar versión vs @latest
+
+Usar `@latest` significa que una subida de versión mayor de Context7 puede cambiar los esquemas de las herramientas sin avisar. Esto ya ocurrió con v4.0.0. Para configuraciones reproducibles, fija una versión:
+
+```bash
+npx -y @upstash/context7-mcp@4.0.3
+```
+
+El compromiso: la versión fijada es estable pero no corrige errores automáticamente; `@latest` está al día pero puede romperse en las versiones mayores.
+
+<Notice type="warning" title="@latest puede romperse en las versiones mayores">
+Context7 v4.0.0 cambió los nombres de las herramientas y los esquemas de los parámetros. Si fijas `@3.x` y las instrucciones de tu agente hacen referencia a las herramientas de v4, nada funcionará. Mantén tus instrucciones genéricas (como se muestra en el Paso 3) para que sobrevivan a los cambios de esquema.
+</Notice>
+
+## Buenas prácticas y optimización
+
+- **Instrucciones agnósticas a las herramientas.** No fijes los nombres de los parámetros de las herramientas MCP en las instrucciones del agente: cambian entre versiones de Context7. Las instrucciones del Paso 3 son deliberadamente genéricas.
+- **Guarda en caché los IDs de las bibliotecas.** Si consultas la misma biblioteca repetidamente, guarda en caché el ID devuelto por `resolve-library-id` para ahorrarte una ida y vuelta.
+- **Manejo de errores.** Envuelve `aprint_response` en try/except. Registra los errores para depurar.
+- **Selección del modelo.** `gpt-5.4-mini` para la mayoría de las consultas (rápido, barato). `gpt-5.4` para razonamientos complejos con varias bibliotecas.
+- **Seguridad.** Valida las entradas del usuario. No pases texto sin procesar del usuario a comandos de shell.
+- **Telemetría.** Define `AGNO_TELEMETRY=false` para desactivar la telemetría de Agno si lo prefieres.
+- **Ciclo de vida de la conexión.** Cierra siempre las herramientas MCP con `close()` en un bloque `finally` para evitar fugas de subprocesos.
+
+Si estás decidiendo entre las herramientas MCP y las herramientas integradas de Agno, consulta [MCP vs herramientas nativas](/es/herramientas-mastra-vs-mcp/) para una comparación de cuándo tiene sentido cada enfoque.
+
+## Otros servidores MCP y el toolkit de Agno
+
+El ecosistema MCP ha crecido significativamente. Ahora hay cientos de servidores disponibles a través del [registro oficial de MCP](https://modelcontextprotocol.io). Puedes conectar Agno a cualquiera de ellos usando el mismo patrón `MCPTools`. Algunos ejemplos:
+
+- [BrightData MCP para web scraping](/es/guia-brightdata-mcp/): accede a datos web a escala a través de una interfaz MCP. [Bright Data](https://go.bitdoze.com/brightdata) proporciona la plataforma de datos web detrás de él.
+- Supabase MCP: consulta y gestiona tus bases de datos de Supabase.
+- Airtable MCP: interactúa con bases de Airtable de forma programática.
+
+Agno también tiene su propio toolkit con herramientas integradas (búsqueda web, operaciones con archivos, etc.) que no requieren MCP. Consulta la [documentación de herramientas de Agno](https://docs.agno.com/tools/) para la lista completa.
+
+Nota: `MultiMCPTools` (para conectar varios servidores MCP) está obsoleto. Usa varias instancias de `MCPTools` en su lugar, cada una con su propio ciclo de vida `connect()`/`close()`.
+
+## Conclusiones
+
+Agno más Context7 MCP te da un agente de IA con acceso a la documentación actual de las bibliotecas: sin datos de entrenamiento obsoletos ni llamadas a API alucinadas. El agente resuelve los nombres de las bibliotecas a IDs, consulta la documentación en vivo y devuelve los resultados formateados en streaming.
+
+Algunas formas de ampliar esto:
+
+- **Varios servidores MCP.** Añade más instancias de `MCPTools` para diferentes fuentes de documentación.
+- **Agentes especializados.** Crea agentes específicos de dominio para desarrollo web, ciencia de datos o DevOps. Consulta [Escuadrón de investigación con IA en Agno](/agno-squad/) para un enfoque multiagente.
+- **Agno Workflows.** Encadena este agente en un pipeline más grande con [Agno Workflows](/agno-workflow-writing-team/).
+- **Endpoint alojado.** Prescinde por completo de Node.js local usando el endpoint MCP alojado de Context7 en `https://mcp.context7.com/mcp`.
+- **Alternativa CLI.** Prueba la CLI `ctx7` (`npx ctx7 setup`) para una configuración sin MCP.
+- **Bot de Discord.** Envuelve este agente en un bot de Discord: consulta [cómo crear un bot de IA para Discord con Agno](/es/crear-tu-propio-agente-ia/).
+
+Si estás explorando otros frameworks de agentes, también puedes [crear un agente de IA con Mastra](/es/crear-agente-ia-mastra/) (basado en TypeScript).
+
+<Button text="Primeros pasos con los agentes de Agno" link="/agno-get-start/" variant="solid" color="blue" size="md" icon="arrow-right" />

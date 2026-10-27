@@ -1,0 +1,1686 @@
+---
+date: 2025-11-05
+lastmod: 2026-09-13T00:00:00Z
+translationKey: "docker-podman-ai-cli-tools-safe-environment"
+title: "Ejecuta herramientas CLI de IA en Docker o Podman de forma segura (Guía 2026)"
+meta_title: "Ejecuta herramientas CLI de IA en Docker o Podman: guía de configuración segura"
+description: "Ejecuta herramientas CLI de IA en Docker o Podman de forma segura: contenedores aislados para Claude Code, Amp, Gemini CLI y OpenCode, con configuraciones persistentes y cero riesgo para el host."
+image: "@assets/images/docker-podman-ai-cli-safe.webp"
+imageAlt: "Terminal ejecutando herramientas CLI de IA como Claude Code, Amp y Gemini CLI dentro de un contenedor Docker aislado"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "podman", "ai-tools"]
+canonical: "https://www.bitdoze.com/es/docker-podman-entorno-seguro-ia/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Los agentes de programación con IA pueden escribir archivos, ejecutar comandos de shell y leer todo lo que tu cuenta de usuario puede alcanzar. Esta guía te muestra cómo ejecutar herramientas CLI de IA en Docker o Podman dentro de un entorno seguro y aislado, de modo que un `rm -rf` alucinado o una instalación de dependencias fallida no puedan tocar tu máquina. Construirás una única imagen de contenedor que aloja Claude Code, Amp, Factory.ai, Gemini CLI, OpenCode y GitHub Copilot CLI, cada una con sus propias configuraciones, claves API y montajes de proyectos.
+
+<Notice type="info" title="¿Por qué poner las herramientas CLI de IA en contenedores?">
+Instalas una CLI, te pide un comando de shell, quiere ejecutar una compilación, decide hacer `npm install -g` de algo. Cada uno de esos pasos ocurre con los permisos de tu usuario en tu máquina. Un contenedor convierte eso en un sandbox desechable: el agente obtiene un shell y tú puedes borrarlo todo con `docker compose down` cuando termines.
+</Notice>
+
+La versión honesta del argumento: un contenedor es aislamiento, no una máquina virtual. Comparte tu kernel. Si montas tus claves SSH o el socket de Docker dentro, le has entregado tu host al agente de todos modos. Todo en esta guía está construido en torno a no hacer eso.
+
+Si quieres la misma idea pero con el agente viviendo en un servidor en lugar de tu portátil, nuestra [guía de despliegue de NanoClaw](/es/guia-despliegue-nanoclaw/) cubre un agente Claude aislado en contenedor en un VPS.
+
+## ¿Por qué ejecutar herramientas CLI de IA en Docker o Podman? (aislamiento y sandbox)
+
+<Notice type="warning" title="Lo único que realmente te rompe">
+No montes `$HOME` ni `$HOME/.ssh` en el contenedor del agente. Tampoco `~/.aws`, `~/.config/gcloud` o `/var/run/docker.sock`. Un agente con tu clave privada SSH y el socket de Docker es un agente con root en tu host y capacidad de llegar a todos los servidores a los que tú puedes llegar. Monta solo la carpeta del proyecto.
+</Notice>
+
+Ejecutar agentes de programación con IA en sandbox mediante contenedores te da seis cosas:
+
+<ListCheck>
+- **Aislamiento**: los comandos de shell del agente se ejecutan contra el sistema de archivos del contenedor, no contra tus dotfiles
+- **Reproducibilidad**: tú y un compañero ejecutáis versiones de herramientas idénticas byte a byte
+- **Seguridad**: prueba un agente experimental sin que reescriba tu `~/.zshrc` global
+- **Múltiples configuraciones**: contenedores separados para "clave API del trabajo" y "clave API personal"
+- **Reversión limpia**: `docker compose down` y el desastre desaparece
+- **Fijado de versiones**: fija Node y Python por proyecto en lugar de pelearte con nvm y pyenv
+</ListCheck>
+
+Lo que los contenedores **no** te dan:
+
+- **Aislamiento de kernel.** Una fuga del contenedor es un compromiso del host. Si necesitas una frontera de seguridad real, usa una VM (es la misma razón por la que ejecutamos código no confiable en VMs, no en contenedores).
+- **Protección de los datos montados.** El agente puede borrar cualquier cosa dentro de los directorios que montes. Monta un directorio de proyecto, no un directorio de proyectos que no puedas permitirte perder.
+- **Protección frente a la red.** El contenedor tiene salida a internet a menos que configures lo contrario. Un agente aún puede exfiltrar lo que pueda leer.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/w3NHf5vkMUk"
+  label="¡Ejecuta herramientas de IA de forma segura con Docker! (Amp, Factory AI, Gemini y más)"
+/>
+
+## Requisitos previos: Docker Desktop o Podman Desktop
+
+Elige un motor de contenedores. Docker si ya lo conoces, Podman si estás en Fedora o quieres rootless por defecto. Todo lo demás de esta guía funciona igual.
+
+<Tabs>
+<Tab name="Docker">
+
+**Docker Desktop** (Mac/Windows) o **Docker Engine** (Linux):
+
+- **macOS**: [Docker Desktop para Mac](https://www.docker.com/products/docker-desktop/)
+- **Windows**: [Docker Desktop para Windows](https://www.docker.com/products/docker-desktop/)
+- **Linux**: [Docker Engine](https://docs.docker.com/engine/install/)
+
+Docker Engine 29 (noviembre de 2025) convirtió el almacén de imágenes containerd en el predeterminado en instalaciones nuevas. Docker Desktop es gratis para uso personal; los planes de pago aplican a empresas más grandes.
+
+Verifica:
+
+```bash
+docker --version
+docker compose version
+```
+
+```text
+Docker version 29.7.2, build ...
+Docker Compose version v2.x.x
+```
+
+</Tab>
+<Tab name="Podman">
+
+**Podman Desktop** en Mac/Windows, paquetes nativos en Linux. Podman 6.0 (2026) eliminó el soporte de slirp4netns, CNI, iptables y cgroups v1. El modo rootful sigue funcionando bien: lo que cambió es que la red rootless ahora tiene exactamente una opción, pasta (varios Gbps en lugar de los antiguos ~570 Mbps a los que llegaba slirp4netns).
+
+```bash
+# Fedora/RHEL/CentOS
+sudo dnf install podman podman-compose
+
+# Ubuntu/Debian
+sudo apt install podman podman-compose
+
+# macOS (via Homebrew)
+brew install podman podman-compose
+```
+
+En macOS y Windows, inicializa la máquina de Podman:
+
+```bash
+podman machine init
+podman machine start
+```
+
+Verifica:
+
+```bash
+podman --version
+podman compose version
+podman info --format '{{.Host.Security.Rootless}}'
+```
+
+El último comando debería imprimir `true` en una instalación normal de Linux.
+
+</Tab>
+</Tabs>
+
+<Notice type="info" title="Versiones en esta guía">
+Verificado en septiembre de 2026: Docker Engine 29.7.2, Podman 6.1.0, imagen base `nikolaik/python-nodejs:python3.14-nodejs26-bookworm` (Node 26.8.2, Python 3.14.7). Los instaladores de CLI cambian a menudo: si una URL devuelve 404, consulta la documentación actual de la herramienta en lugar de asumir que el comando está mal.
+</Notice>
+
+## Arquitectura del contenedor: la imagen base con Python y Node
+
+Una imagen, dos runtimes. Casi todas las herramientas CLI de IA son un paquete de Node o un script de shell que además quiere Python para sus utilidades, y reconstruir esa pila por herramienta es tiempo perdido.
+
+Usamos `nikolaik/python-nodejs`, que incluye:
+
+<ListCheck>
+- **Node.js 26.8.2** con npm, además de Corepack para yarn y pnpm
+- **Python 3.14.7** con pip, pipenv, poetry y uv
+- **Un usuario no root `pn`** con UID 1000 y GID 1000
+- **Prompt Starship** para un shell legible dentro del contenedor
+- **Siembra automática** de dotfiles en el primer arranque, para que un home vacío montado por bind siga funcionando
+</ListCheck>
+
+¿Por qué Node 26 en lugar de Node 25? Node 25 era una línea impar, no LTS, y llegó a su fin de vida a mediados de 2026. Si construiste este contenedor desde una guía de 2025, tu imagen base está en un runtime EOL sin parches de seguridad. Esa es toda la razón para reconstruir.
+
+El detalle del UID 1000 importa más de lo que parece. Como `pn` es UID 1000, los archivos que crea dentro de un `~/websites` montado por bind quedan en propiedad del UID 1000 en tu host, que es tu usuario normal de Linux en la mayoría de las distribuciones. Si tu usuario del host no es 1000, lee la sección de permisos en la solución de problemas.
+
+## Paso 1: crea la estructura del proyecto
+
+<Notice type="info" title="Ejecutar el contenedor sin root">
+Todo lo que sigue se hace como tu usuario normal, incluido en Podman rootless, donde no interviene `sudo` en ningún punto del flujo de trabajo. Esa es la razón por la que aquí no aparecen los atajos del grupo docker ni el "simplemente ejecútalo como root".
+</Notice>
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+mkdir -p ~/docker-ai-tools ~/dev-home ~/websites
+cd ~/docker-ai-tools
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+mkdir -p ~/podman-ai-tools ~/dev-home ~/websites
+cd ~/podman-ai-tools
+```
+
+</Tab>
+</Tabs>
+
+Para qué sirve cada directorio:
+
+- `~/docker-ai-tools` o `~/podman-ai-tools`: los archivos de configuración del contenedor (Dockerfile, archivo compose, `.env`)
+- `~/dev-home`: el directorio home del usuario del contenedor, montado por bind. Guarda las configuraciones de las CLI, el estado de autenticación y las herramientas instaladas. Sobrevive a las reconstrucciones del contenedor.
+- `~/websites`: tus proyectos reales, montados por bind en el contenedor. Es lo único que el agente debería poder tocar.
+
+<Notice type="warning" title="No hagas chmod 777 a estos directorios">
+Muchas guías antiguas de contenedores te dicen que ejecutes `chmod 777` en los puntos de montaje para arreglar errores de permisos. No lo hagas. Hace que cada archivo de tu directorio de proyecto sea escribible por cualquiera en la máquina.
+
+El usuario del contenedor es UID 1000 / GID 1000, así que en Linux simplemente iguala la propiedad:
+
+```bash
+sudo chown -R 1000:1000 ~/dev-home ~/websites
+```
+
+Si tu usuario del host no es UID 1000, usa `$(id -u):$(id -g)` en lugar de los números literales y lee la sección de solución de problemas: te encontrarás con el desajuste de UID en la otra dirección.
+
+En macOS y Windows, Docker Desktop y Podman Desktop se encargan del mapeo por ti. Ni chmod ni chown.
+</Notice>
+
+## Paso 2: crea el Containerfile/Dockerfile
+
+<Notice type="success" title="Cambio respecto a la versión de 2025">
+La etiqueta de la imagen base pasó de `python3.14-nodejs25-bookworm` a `python3.14-nodejs26-bookworm`. Node 25 está en fin de vida. Si copias una sola cosa de esta actualización, copia la línea `FROM`.
+</Notice>
+
+<Tabs>
+<Tab name="Docker">
+
+Crea `~/docker-ai-tools/Dockerfile`:
+
+```dockerfile
+# Dockerfile
+# Base image with Node.js 26, Python 3.14, and package managers
+FROM nikolaik/python-nodejs:python3.14-nodejs26-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+# The image already has a non-root user "pn" (UID 1000)
+USER root
+
+# Install system dependencies first
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    jq \
+    curl \
+    vim \
+    nano \
+    htop \
+    tree \
+    ripgrep \
+    rsync \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+# This works even when /home/pn is bind-mounted from the host
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# Minimal Bash configuration with Starship
+RUN cat > /opt/skeleton/.bashrc <<'BRC'
+# Bash initialized for pn user
+# Enable Node Corepack and Yarn
+corepack enable >/dev/null 2>&1 || true
+corepack prepare yarn@stable --activate >/dev/null 2>&1 || true
+
+# Quality of life alias
+alias python=python3
+
+# Initialize Starship prompt
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+fi
+BRC
+
+# Entrypoint script to seed dotfiles on first run
+RUN cat > /usr/local/bin/boot.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Seed ~/.bashrc if missing (e.g. empty bind-mounted /home/pn)
+if [ ! -f "/home/pn/.bashrc" ]; then
+  cp /opt/skeleton/.bashrc /home/pn/.bashrc
+fi
+
+# Seed Starship config if missing
+mkdir -p /home/pn/.config
+if [ ! -f "/home/pn/.config/starship.toml" ]; then
+  cp /opt/skeleton/.config/starship.toml /home/pn/.config/starship.toml
+fi
+
+# Default to interactive bash if no command was provided
+if [ $# -eq 0 ]; then
+  set -- bash
+fi
+exec "$@"
+SH
+RUN chmod +x /usr/local/bin/boot.sh
+
+# Switch back to the non-root user
+USER pn
+WORKDIR /home/pn/app
+
+ENTRYPOINT ["/usr/local/bin/boot.sh"]
+CMD ["bash"]
+```
+
+</Tab>
+<Tab name="Podman">
+
+Crea `~/podman-ai-tools/Containerfile`. El contenido es idéntico al Dockerfile anterior: Podman lee Dockerfiles sin problema, solo usa el nombre `Containerfile` por convención.
+
+```dockerfile
+# Containerfile
+# Base image with Node.js 26, Python 3.14, and package managers
+FROM nikolaik/python-nodejs:python3.14-nodejs26-bookworm
+
+SHELL ["/bin/bash", "-c"]
+
+# The image already has a non-root user "pn" (UID 1000)
+USER root
+
+# Install system dependencies first
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    jq \
+    curl \
+    vim \
+    nano \
+    htop \
+    tree \
+    ripgrep \
+    rsync \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Starship prompt system-wide
+# This works even when /home/pn is bind-mounted from the host
+RUN curl -sS https://starship.rs/install.sh | sh -s -- -y \
+ && mkdir -p /opt/skeleton/.config \
+ && starship preset catppuccin-powerline -o /opt/skeleton/.config/starship.toml
+
+# Minimal Bash configuration with Starship
+RUN cat > /opt/skeleton/.bashrc <<'BRC'
+# Bash initialized for pn user
+# Enable Node Corepack and Yarn
+corepack enable >/dev/null 2>&1 || true
+corepack prepare yarn@stable --activate >/dev/null 2>&1 || true
+
+# Quality of life alias
+alias python=python3
+
+# Initialize Starship prompt
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+fi
+BRC
+
+# Entrypoint script to seed dotfiles on first run
+RUN cat > /usr/local/bin/boot.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Seed ~/.bashrc if missing (e.g. empty bind-mounted /home/pn)
+if [ ! -f "/home/pn/.bashrc" ]; then
+  cp /opt/skeleton/.bashrc /home/pn/.bashrc
+fi
+
+# Seed Starship config if missing
+mkdir -p /home/pn/.config
+if [ ! -f "/home/pn/.config/starship.toml" ]; then
+  cp /opt/skeleton/.config/starship.toml /home/pn/.config/starship.toml
+fi
+
+# Default to interactive bash if no command was provided
+if [ $# -eq 0 ]; then
+  set -- bash
+fi
+exec "$@"
+SH
+RUN chmod +x /usr/local/bin/boot.sh
+
+# Switch back to the non-root user
+USER pn
+WORKDIR /home/pn/app
+
+ENTRYPOINT ["/usr/local/bin/boot.sh"]
+CMD ["bash"]
+```
+
+</Tab>
+</Tabs>
+
+### Ejecutar como usuario no root con `USER pn`
+
+La línea `USER pn` del final es la relevante para la seguridad. Todo lo instalado en tiempo de ejecución, cada archivo que el agente crea y cada proceso que el agente lanza se ejecuta como UID 1000 dentro del contenedor, no como root. Los pasos de instalación siguen usando `USER root` temporalmente porque necesitas root para ejecutar `apt-get`, pero la imagen final y el contenedor en ejecución son no root.
+
+Eso importa para el sandbox porque la mayoría de las fugas de contenedores dependen de root dentro del contenedor más un bug del kernel o una mala configuración (un socket montado, un flag privilegiado, un `--cap-add`). Ejecutar como UID 1000 elimina el camino fácil.
+
+Si quieres el recorrido en profundidad de lo que los usuarios no root dentro de los contenedores te protegen y de lo que no, tenemos una guía aparte sobre [ejecutar un contenedor como usuario no root](/add-users-to-docker-container/).
+
+Dos excepciones que conviene conocer:
+
+- **Puertos por debajo de 1024.** Un usuario no root no puede vincularlos dentro del contenedor. Los servidores de desarrollo que ejecutarías junto a un agente (3000, 4321, 5173, 8080) están todos por encima de 1024, así que rara vez molesta.
+- **Instalación de paquetes del sistema.** `apt-get install` necesita root. Por eso la sección "instalar un comando que falta" más abajo usa `docker exec --user root`.
+
+### Qué hace este Containerfile
+
+<ListCheck>
+- **Parte de `nikolaik/python-nodejs`**: Node 26.8.2 y Python 3.14.7 ya configurados
+- **Instala lo esencial y aburrido**: git, jq, curl, vim, htop, tree, ripgrep, rsync, herramientas de compilación
+- **Instala Starship**: un prompt que muestra la rama de git y la versión de Node/Python, para que sepas en qué contenedor estás
+- **Siembra configuraciones esqueleto**: `boot.sh` copia dotfiles en un home vacío montado por bind en el primer arranque
+- **Se ejecuta como no root**: `USER pn`, UID 1000 / GID 1000
+- **Mantiene tu home real fuera**: nada en esta imagen referencia `$HOME` del host
+</ListCheck>
+
+## Paso 3: crea la configuración de Compose
+
+<Tabs>
+<Tab name="Docker">
+
+Crea `~/docker-ai-tools/docker-compose.yml`:
+
+```yaml
+services:
+  ai-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-tools:latest
+    container_name: ai-tools
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      - TZ=Europe/Bucharest      # Change to your timezone
+    env_file:
+      - .env                     # API keys - do not commit this file
+    volumes:
+      - ${HOME}/dev-home:/home/pn
+      - ${HOME}/websites:/home/pn/app/websites
+    security_opt:
+      - no-new-privileges:true
+    # Uncomment only if a tool needs an OAuth callback or a local server
+    # ports:
+    #   - "127.0.0.1:3000:3000"  # bind to localhost, not 0.0.0.0
+```
+
+</Tab>
+<Tab name="Podman">
+
+Crea `~/podman-ai-tools/podman-compose.yml`:
+
+```yaml
+services:
+  ai-tools:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: ai-tools:latest
+    container_name: ai-tools
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      - TZ=Europe/Bucharest      # Change to your timezone
+    env_file:
+      - .env                     # API keys - do not commit this file
+    volumes:
+      - ${HOME}/dev-home:/home/pn:z
+      - ${HOME}/websites:/home/pn/app/websites:z
+    security_opt:
+      - no-new-privileges:true
+    # Uncomment only if a tool needs an OAuth callback or a local server
+    # ports:
+    #   - "127.0.0.1:3000:3000"  # bind to localhost, not 0.0.0.0
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="info" title="Montaje de volúmenes explicado">
+- **`~/dev-home:/home/pn`**: configuraciones de usuario, estado de autenticación de las CLI, dotfiles. Persiste entre reconstrucciones.
+- **`~/websites:/home/pn/app/websites`**: tus proyectos. Edítalos desde el host, el agente los edita desde dentro.
+- **`:z` (Podman en Linux)**: reetiqueta el directorio para SELinux. Usa `:z` para directorios compartidos, `:Z` para los privados. Omítelo por completo fuera de Linux o si SELinux no está en modo enforcing.
+- **No hace falta `:rw`**: lectura-escritura es el valor por defecto. Solo escribes `:ro` cuando quieres quitar el acceso de escritura.
+</Notice>
+
+Valida el archivo antes de compilar. Compose ignora silenciosamente las erratas en algunos campos:
+
+```bash
+docker compose config
+# or: podman compose config
+```
+
+Si el YAML combinado se imprime y el servicio `ai-tools` tiene ambos volúmenes, todo bien. Si falta un volumen en la salida, tienes un problema de indentación.
+
+### Cuándo exponer puertos para callbacks de OAuth
+
+La mayoría de las herramientas CLI de IA se autentican con una clave API en una variable de entorno o con un flujo de código de dispositivo (imprimen una URL, pegas un código). Ninguna de las dos necesita un puerto.
+
+Añade un puerto solo cuando una herramienta abre un listener HTTP local para una redirección OAuth en `localhost`:
+
+<ListCheck>
+- Una herramienta CLI requiere **autenticación OAuth** mediante un callback en `localhost`
+- Estás ejecutando un **servidor de desarrollo local** dentro del contenedor que quieres abrir en el navegador del host
+- Una herramienta incluye una **interfaz web** para iniciar sesión o configurar
+</ListCheck>
+
+Vincula el puerto publicado a `127.0.0.1`, no a todas las interfaces. `"3000:3000"` publica en todas las interfaces que tiene el host, que en un VPS significa internet. `"127.0.0.1:3000:3000"` no.
+
+## Paso 4: compila e inicia el contenedor
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+cd ~/docker-ai-tools
+
+# Build the image
+docker compose build
+
+# Start the container detached
+docker compose up -d
+
+# Enter the container
+docker exec -it ai-tools bash
+```
+
+Para detenerlo:
+
+```bash
+docker compose down
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+cd ~/podman-ai-tools
+
+# Ensure the Podman machine is running (macOS/Windows only)
+podman machine start
+
+# Build the image
+podman compose build
+
+# Start the container detached
+podman compose up -d
+
+# Enter the container
+podman exec -it ai-tools bash
+```
+
+Para detenerlo:
+
+```bash
+podman compose down
+```
+
+</Tab>
+</Tabs>
+
+Verifica que realmente está en ejecución:
+
+```bash
+docker compose ps
+```
+
+```text
+NAME       IMAGE            COMMAND                  SERVICE   STATUS
+ai-tools   ai-tools:latest  "/usr/local/bin/boot.…"  ai-tools  Up 12 seconds
+```
+
+`Up` es lo que quieres. `Restarting` en bucle significa que el entrypoint está fallando: consulta la solución de problemas.
+
+La primera compilación tarda unos minutos (descarga una imagen base de ~580 MB). Las siguientes van por caché. Usa `--no-cache` solo cuando hayas cambiado de verdad la imagen base; tira todas las capas y vuelve a descargar todo.
+
+## Paso 5: verifica el entorno del contenedor
+
+Dentro del contenedor, comprueba que las versiones son las que prometía la etiqueta:
+
+```bash
+# You should not be root
+whoami
+id -u
+# Expected: pn
+# Expected: 1000
+
+# Node and package managers
+node -v            # v26.8.2
+npm -v             # 11.x
+yarn -v            # 4.x (via Corepack)
+
+# Python and package managers
+python3 -V         # Python 3.14.7
+pip --version      # 25.x
+poetry --version
+uv --version
+
+# Shell tooling
+which starship
+# Expected: /usr/local/bin/starship
+
+# Mounts
+ls -la ~/app/websites
+touch ~/app/websites/.mount-test && ls -la ~/app/websites/.mount-test
+```
+
+Ese `touch` es la prueba que importa. Si falla, el montaje está mal y solo te enterarías más tarde, cuando el agente escriba un archivo en un directorio local del contenedor que desaparece en el próximo `docker compose down`.
+
+<Notice type="success" title="Verifica también desde el host">
+```bash
+ls -la ~/websites/.mount-test
+```
+
+Si el archivo existe en tu host, el bind mount funciona en ambas direcciones. Bórralo y sigue adelante:
+
+```bash
+rm ~/websites/.mount-test
+```
+</Notice>
+
+## Paso 6: instala las herramientas CLI de IA (Claude Code, Amp, Gemini CLI, OpenCode)
+
+¿No sabes qué agente elegir? Comparamos [las mejores herramientas y agentes de programación con IA en 2026](/es/herramientas-codificacion-ia/). Instala más de una: pesan 10-100 MB cada una y no hay ninguna desventaja en tener Claude Code, Amp y OpenCode lado a lado.
+
+A partir de aquí, todo se ejecuta **dentro** del contenedor, así que los comandos son idénticos para Docker y Podman. Entra una vez:
+
+```bash
+docker exec -it ai-tools bash   # or: podman exec -it ai-tools bash
+```
+
+<Notice type="info" title="Si un instalador necesita root">
+Algunos instaladores escriben en `/usr/local/bin` y fallan como `pn`. Sal y vuelve a entrar como root, ejecuta solo esa instalación y regresa:
+
+```bash
+# Docker
+docker exec -it --user root ai-tools bash
+# Podman
+podman exec -it --user root ai-tools bash
+```
+
+Instala la herramienta, luego haz `exit` y vuelve a entrar como el usuario normal `pn`. Las herramientas instaladas como root en `/usr/local/bin` siguen en el PATH para `pn`, porque la lectura y ejecución están permitidas para todos ahí. Todo lo instalado en el home de root se pierde para ti, así que prefiere los scripts de instalación y rutas tipo `sudo npm install -g` en lugar de descargas manuales.
+</Notice>
+
+### Instala Claude Code en el contenedor
+
+El instalador nativo es el que debes usar. No le importa tu versión de Node y se actualiza solo.
+
+```bash
+# Native installer (recommended)
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Verify
+claude --version
+```
+
+Si la configuración de Node de tu imagen base choca con el binario nativo, la vía npm sigue funcionando:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude --version
+```
+
+Dónde acaban las cosas: el instalador nativo pone el binario en `~/.local/bin` por defecto, así que sobrevive a una reconstrucción del contenedor solo porque `~/.local` vive dentro del `/home/pn` montado por bind. Esa es la razón de que exista el montaje del home.
+
+### Instala Amp y Factory.ai
+
+```bash
+# Amp
+curl -fsSL https://ampcode.com/install.sh | bash
+
+# Factory.ai CLI
+curl -fsSL https://app.factory.ai/cli | sh
+
+# Verify
+amp --version
+droid --version
+```
+
+Amp retiró su plan gratuito durante 2025, así que revisa los precios actuales antes de construir un flujo de trabajo alrededor. Contexto sobre cómo funciona en el editor: [Amp Code, agente de programación con IA](/amp-code-free-ai-coding-agent/).
+
+La CLI Droid de Factory es la otra que vale la pena instalar aquí, sobre todo si quieres apuntarla a tus propios endpoints de modelos en lugar de una suscripción empaquetada:
+
+<Button text="Factory Droid CLI" link="https://go.bitdoze.com/droid-cli" variant="solid" color="green" size="md" icon="arrow-right" />
+
+Puedes configurar Factory para que use tus propios proveedores (incluido un Ollama local): el ejemplo de archivo de configuración está más abajo.
+
+### Instala Gemini CLI, OpenCode y GitHub Copilot CLI
+
+```bash
+# Gemini CLI
+npm install -g @google/gemini-cli
+
+# GitHub Copilot CLI (needs a Copilot subscription)
+npm install -g @github/copilot
+
+# OpenCode
+curl -fsSL https://opencode.ai/install | bash
+
+# Verify all three
+gemini --version
+copilot --version
+opencode --version
+```
+
+Dos notas de la versión de 2025 de esta guía:
+
+- **GitHub Copilot CLI cambió de paquete.** El antiguo paquete beta `@githubnext/github-copilot-cli` está muerto. El actual es `@github/copilot`. Si ves una advertencia de obsolescencia, estás en el paquete viejo.
+- **OpenCode se instala en `~/.opencode/bin`** en las versiones recientes, no en `/usr/local/bin`. Si te aparece `opencode: command not found` tras una instalación limpia, añade `~/.opencode/bin` a tu `PATH` en el `.bashrc` sembrado.
+
+¿Quieres saltarte la gestión de seis claves API? La suscripción OpenCode Go agrupa un montón de modelos detrás de una sola clave, que es la forma más barata de ejecutar un agente en contenedor sin una cartera llena de tokens:
+
+<Button text="OpenCode Go" link="https://go.bitdoze.com/opencode-go" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+Configuración completa, incluido el inicio de sesión en Zen y la configuración de proveedores: [guía de configuración de OpenCode](/es/guia-configuracion-opencode/). Para los detalles de Copilot (modelos, límites del plan, el nivel de $10), consulta nuestra [configuración de GitHub Copilot Pro CLI](/github-copilot-complete-guide/).
+
+Y si prefieres enrutar Claude Code, Codex y Gemini CLI a través de un único endpoint con una clave y facturación por modelo, para eso sirve un agregador:
+
+<Button text="Agent Router" link="https://go.bitdoze.com/agentrouter" variant="solid" color="gray" size="md" icon="arrow-right" />
+
+### Autenticación con las herramientas CLI (OAuth y claves API)
+
+```bash
+# Device-code or browser flows
+claude          # then /login inside the session
+amp login
+droid           # then /login inside the session
+opencode auth login
+copilot         # then /login
+gemini          # follow the auth prompt
+```
+
+<Notice type="warning" title="OAuth dentro de un contenedor">
+El OAuth basado en navegador falla cuando la herramienta espera un callback en `localhost` y el puerto no es alcanzable desde el navegador de tu host. Tres soluciones, en orden de preferencia:
+
+1. Prefiere el **flujo de código de dispositivo** (imprime una URL y un código): no necesita ningún puerto.
+2. **Copia la URL** desde el terminal y pégala en el navegador del host. La mayoría de las herramientas lo aceptan.
+3. **Publica el puerto del callback** en `127.0.0.1` en el archivo compose, luego `docker compose up -d` para recrear el contenedor.
+
+Si la herramienta insiste en un puerto, vincúlalo a loopback:
+
+```yaml
+ports:
+  - "127.0.0.1:3000:3000"
+```
+
+El estado de autenticación vive en `~/dev-home`, así que te autenticas una vez por vida del token y lo mantienes entre reconstrucciones. Si borras `~/dev-home`, tendrás que iniciar sesión de nuevo en todo.
+</Notice>
+
+## Trabajar con proyectos
+
+`~/websites` en tu host es `/home/pn/app/websites` dentro del contenedor. Eso significa:
+
+<ListCheck>
+- **Tú editas archivos en el host** con Zed, VS Code, Cursor o vim
+- **El agente edita los mismos archivos** dentro del contenedor
+- **Los cambios aparecen en ambos lados** al instante (los bind mounts son en vivo, no copias sincronizadas)
+- **Git funciona desde cualquiera de los dos lados** sobre el mismo directorio `.git`
+</ListCheck>
+
+### Flujo de trabajo de ejemplo: el host edita, el contenedor ejecuta
+
+```bash
+# On the host
+cd ~/websites
+mkdir my-new-project && cd my-new-project
+git init
+
+# Inside the container
+cd ~/app/websites/my-new-project
+amp "Create a Next.js app with TypeScript"
+```
+
+Una trampa: **no ejecutes el mismo gestor de paquetes en ambos lados del montaje.** Si el host ejecuta `npm install` y el contenedor ejecuta `pnpm install` en el mismo directorio, se pelean por `node_modules`. Elige un lado como autoridad: dentro del contenedor es la opción sensata, porque las versiones del runtime están fijadas ahí.
+
+## Configurar las herramientas de IA dentro del contenedor
+
+Las configuraciones persisten porque `~/dev-home` se asigna a `/home/pn`. Edítalas desde cualquiera de los dos lados; una sesión de nano dentro del contenedor y `code ~/dev-home/...` en el host tocan el mismo archivo.
+
+### Ejemplo: modelos personalizados en Factory.ai
+
+```bash
+# Inside the container
+nano ~/.factory/config.json
+```
+
+```json
+{
+  "custom_models": [
+    {
+      "model_display_name": "Claude Sonnet 4.5",
+      "model": "claude-sonnet-4-5-20250929",
+      "base_url": "https://api.anthropic.com",
+      "api_key": "your-api-key-here",
+      "provider": "anthropic",
+      "max_tokens": 8192
+    },
+    {
+      "model_display_name": "GPT-5 Codex",
+      "model": "gpt-5-codex",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "your-openai-key-here",
+      "provider": "openai",
+      "max_tokens": 8192
+    },
+    {
+      "model_display_name": "Qwen 3 (Local Ollama)",
+      "model": "qwen3:14b",
+      "base_url": "http://ollama:11434/v1",
+      "api_key": "ollama",
+      "provider": "generic-chat-completion-api",
+      "max_tokens": 4096
+    }
+  ]
+}
+```
+
+Fíjate en el `base_url` de Ollama: `http://ollama:11434/v1`, no `http://localhost:11434/v1`. Dentro de un contenedor, `localhost` es el propio contenedor. Si ejecutas Ollama como un servicio compose aparte (recomendado, ver abajo), el nombre del servicio es el hostname.
+
+<Accordion label="Tipos de proveedores de Factory.ai explicados" group="factory-providers">
+
+**Tres tipos de proveedores:**
+
+1. **`anthropic`**: modelos Claude vía la API de Anthropic
+   - Base URL: `https://api.anthropic.com`
+   - Usa la Messages API (`v1/messages`)
+
+2. **`openai`**: modelos GPT vía la API de OpenAI
+   - Base URL: `https://api.openai.com/v1`
+   - Usa la Responses API (obligatoria para GPT-5)
+
+3. **`generic-chat-completion-api`**: todo lo compatible con OpenAI
+   - Funciona con OpenRouter, Fireworks, Together AI, Ollama, vLLM y la mayoría de los agregadores
+   - Usa el formato OpenAI Chat Completions
+
+Si un modelo devuelve 404, la causa habitual es haber elegido el tipo de proveedor equivocado para la forma de API de ese endpoint, no una clave mala.
+
+</Accordion>
+
+### Acceder a los archivos del host desde el contenedor
+
+```bash
+# Inside the container
+ls -la ~/.factory/     # Factory.ai configs
+ls -la ~/.amp/         # Amp configs
+ls -la ~/.config/      # everything else
+cat ~/.bashrc          # shell config
+```
+
+Edita los mismos archivos desde el host:
+
+```bash
+# On the host
+code ~/dev-home/.factory/config.json
+code ~/dev-home/.bashrc
+code ~/dev-home/.config/starship.toml
+```
+
+Los cambios tienen efecto en el siguiente shell dentro del contenedor (o al instante, para los archivos de configuración que las herramientas releen en cada petición).
+
+<Notice type="warning" title="El problema de los archivos 0600">
+Los archivos de configuración que creas en el host como tu usuario son legibles por el UID 1000 dentro del contenedor, porque es el mismo UID en el caso común. Si tu UID del host no es 1000, un archivo con modo `0600` propiedad de, por ejemplo, UID 1002 será ilegible para `pn`. Arregla la propiedad cuando te lo encuentres:
+
+```bash
+sudo chown 1000:1000 ~/dev-home/.factory/config.json
+```
+
+No lo arregles con `chmod 666`. Las claves API no pertenecen a archivos legibles por todos.
+</Notice>
+
+## Configuración avanzada
+
+### Ejecutar modelos de IA locales con Ollama
+
+La versión de 2025 de esta guía te decía que instalaras Ollama *dentro* del contenedor del agente. No lo hagas. Infla la imagen del agente y los pesos de los modelos acaban en un volumen que se borra al reconstruir. Ejecuta Ollama como su propio servicio y deja que el agente le hable por la red de compose.
+
+Añade un segundo servicio a tu archivo compose:
+
+```yaml
+services:
+  ai-tools:
+    # ... your existing config ...
+    environment:
+      - TZ=Europe/Bucharest
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ${HOME}/ollama:/root/.ollama
+    # Only publish this if you want to reach it from the host too.
+    # Don't publish it on a VPS.
+    # ports:
+    #   - "127.0.0.1:11434:11434"
+```
+
+Luego descarga un modelo y apunta una herramienta a él:
+
+```bash
+docker compose up -d
+docker exec -it ollama ollama pull qwen3:14b
+docker exec -it ollama ollama list
+
+# From inside ai-tools, confirm the name resolves
+docker exec -it ai-tools curl -s http://ollama:11434/api/tags | jq '.models[].name'
+```
+
+<Notice type="warning" title="Haz cuentas de RAM antes de empezar">
+Un modelo de 14B a Q4 necesita aproximadamente 9-10 GB de RAM para cargar y ejecutarse. Un modelo de 7B necesita unos 5 GB. En un VPS de 4 GB se quedará sin memoria (OOM) y se llevará el contenedor por delante. Pon un límite de memoria al servicio de Ollama para que no pueda hundir al host entero:
+
+```yaml
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+```
+</Notice>
+
+Si quieres la pila completa de Ollama con una interfaz web, nuestra guía de [autoalojar Ollama con Docker Compose](/es/ollama-docker-instalacion/) cubre Open WebUI, la gestión de modelos y la configuración de GPU.
+
+### Configuraciones con varios contenedores
+
+Contenedores separados por contexto evitan que las claves API y los contextos se mezclen:
+
+```text
+~/docker-ai-tools-personal/
+  ├── docker-compose.yml     # container_name: ai-tools-personal
+  ├── Dockerfile
+  └── .env                   # personal keys
+
+~/docker-ai-tools-work/
+  ├── docker-compose.yml     # container_name: ai-tools-work
+  ├── Dockerfile
+  └── .env                   # work keys, separate ~/websites mount
+```
+
+Cambia el `container_name` y las rutas de montaje en cada archivo. Dos contenedores con el mismo `container_name` se negarán a arrancar: Compose falla con un conflicto de nombres, que al menos es un fallo claro.
+
+### Compartir contenedores con el equipo
+
+```bash
+cd ~/docker-ai-tools
+git init
+```
+
+Crea un `.gitignore` antes del primer commit:
+
+```bash
+cat > .gitignore <<'EOF'
+.env
+dev-home/
+websites/
+EOF
+
+git add Dockerfile docker-compose.yml .gitignore
+git commit -m "Add AI tools container config"
+```
+
+<Notice type="error" title="Nunca hagas commit del archivo .env">
+El archivo `.env` contiene claves API vivas. Si hiciste commit de una por accidente, la solución es rotar las claves: quitar el archivo en un commit posterior no lo quita del historial. Añade `.env` al `.gitignore` antes del primer commit, no después.
+</Notice>
+
+Un compañero ejecuta entonces:
+
+```bash
+git clone <your-repo>
+cd <your-repo>
+cp .env.example .env    # fill in their own keys
+mkdir -p ~/dev-home ~/websites
+docker compose up -d
+docker exec -it ai-tools bash
+```
+
+El mismo Node, el mismo Python, las mismas herramientas instaladas. Esa es la parte de entorno de desarrollo reproducible de todo esto, y es la razón por la que hacer commit del Dockerfile vale esos cinco minutos.
+
+## Integración con el IDE
+
+El contenedor es donde se ejecutan las herramientas. Tu editor se queda en el host, donde ya viven tu renderizado de fuentes, tus extensiones y tus atajos de teclado.
+
+### VS Code Dev Containers para agentes de IA
+
+Dev Containers permite a VS Code ejecutar su servidor dentro del mismo contenedor que usa el agente, de modo que el terminal integrado, las tareas y el agente ven runtimes idénticos. Crea `~/docker-ai-tools/.devcontainer/devcontainer.json`:
+
+```json
+{
+  "name": "ai-tools",
+  "dockerComposeFile": ["../docker-compose.yml"],
+  "service": "ai-tools",
+  "workspaceFolder": "/home/pn/app/websites",
+  "remoteUser": "pn",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": ["esbenp.prettier-vscode", "dbaeumer.vscode-eslint"]
+    }
+  }
+}
+```
+
+Pasos:
+
+1. Instala la extensión **Dev Containers** (el antiguo nombre "Remote - Containers" ya no existe).
+2. Abre la carpeta `~/docker-ai-tools` en VS Code.
+3. Ejecuta **Dev Containers: Reopen in Container**.
+
+Si VS Code se queja de que el contenedor ya existe, lo tienes en ejecución desde `docker compose up -d`. Ejecuta primero `docker compose down`: Dev Containers quiere ser dueño del ciclo de vida.
+
+Para una alternativa basada en terminal en macOS orientada a flujos de trabajo con agentes, mira nuestra guía del [terminal cmux para agentes de programación con IA](/es/terminal-cmux/). Y si prefieres tener la IA dentro del propio editor en lugar de en un shell de contenedor:
+
+<Button text="Windsurf" link="https://go.bitdoze.com/windsurf" variant="outline" color="purple" size="md" icon="arrow-right" />
+
+### Edición directa de archivos desde el host
+
+La opción más simple, y la que la mayoría de la gente acaba usando:
+
+```bash
+# On the host
+code ~/websites/my-project
+
+# In the container, the agent sees the changes immediately
+cd ~/app/websites/my-project
+amp "Refactor this component"
+```
+
+Los bind mounts no sincronizan: son el mismo inodo. No hay paso de "esperar a que sincronice" ni posibilidad de una copia desfasada en un lado.
+
+## Solución de problemas
+
+<Accordion label="Permission denied en ~/dev-home o ~/websites" group="troubleshooting">
+
+**En Linux, la solución es casi siempre un desajuste de UID.** Comprueba ambos lados:
+
+```bash
+# On the host
+id -u
+ls -lan ~/websites | head -3
+
+# In the container
+docker exec -it ai-tools id
+```
+
+El usuario del contenedor `pn` es UID 1000. Si tu usuario del host también es 1000, simplemente arregla la propiedad una vez:
+
+```bash
+sudo chown -R 1000:1000 ~/dev-home ~/websites
+```
+
+Si tu UID del host es distinto, o haces chown del montaje a 1000 como arriba, o cambia el `user:` del archivo compose a tu UID del host y define `HOME`:
+
+```yaml
+    user: "1002:1002"
+    environment:
+      - HOME=/home/pn
+```
+
+**En Linux con SELinux**, añade la etiqueta al volumen (Podman lo necesita más a menudo que Docker):
+
+```bash
+chcon -Rt container_file_t ~/dev-home ~/websites
+```
+
+O usa `:z` / `:Z` en la lista de volúmenes del compose en lugar de reetiquetar manualmente.
+
+**En macOS y Windows**, esto es casi siempre un problema de rutas, no de permisos. Confirma que los directorios existen en el host y que no usaste `~` dentro del archivo compose: `~/websites` en YAML no lo expande Compose, por eso los ejemplos usan `${HOME}/websites`.
+
+</Accordion>
+
+<Accordion label="El contenedor no arranca o se reinicia constantemente" group="troubleshooting">
+
+Mira los logs primero, siempre:
+
+<Tabs>
+<Tab name="Docker">
+```bash
+docker compose logs --tail 50
+docker logs ai-tools
+```
+</Tab>
+<Tab name="Podman">
+```bash
+podman compose logs --tail 50
+podman logs ai-tools
+```
+</Tab>
+</Tabs>
+
+Causas habituales:
+
+- **Puerto ya en uso**: `Error starting userland proxy: listen tcp4 0.0.0.0:3000: bind: address already in use`. Encuentra al dueño con `ss -ltnp | grep 3000` y deténlo o cambia el puerto publicado.
+- **Fallo al descargar la imagen**: normalmente una errata en la etiqueta de la imagen base o falta de red. Confirma que la etiqueta existe en [la página de etiquetas de python-nodejs](https://hub.docker.com/r/nikolaik/python-nodejs/tags).
+- **Fallo al montar el volumen**: la ruta del host no existe. Compose crea los directorios que faltan cuando el *origen* es una ruta relativa, pero una ruta `${HOME}/...` inexistente puede producir un error confuso. `mkdir -p ~/dev-home ~/websites` y reintenta.
+- **Estado `Exited (0)`**: el entrypoint se ejecutó y bash salió porque no hay TTY. Asegúrate de que `tty: true` y `stdin_open: true` están ambos en el archivo compose.
+
+</Accordion>
+
+<Accordion label="La autenticación de la herramienta de IA falla" group="troubleshooting">
+
+1. **Prueba el flujo de código de dispositivo** antes de tocar puertos. Es la opción menos frágil.
+2. **Copia la URL de autenticación** al navegador del host y complétala ahí.
+3. **Publica el puerto del callback** en `127.0.0.1` y recrea el contenedor.
+4. **Comprueba el reloj.** Los flujos OAuth rechazan tokens cuando la hora del contenedor se desvía. `date` dentro del contenedor debería coincidir con el host; la variable `TZ` maneja la visualización, no el reloj en sí.
+
+Ejemplo, Factory.ai:
+
+```bash
+droid
+# then /login; if it prints a URL, paste that URL into your host browser
+```
+
+</Accordion>
+
+<Accordion label="Los cambios no se sincronizan entre host y contenedor" group="troubleshooting">
+
+Confirma que los montajes realmente existen:
+
+<Tabs>
+<Tab name="Docker">
+```bash
+docker inspect ai-tools --format '{{json .Mounts}}' | jq
+docker inspect ai-tools --format '{{.HostConfig.Privileged}}'
+```
+</Tab>
+<Tab name="Podman">
+```bash
+podman inspect ai-tools --format '{{json .Mounts}}' | jq
+```
+</Tab>
+</Tabs>
+
+Forma esperada:
+
+```text
+/home/you/dev-home  ->  /home/pn
+/home/you/websites  ->  /home/pn/app/websites
+```
+
+Si el montaje está presente pero las escrituras no llegan a ninguna parte, comprueba si el agente se ejecutó desde una ruta local del contenedor. `/home/pn/app` fuera de `/home/pn/app/websites` **no** está montado: solo lo está el subdirectorio. Los archivos que el agente escribe en `/home/pn/app/foo.txt` desaparecen en el próximo `docker compose down`.
+
+`Privileged` debe ser `false`. Si es `true`, quita `privileged: true` del archivo compose antes de hacer cualquier otra cosa.
+
+</Accordion>
+
+<Accordion label="El agente borró algo que no debería" group="troubleshooting">
+
+Si borró archivos dentro de `~/websites`, también desaparecieron del host: los bind mounts no son snapshots.
+
+Lo que te salva:
+
+- **Git.** Haz commit antes de entregarle una tarea a un agente. `git status` después, `git checkout -- .` si salió mal.
+- **Un backup que no esté en el mismo disco.** Para `~/dev-home` hablamos de configuraciones y estado de autenticación: molesto de perder, no catastrófico.
+- **Montajes acotados.** Si montas un solo directorio de proyecto en lugar de un directorio de doce, el radio de explosión es un proyecto.
+
+Lo que no te salva: `docker compose down`. Elimina el contenedor, no los archivos del bind mount.
+
+</Accordion>
+
+## Instalar comandos que faltan en el contenedor
+
+Las imágenes base son mínimas a propósito. Te encontrarás con `command not found` la primera vez que un agente quiera `rg`, `ffmpeg` o un cliente de Postgres:
+
+```bash
+bash: rg: command not found
+bash: psql: command not found
+```
+
+Dos formas de arreglarlo.
+
+### Opción 1: instalar temporalmente (solución rápida)
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+# Enter as root
+docker exec -it --user root ai-tools bash
+
+# Always update the index first, or apt can't find the package
+apt-get update
+apt-get install -y ripgrep postgresql-client
+
+exit
+docker exec -it ai-tools bash
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+# Enter as root
+podman exec -it --user root ai-tools bash
+
+apt-get update
+apt-get install -y ripgrep postgresql-client
+
+exit
+podman exec -it ai-tools bash
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="Temporal significa temporal">
+Los paquetes instalados así viven en la capa escribible del contenedor y desaparecen en el próximo `docker compose down` o reconstrucción. Vale para "necesito `psql` ahora mismo", no para algo que vayas a necesitar la semana que viene.
+
+Olvidar el `apt-get update` previo es la causa más común de `Unable to locate package`. Ejecútalo siempre: un índice cacheado de una capa anterior suele estar desfasado.
+</Notice>
+
+### Opción 2: actualiza el Dockerfile y reconstruye (permanente)
+
+Añade el paquete a la línea `apt-get install` y reconstruye:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    jq \
+    curl \
+    vim \
+    nano \
+    htop \
+    tree \
+    ripgrep \
+    rsync \
+    postgresql-client \
+    ffmpeg \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Luego:
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+cd ~/docker-ai-tools
+docker compose build
+docker compose up -d
+docker exec -it ai-tools bash
+
+# Verify
+rg --version
+psql --version
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+cd ~/podman-ai-tools
+podman compose build
+podman compose up -d
+podman exec -it ai-tools bash
+
+# Verify
+rg --version
+psql --version
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="info" title="Qué sobrevive a una reconstrucción">
+- **Paquetes del sistema** (git, rg, psql, ffmpeg): reconstruidos dentro de la imagen, ahí permanentemente
+- **Herramientas CLI de IA**: reinstaladas. Viven en el home montado por bind, así que la mayoría sobrevive si el instalador las puso en `~/.local/bin` o `~/.opencode/bin`, pero los globales de npm dentro de la imagen no
+- **Autenticación**: normalmente sobrevive en `~/dev-home`; vuelve a ejecutar el comando de login si no
+- **Configuraciones en `~/dev-home`**: se conservan
+- **Proyectos en `~/websites`**: se conservan
+
+Si una herramienta de IA muere tras una reconstrucción, simplemente vuelve a ejecutar su instalador. Son 30 segundos y es la razón de que los pasos de instalación sean de una línea.
+</Notice>
+
+### Paquetes comunes que podrías necesitar
+
+<ListCheck>
+- **`git`**: control de versiones, y la mayoría de los agentes escriben mensajes de commit
+- **`curl` / `wget`**: peticiones HTTP y descargas
+- **`jq`**: parseo de JSON, útil para respuestas de API
+- **`ripgrep` (`rg`)**: búsqueda rápida; varios agentes lo invocan por shell
+- **`vim` / `nano`**: edición dentro del contenedor
+- **`htop`**: ve qué está comiendo memoria cuando una compilación se atasca
+- **`tree`**: vista general de directorios
+- **`rsync`**: sincronización de archivos
+- **`build-essential`**: toolchain de C/C++ para módulos nativos de npm
+- **`postgresql-client`**: `psql` para trabajo con bases de datos
+- **`ffmpeg`**: manejo de medios
+</ListCheck>
+
+## Buenas prácticas de seguridad para agentes de IA en sandbox
+
+Tu configuración de contenedor es un conjunto de capacidades. Todo lo de esta lista reduce lo que el agente puede hacer si algo sale mal.
+
+<ListCheck>
+- **Nunca hagas commit de claves API.** Usa `.env` + `env_file`, o mejor, una configuración de [secretos de Docker Compose](/docker-compose-secrets/)
+- **Rota las claves** que hayas usado dentro del contenedor, sobre todo las que tocaron un contenedor compartido
+- **Monta solo `~/websites` y `~/dev-home`.** No `$HOME`, no `~/.ssh`, no `~/.aws`
+- **Nunca montes `/var/run/docker.sock`.** Es root en el host
+- **Ejecuta como no root.** Ya configurado con `USER pn` (UID 1000)
+- **Mantén la imagen base actualizada.** Reconstruye con `--no-cache` cuando cambie la etiqueta base
+- **Vincula los puertos publicados a `127.0.0.1`.** No a `0.0.0.0`
+- **Define límites de recursos.** Un agente desbocado debería ser lento, no fatal
+</ListCheck>
+
+### Montajes de solo lectura y límites de recursos
+
+Dos cambios de compose que recortan el radio de explosión sin romper nada:
+
+```yaml
+services:
+  ai-tools:
+    # ... your existing config ...
+    security_opt:
+      - no-new-privileges:true   # blocks setuid escalation inside the container
+    mem_limit: 8g                # kill the process instead of the host
+    cpus: 4
+    pids_limit: 512              # stops fork bombs from taking down the host
+```
+
+Verifica que los flags se aplicaron de verdad:
+
+```bash
+docker inspect ai-tools \
+  --format 'mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} sec={{.HostConfig.SecurityOpt}}'
+```
+
+Esperado: `mem=8589934592`, `pids=512` y `[no-new-privileges:true]`. Si `mem=0`, el límite no se aplicó y el agente puede consumir toda la RAM del host.
+
+Ahora la versión más fuerte, para cuando el agente solo necesita leer un árbol de referencia:
+
+```yaml
+    volumes:
+      - ${HOME}/dev-home:/home/pn
+      - ${HOME}/websites:/home/pn/app/websites
+      - ${HOME}/reference-docs:/home/pn/reference:ro   # read-only
+```
+
+`docker exec -it ai-tools sh -c 'touch /home/pn/reference/x'` debería fallar con `Read-only file system`. Esa es la prueba.
+
+<Notice type="warning" title="cap_drop: ALL no es gratis">
+Quitar todas las capacidades de Linux (`cap_drop: [ALL]`) es un paso real de hardening, y también rompe `apt-get install` dentro del contenedor en ejecución, porque root pierde `CAP_CHOWN`, `CAP_SETUID` y compañía. Elige una:
+
+- **Portátil / uso de desarrollo**: omite `cap_drop`. Quieres poder instalar paquetes sobre la marcha.
+- **Contenedor de agente de larga vida**: añade `cap_drop: [ALL]` y haz cada instalación de paquetes reconstruyendo la imagen.
+
+El conjunto de capacidades por defecto de Docker ya está reducido; `cap_drop: ALL` es el último 10% de la ganancia y el primer 90% de la molestia.
+</Notice>
+
+### Variables de entorno y claves API
+
+Mantén las claves fuera de la imagen y fuera de git. Compose lee `.env` automáticamente para la sustitución de variables, y `env_file` inyecta los valores en el contenedor:
+
+```yaml
+# docker-compose.yml or podman-compose.yml
+services:
+  ai-tools:
+    env_file:
+      - .env
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+```
+
+```bash
+# ~/.env - never commit this
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...
+```
+
+<Notice type="warning" title="Las variables de entorno son visibles para el proceso">
+Las variables de entorno se pueden leer desde `/proc/<pid>/environ` dentro del contenedor y aparecen en `docker inspect`. Eso está bien para un contenedor de un solo usuario en tu portátil. Para cualquier cosa multiusuario, usa secretos basados en archivos. Para el panorama completo de lo que funciona y lo que no:
+
+<Button text="Docker Compose Secrets" link="/docker-compose-secrets/" variant="outline" color="blue" size="sm" icon="arrow-right" />
+</Notice>
+
+La otra dirección también importa: **no pases todo tu entorno del host al contenedor.** `env_file: .env` con cinco claves nombradas es deliberado. `docker run -e $(env)` es entregarle al agente tu token de sesión de AWS.
+
+Si quieres la mecánica de `ARG` vs `ENV` vs la sustitución de Compose, nuestra guía sobre [usar ARG y ENV para variables de entorno en Docker Compose](/es/variables-entorno-docker/) cubre las diferencias y el orden de precedencia.
+
+## Limpieza
+
+### Eliminar contenedor e imágenes
+
+<Tabs>
+<Tab name="Docker">
+
+```bash
+# Stop and remove the container
+docker compose down
+
+# Remove the built image
+docker rmi ai-tools:latest
+
+# Remove dangling images, stopped containers, and unused networks
+docker system prune
+
+# Also remove unused volumes - read the warning below first
+docker system prune -a --volumes
+```
+
+</Tab>
+<Tab name="Podman">
+
+```bash
+podman compose down
+podman rmi ai-tools:latest
+podman system prune
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="warning" title="prune -a --volumes elimina volúmenes con nombre">
+`docker system prune -a --volumes` borra todas las imágenes y volúmenes sin uso de la máquina, no solo los de este proyecto. Si otro proyecto compose usa un volumen con nombre que no toca desde hace un mes, esos datos desaparecen. Ejecuta `docker volume ls` primero y lee la lista.
+
+Los bind mounts (`~/websites`) nunca los toca `prune`: viven en el sistema de archivos del host, no en el directorio de datos de Docker.
+</Notice>
+
+Si el uso de disco de Docker sigue creciendo y `prune` no basta, el culpable suele ser el almacén de capas overlay2. Cubrimos [recuperar espacio en disco de `/var/lib/docker/overlay2`](/es/limpiar-docker-overlay2/) por separado.
+
+Para una referencia rápida de los comandos que realmente escribirás, nuestra lista de [comandos esenciales de Docker](/docker-commands/) vale un marcador.
+
+### Empezar de cero
+
+```bash
+docker compose down
+docker rmi ai-tools:latest
+
+# Optional: reset configs and auth state
+# This deletes every CLI config and login in the container home
+rm -rf ~/dev-home/*
+
+# Optional: reset the image cache entirely
+docker builder prune -af
+
+# Rebuild
+docker compose build --no-cache
+docker compose up -d
+```
+
+Ese `rm -rf ~/dev-home/*` es el único paso irreversible de toda esta guía. Borra tus tokens de autenticación y las configuraciones de las herramientas. `~/websites` queda intacto.
+
+## Docker vs Podman para herramientas de IA
+
+El resumen honesto: para este caso de uso la diferencia es menor de lo que sugiere internet. Ambos ejecutan este mismo archivo compose, ambos soportan la misma imagen y ambos te dan el aislamiento que buscas.
+
+| | Docker | Podman |
+|---|---|---|
+| **Arquitectura** | Cliente-servidor (daemon) | Sin daemon, fork por comando |
+| **Privilegio por defecto** | El daemon corre como root; el modo rootless sin daemon requiere configuración | Rootless por defecto |
+| **Uso de recursos en reposo** | ~50-100 MB para el daemon | ~0 MB, nada persistente |
+| **Sintaxis de Compose** | `docker compose` | `podman compose` |
+| **GUI de escritorio** | Docker Desktop | Podman Desktop |
+| **SELinux** | Básico | Nativo (`:z` / `:Z`) |
+| **Red rootless** | RootlessKit con slirp4netns por defecto (pasta soportado) | Solo pasta en 6.x |
+| **Licencia** | Docker Desktop de pago para empresas grandes | Gratis, proyecto CNCF Sandbox |
+| **Riesgo del socket de Docker** | El socket del daemon existe y es la vía clásica de escalada | Sin daemon, sin socket |
+
+**Elige Docker si:** tu equipo ya lo usa, quieres el mayor ecosistema de ejemplos e integraciones de CI, o estás en macOS y quieres la experiencia de escritorio más suave.
+
+**Elige Podman si:** estás en Fedora/RHEL, quieres contenedores rootless sin configuración extra, o te importa que no haya un daemon root siempre activo al que atacar.
+
+Para un contenedor que ejecuta un agente con acceso a shell, el argumento de "sin proceso root persistente y sin socket de Docker" es el que realmente importa para la seguridad. El mecanismo es simple: si el agente encuentra `/var/run/docker.sock` dentro de su contenedor, puede levantar un contenedor privilegiado y ser root en tu host en unos tres comandos.
+
+El desglose completo de arquitectura, licencias y rutas de migración está en nuestro artículo [Podman vs Docker comparados](/podman-vs-docker/).
+
+## Ejemplos de uso reales
+
+### Ejemplo 1: Factory.ai con modelos personalizados
+
+```bash
+# Inside the container
+cd ~/app/websites/my-app
+
+droid
+
+# In the Droid prompt, pick your model
+/model
+# Choose "Claude Sonnet 4.5" from custom models
+
+"Add user authentication with Supabase, including sign-up, login, and protected routes"
+```
+
+El valor de la configuración de modelos personalizados: puedes apuntar Factory a un agregador barato para las ediciones rutinarias y a un modelo de frontera solo cuando lo necesitas, sin cambiar nada en el host.
+
+### Ejemplo 2: Amp con contexto de proyecto
+
+```bash
+cd ~/app/websites/nextjs-blog
+
+cat > AGENTS.md <<'EOF'
+# Project: Next.js Blog
+
+## Tech stack
+- Next.js 15
+- TypeScript
+- Tailwind CSS
+- MDX for blog posts
+
+## Architecture
+- App Router
+- Server Components by default
+- Client Components only when needed
+
+## Commands
+- Dev: npm run dev
+- Build: npm run build
+- Test: npm test
+EOF
+
+amp "Add a comments section using Supabase"
+```
+
+`AGENTS.md` es la ganancia de contexto más barata que existe. Es un archivo del proyecto, así que funciona para todos los agentes que lo lean, y funciona idéntico dentro del contenedor.
+
+### Ejemplo 3: varias herramientas de IA en secuencia
+
+```bash
+# One agent implements
+amp "Create a React component for a product card"
+
+# Another reviews
+claude "Review the ProductCard component and suggest performance improvements"
+
+# A third writes tests
+droid "Generate unit tests for ProductCard.tsx"
+```
+
+Distintos modelos son buenos en cosas distintas, y ejecutarlos contra el mismo checkout significa que cada uno ve el trabajo del anterior. También es una forma barata de contrastar la salida de un agente con una segunda opinión.
+
+Si quieres el siguiente paso —dejar que un asistente dirija despliegues de Docker en un servidor— eso es un problema distinto con un radio de explosión mayor, y escribimos sobre [dejar que un asistente de IA despliegue apps Docker](/es/skill-despliegue-docker-ia/) por separado.
+
+## Buenas prácticas para herramientas CLI de IA en contenedores
+
+<ListCheck>
+- **Un contenedor por proyecto o contexto**, no un contenedor para todo
+- **Haz commit antes de entregar una tarea.** Git es tu reversión, no el contenedor
+- **Monta poco.** Una carpeta de proyecto, no un directorio de proyectos
+- **Añade un `.dockerignore` / `.containerignore`** para que `node_modules` y `.git` no se envíen al contexto de compilación
+- **Fija la etiqueta de la imagen base**: `python3.14-nodejs26-bookworm`, nunca `latest`
+- **Define límites de memoria y pids** para que un agente desbocado degrade un servicio, no el host
+- **Haz backup de `~/dev-home`** si reautenticarte en seis herramientas te molestaría
+- **Reconstruye mensualmente** para recoger los parches de seguridad de la imagen base
+- **Mantén `.env` fuera de git** y rota todo lo que se haya filtrado alguna vez
+</ListCheck>
+
+## Preguntas frecuentes
+
+<Accordion label="¿Puedo ejecutar varias herramientas de IA simultáneamente?" group="faq" expanded="true">
+
+Sí, y es la forma normal de usar esta configuración. Todas las CLI están instaladas en el mismo contenedor y comparten el proyecto montado:
+
+```bash
+# Terminal 1
+docker exec -it ai-tools bash
+cd ~/app/websites/project1
+amp "Implement feature X"
+
+# Terminal 2, same container
+docker exec -it ai-tools bash
+cd ~/app/websites/project2
+claude "Review the auth code"
+```
+
+Cada `exec` es una sesión independiente. Lo único que hay que evitar es que dos agentes editen el mismo archivo del mismo proyecto a la vez: se pisarán entre ellos, y eso es un problema de git que tendrás que desenredar a mano.
+
+</Accordion>
+
+<Accordion label="¿Los contenedores ralentizarán mis herramientas de IA?" group="faq">
+
+No hay una ralentización medible para trabajo de CLI, con una excepción.
+
+- La E/S de archivos sobre bind mounts es casi nativa en Linux. En macOS y Windows, Docker Desktop y Podman Desktop pasan por una VM, y las instalaciones pesadas de `node_modules` son notablemente más lentas ahí. Mantén `node_modules` dentro del sistema de archivos del contenedor en lugar de en un bind mount si eso te duele.
+- La CPU y la memoria se comparten con el host en Linux: sin impuesto de VM.
+- Las peticiones de red a las APIs de IA salen directamente. La latencia la domina el modelo, no el contenedor.
+
+El factor de rendimiento real es el modelo y tu red, no el motor de contenedores.
+
+</Accordion>
+
+<Accordion label="¿Es esto tan seguro como una VM?" group="faq">
+
+No, y quien te diga lo contrario te está vendiendo algo.
+
+Un contenedor comparte el kernel del host. Los exploits de kernel, las capacidades mal configuradas y los flags privilegiados son vectores de fuga del contenedor. Lo que esta configuración te da es protección contra el modo de fallo realista: un agente que ejecuta `rm -rf`, instala un paquete global roto o reescribe la configuración de tu shell. Es una frontera muy buena para accidentes y una frontera aceptable para código malicioso.
+
+Si necesitas ejecutar código genuinamente no confiable, usa una VM (o una microVM). Si necesitas que un agente trabaje en tus propios proyectos, un contenedor no root, con capacidades limitadas y montajes acotados es el punto correcto de coste/beneficio.
+
+</Accordion>
+
+<Accordion label="¿Cuánta RAM y disco usa esto?" group="faq">
+
+Para el contenedor del agente por sí solo: aproximadamente 1-2 GB de RAM en reposo con unas cuantas CLI instaladas, y 3-5 GB de disco para la imagen base más las cachés de node_modules. Funciona bien en un VPS de 2 GB si no estás ejecutando también modelos locales.
+
+Añade Ollama y las cuentas cambian por completo: un modelo de 7B a Q4 son ~5 GB, un modelo de 14B son ~9-10 GB, antes de contar la caché KV. No ejecutes modelos locales en nada con menos de 16 GB de RAM si quieres que sean utilizables.
+
+</Accordion>
+
+<Accordion label="¿Necesito actualizar el contenedor cuando una CLI de IA se actualiza?" group="faq">
+
+No. Las reconstrucciones son solo para las versiones del SO base, Node y Python.
+
+```bash
+# Inside the container
+claude update
+amp update
+droid update
+
+# npm-installed tools
+npm update -g @google/gemini-cli
+npm update -g @github/copilot
+```
+
+Todo lo instalado en `~/dev-home` (que es donde los instaladores nativos ponen sus binarios y donde los autoactualizadores escriben) persiste entre reinicios del contenedor. Un `docker compose down` seguido de `up` no lo pierde.
+
+</Accordion>
+
+<Accordion label="¿Puedo usar esta configuración en CI/CD?" group="faq">
+
+Sí, y encaja mejor que un contenedor de agente de larga vida porque el runner ya es efímero. El patrón: compila la imagen, ejecuta el agente con el repositorio montado, captura el diff.
+
+```yaml
+# .github/workflows/ai-review.yml
+name: AI Code Review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build AI tools image
+        run: docker compose build
+      - name: Run AI review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          docker compose up -d
+          docker exec ai-tools claude -p "Review this PR for code quality and list any bug risks"
+```
+
+Dos cosas con las que tener cuidado: no des a los agentes de CI credenciales de escritura en tu repo (deben revisar, no hacer push), y recuerda que todo lo que el agente produce es salida no confiable: trátala como un comentario en el PR, no como una puerta que pueda bloquear merges.
+
+</Accordion>
+
+<Accordion label="¿Y si necesito una versión distinta de Node.js o Python?" group="faq">
+
+Cambia la etiqueta de la imagen base. Ambos runtimes vienen de una sola imagen, así que eliges una combinación:
+
+```dockerfile
+# Python 3.14 with Node 26 (what this guide uses)
+FROM nikolaik/python-nodejs:python3.14-nodejs26-bookworm
+
+# Python 3.13 with Node 26
+FROM nikolaik/python-nodejs:python3.13-nodejs26-bookworm
+
+# Slim variant - smaller, no build toolchain
+FROM nikolaik/python-nodejs:python3.14-nodejs26-slim
+```
+
+Las combinaciones disponibles están en [la página de etiquetas de nikolaik/python-nodejs](https://hub.docker.com/r/nikolaik/python-nodejs/tags). Fija la etiqueta completa y reconstruye; no uses `latest`, o tu entorno "reproducible" deja de serlo en un momento arbitrario.
+
+Ese mismo truco también es práctico: si no tienes motivo para ejecutar Python 3.14 y quieres una imagen mucho más pequeña, `python3.14-nodejs26-slim` más los paquetes que realmente necesitas es varios cientos de MB más liviana.
+
+</Accordion>
+
+<Accordion label="¿Dónde debería ejecutar el contenedor del agente si lo quiero en un servidor?" group="faq">
+
+Cualquier VPS con 2 GB de RAM es suficiente para el contenedor del agente por sí solo. Esta es la configuración que la gente usa para "un agente en un servidor al que puedo llegar desde cualquier parte": el contenedor corre junto a tus otros servicios, mantiene un checkout de git y te conectas con `docker exec`.
+
+Una máquina de €4-5/mes es de sobra para esto. Más allá de eso estás pagando por inferencia de modelos locales, no por el contenedor.
+
+<Button text="Hetzner Cloud" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+_Los precios de los VPS subieron en general en 2026: si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+Dos reglas si te vas a remoto: nunca publiques los puertos del contenedor a internet y nunca montes el socket de Docker del host dentro. Un contenedor de agente remoto con el socket de Docker montado es un shell de root remoto para cualquiera que pueda escribirle un prompt.
+
+</Accordion>
+
+## Conclusión
+
+Poner las herramientas CLI de IA en contenedores te da un sandbox en el que puedes permitirte ser descuidado. No una frontera de seguridad contra un atacante decidido, sino una frontera contra el modo de fallo que realmente ocurre: un agente que ejecuta un comando que no debería.
+
+Con lo que acabas:
+
+<ListCheck>
+- **Aislamiento**: los comandos de shell del agente se ejecutan contra el contenedor, no contra tus dotfiles
+- **Persistencia**: las configuraciones y el estado de autenticación viven en `~/dev-home`, los proyectos en `~/websites`
+- **Reproducibilidad**: el mismo Dockerfile te da a ti y a un compañero runtimes idénticos
+- **Reversión**: `docker compose down` y una reconstrucción te dejan un borrón y cuenta nueva
+- **Múltiples configuraciones**: un contenedor por contexto, con claves y montajes separados
+- **Un host en paz**: tu Node, Python y paquetes globales de npm quedan intactos
+</ListCheck>
+
+Las tres cosas que vale la pena hacer diferente respecto a la versión de 2025 de esta guía: pasar a `python3.14-nodejs26-bookworm` como imagen base, dejar de instalar Ollama dentro del contenedor del agente, y no montar por bind nada que no le entregarías en un prompt de shell.
+
+Si estás construyendo el resto de la pila, las continuaciones que más importan son [Podman vs Docker comparados](/podman-vs-docker/) si aún eliges motor, la [guía de configuración de OpenCode](/es/guia-configuracion-opencode/) o [Amp Code, agente de programación con IA](/amp-code-free-ai-coding-agent/) para la parte de herramientas, y [las mejores herramientas y agentes de programación con IA en 2026](/es/herramientas-codificacion-ia/) si prefieres comparar antes de comprometerte.
+
+<Notice type="success" title="¿Listo para construirlo?">
+1. `mkdir -p ~/docker-ai-tools ~/dev-home ~/websites`
+2. Añade el Dockerfile y el archivo compose de los pasos 2 y 3
+3. `docker compose up -d && docker exec -it ai-tools bash`
+4. Instala el agente que quieras y autentícate
+5. Cierra la tapa, vete, y sabiendo que el peor caso es una reconstrucción
+</Notice>

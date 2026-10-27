@@ -1,0 +1,1042 @@
+---
+date: 2025-07-29
+lastmod: 2026-08-30T00:00:00Z
+translationKey: "setup-webdav-nginx"
+title: "Configura un servidor WebDAV con Nginx en Linux (guía 2026)"
+meta_title: "Configura un servidor WebDAV con Nginx en Linux: guía completa"
+description: "Monta un servidor WebDAV seguro con Nginx en Linux. Cubre SSL, autenticación básica, bloqueo de archivos, clientes davfs2 y rclone, Docker y resolución de problemas."
+image: "@assets/images/25/07/setup-webdav-nginx.webp"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["webdav", "nginx", "homelab"]
+canonical: "https://www.bitdoze.com/es/configurar-webdav-nginx/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Mientras que [NFS](https://www.bitdoze.com/setup-nfs-linux/) funciona bien para compartir archivos entre sistemas Linux y [Samba](https://www.bitdoze.com/setup-samba-linux/) cubre la compatibilidad multiplataforma, a veces necesitas acceso a archivos vía web que atraviese firewalls y NAT. Ahí es donde entra WebDAV (Web Distributed Authoring and Versioning).
+
+Yo uso WebDAV junto a NFS y Samba en mi mini PC N100 para tener acceso remoto seguro a los archivos cuando estoy fuera de casa. A diferencia de los protocolos tradicionales para compartir archivos, WebDAV funciona sobre los puertos HTTP/HTTPS estándar, así que puedes acceder a los archivos de tu home server desde cualquier lugar con una app cliente dedicada. Esta guía cubre cómo configurar un servidor WebDAV con Nginx en Linux, incluyendo cifrado SSL, autenticación básica, bloqueo de archivos (DAV nivel 2), clientes rclone y davfs2, alternativas con Docker y resolución de problemas.
+
+## Entendiendo WebDAV
+
+<Notice type="info" title="¿Qué es WebDAV?">
+WebDAV (Web Distributed Authoring and Versioning) es una extensión de HTTP que permite a los clientes realizar operaciones remotas de autoría de contenido web. Permite a los usuarios editar y gestionar archivos de forma colaborativa en servidores web remotos.
+</Notice>
+
+### Ventajas clave de WebDAV
+
+<ListCheck>
+- **Amigable con firewalls**: usa los puertos HTTP(S) estándar (80/443), funciona a través de la mayoría de firewalls
+- **Seguro por defecto**: cifrado SSL/TLS integrado
+- **Amplio ecosistema de clientes**: Explorador de Windows, Finder de macOS, rclone, Cyberduck, apps móviles. No hace falta navegador
+- **Multiplataforma**: compatible con Windows, macOS, Linux y plataformas móviles
+- **Bloqueo de archivos**: bloqueos de escritura exclusivos vía dav-ext (sin versionado; eso es lo que Nextcloud/Zotero añaden por encima)
+- **Experiencia tipo nube**: ofrece una funcionalidad estilo Dropbox en tu propio servidor
+</ListCheck>
+
+### WebDAV frente a NFS, Samba y FTP
+
+| Característica | WebDAV | NFS | Samba/SMB | FTP |
+|---------|---------|-----|-----------|-----|
+| **Acceso remoto** | Excelente | Deficiente | Deficiente | Bueno |
+| **Seguridad** | Excelente (HTTPS) | Moderada | Buena | Deficiente |
+| **Compatibilidad con firewalls** | Excelente | Deficiente | Deficiente | Moderada |
+| **Acceso desde el navegador** | No (usa una app cliente) | No | No | Limitado |
+| **Soporte móvil** | Excelente | Deficiente | Bueno | Bueno |
+| **Rendimiento (LAN)** | Moderado | Excelente | Muy bueno | Bueno |
+| **Complejidad de configuración** | Moderada | Sencilla | Moderada | Sencilla |
+
+## Requisitos previos y planificación
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+- **Servidor Linux** (Ubuntu 22.04+, Debian 12+, RHEL 9+ o Alpine) con acceso root o sudo
+- **Nombre de dominio** con un registro DNS A apuntando al servidor
+- **Puertos 80 y 443** abiertos en tu firewall
+- (Opcional) Un VPS si necesitas acceso remoto. [Un VPS asequible como Hetzner](https://go.bitdoze.com/hetzner) o [opciones económicas como Hostinger](https://go.bitdoze.com/hostinger-vps) funcionan bien para esto
+</ListCheck>
+
+_Los precios de los VPS subieron en general en 2026 — si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+### Visión general de la arquitectura WebDAV
+
+![Arquitectura WebDAV en Nginx para Linux. Los clientes HTTPS (Windows, macOS, Linux, móvil) se autentican con autenticación básica y acceden a los archivos a través del servidor WebDAV de nginx.](@assets/images/25/07/webdav-arhitecture.svg)
+
+### Actualiza Nginx primero: CVE-2026-27654
+
+<Notice type="error" title="Seguridad: actualiza Nginx antes de continuar">
+Se publicó un desbordamiento de búfer en <code>ngx_http_dav_module</code> (CVE-2026-27654, CVSS 8.2-8.8) el 24 de marzo de 2026. Afecta a configuraciones que usan <code>alias</code> con COPY/MOVE de DAV, un patrón que aparece en varios ejemplos de abajo. Un atacante remoto no autenticado puede tumbar el worker de nginx o manipular nombres de archivo fuera del document root.
+
+<strong>Corregido en:</strong> nginx 1.28.3 / 1.29.7 (upstream), Ubuntu noble <code>1.24.0-2ubuntu7.7</code> (USN-8375-1), backports de seguridad de Debian bookworm.
+
+<strong>Comprueba tu versión:</strong>
+<pre>nginx -v</pre>
+
+Si tu versión es anterior a las compilaciones corregidas de arriba, actualiza ahora antes de continuar.
+</Notice>
+
+## Paso 1: instala Nginx con el módulo WebDAV
+
+El `ngx_http_dav_module` base de Nginx gestiona PUT, DELETE, MKCOL, COPY y MOVE. Para soporte WebDAV completo (PROPFIND, OPTIONS, LOCK, UNLOCK) también necesitas el módulo de terceros `dav-ext`.
+
+### Instala el módulo WebDAV de Nginx
+
+<Tabs>
+<Tab name="Debian/Ubuntu">
+```bash
+# Base nginx already includes ngx_http_dav_module. Add only the ext module
+sudo apt update
+sudo apt install nginx libnginx-mod-http-dav-ext apache2-utils -y
+```
+</Tab>
+<Tab name="RHEL/Alma/Rocky">
+```bash
+# Enable EPEL, then install
+sudo dnf install epel-release -y
+sudo dnf install nginx nginx-mod-http-dav-ext httpd-tools -y
+```
+</Tab>
+<Tab name="Alpine">
+```bash
+# Useful for container builds
+apk add nginx nginx-mod-http-dav-ext
+```
+</Tab>
+</Tabs>
+
+<Notice type="info" title="La división de módulos explicada">
+El <code>ngx_http_dav_module</code> base (compilado en los paquetes nginx estándar de Debian/Ubuntu) gestiona los métodos de escritura: PUT, DELETE, MKCOL, COPY, MOVE. El módulo <code>dav-ext</code> añade los métodos de lectura/bloqueo: PROPFIND, OPTIONS, LOCK, UNLOCK. Necesitas ambos para un servidor WebDAV funcional.
+</Notice>
+
+**Verifica que los módulos estén cargados:**
+
+```bash
+# Check base module
+nginx -V 2>&1 | grep -o with-http_dav_module
+
+# Check ext module (Debian/Ubuntu)
+ls /usr/lib/nginx/modules/ | grep dav
+```
+
+Si el primer comando no devuelve nada, tu compilación de nginx carece del módulo DAV base. Si el segundo no devuelve nada, el módulo ext no está instalado.
+
+### Crea la estructura de directorios de WebDAV
+
+```bash
+# Create share directories
+sudo mkdir -p /var/www/webdav/{documents,media,projects,shared}
+
+# Create temp directory on the SAME filesystem (important, see note below)
+sudo mkdir -p /var/www/webdav/.tmp
+
+# Set ownership to www-data (Nginx user)
+sudo chown -R www-data:www-data /var/www/webdav
+
+# Set permissions
+sudo chmod -R 755 /var/www/webdav
+```
+
+<Notice type="warning" title="Mismo sistema de archivos para la ruta temporal">
+El directorio <code>client_body_temp_path</code> debe estar en el <strong>mismo sistema de archivos</strong> que tu raíz WebDAV. Si están en sistemas de archivos distintos, nginx copia el archivo subido en lugar de hacer un renombrado atómico, que es más lento y puede fallar en subidas grandes. La ruta <code>/var/www/webdav/.tmp</code> de arriba mantiene todo junto.
+</Notice>
+
+### Configura SSL con Certbot
+
+```bash
+# Install Certbot
+sudo apt install certbot python3-certbot-nginx -y
+
+# Obtain SSL certificate (replace with your domain)
+sudo certbot --nginx -d webdav.yourdomain.com
+
+# Verify certificate auto-renewal works
+sudo certbot renew --dry-run
+```
+
+<Notice type="warning" title="El DNS debe apuntar a este servidor">
+Asegúrate de que el registro A de tu dominio resuelve a la IP de este servidor antes de ejecutar Certbot. El reto HTTP-01 necesita llegar a tu servidor por el puerto 80.
+</Notice>
+
+## Paso 2: configura Nginx para WebDAV
+
+Esta es la configuración central. Incluye todas las correcciones: `dav_ext_methods` correcto (sin `PROPPATCH`), bloqueo de archivos para DAV nivel 2, ruta temporal en el mismo sistema de archivos, workaround para el Finder de macOS y ajustes TLS modernos.
+
+### Habilita los métodos WebDAV
+
+Crea el archivo de configuración principal:
+
+```bash
+sudo nano /etc/nginx/sites-available/webdav
+```
+
+Añade esta configuración:
+
+```nginx
+# /etc/nginx/sites-available/webdav
+#
+# Requires dav_ext_lock_zone in http{} context. See "Enable File Locking" below.
+# Make sure /var/www/webdav/.tmp exists on the same filesystem as /var/www/webdav.
+
+server {
+    listen 80;
+    server_name webdav.yourdomain.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+
+    server_name webdav.yourdomain.com;
+
+    # SSL Configuration
+    ssl_certificate     /etc/letsencrypt/live/webdav.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/webdav.yourdomain.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options DENY;
+
+    # Authentication
+    auth_basic "WebDAV Access";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    # WebDAV root
+    location / {
+        root /var/www/webdav;
+
+        # Write methods (base module)
+        dav_methods PUT DELETE MKCOL COPY MOVE;
+
+        # Read/lock methods (dav-ext module)
+        # NOTE: PROPPATCH is NOT supported — do not add it here
+        dav_ext_methods PROPFIND OPTIONS LOCK UNLOCK;
+
+        # Enable real LOCK/UNLOCK (requires dav_ext_lock_zone in http{})
+        dav_ext_lock zone=davlock;
+
+        dav_access user:rw group:rw all:r;
+        create_full_put_path on;
+        min_delete_depth 1;
+
+        # Temp path on same filesystem
+        client_body_temp_path /var/www/webdav/.tmp;
+        client_max_body_size 10G;
+        client_body_timeout 300s;
+
+        # Fix macOS Finder MKCOL-without-slash (creates dirs without trailing /)
+        set $x $uri$request_method;
+        if ($x ~ [^/]MKCOL$) { rewrite ^(.*)$ $1/; }
+
+        # Logging
+        access_log /var/log/nginx/webdav_access.log;
+        error_log  /var/log/nginx/webdav_error.log;
+    }
+
+    # Block access to hidden files
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+}
+```
+
+<Notice type="error" title="Si nginx -t falla con 'unknown directive dav_ext_methods'">
+El módulo dav-ext no está cargado. Compruébalo con: <code>ls /usr/lib/nginx/modules/ | grep dav</code>. En Debian/Ubuntu, instala <code>libnginx-mod-http-dav-ext</code>. En RHEL/Alpine, instala <code>nginx-mod-http-dav-ext</code>.
+</Notice>
+
+### Habilita el bloqueo de archivos para DAV nivel 2
+
+Sin una configuración de bloqueo explícita, el servidor anuncia `DAV: 1` (solo lectura/escritura básica). El Finder de macOS requiere `DAV: 2` (soporte LOCK funcional) para montajes de lectura/escritura. El Explorador de Windows también comprueba esta cabecera.
+
+Añade la zona de bloqueo a tu configuración principal de nginx (`/etc/nginx/nginx.conf`) dentro del bloque `http {}`:
+
+```nginx
+http {
+    # ... existing config ...
+
+    # WebDAV lock zone — shared memory for tracking locks
+    # 10MB handles thousands of concurrent locks; 300s timeout
+    dav_ext_lock_zone zone=davlock:10m timeout=300;
+}
+```
+
+<Notice type="info" title="DAV nivel 1 frente a nivel 2">
+<strong>Nivel 1</strong> = lectura/escritura básica (PUT/DELETE/PROPFIND). <strong>Nivel 2</strong> = añade LOCK/UNLOCK para edición concurrente. El Finder de macOS y el Explorador de Windows necesitan el nivel 2 para acceso completo de lectura/escritura. Sin la configuración de zona de bloqueo de arriba, el servidor solo anuncia DAV: 1.
+</Notice>
+
+**Verifica que DAV nivel 2 funciona:**
+
+```bash
+curl -i -X OPTIONS https://webdav.yourdomain.com/ -u webdavuser:password
+```
+
+Busca `DAV: 2` en las cabeceras de respuesta. Si solo ves `DAV: 1`, la zona de bloqueo no está configurada.
+
+### Crea usuarios de WebDAV
+
+```bash
+# Create password file with first user (use -B for bcrypt)
+sudo htpasswd -cB /etc/nginx/.htpasswd webdavuser
+
+# Add additional users (no -c flag after first user)
+sudo htpasswd -B /etc/nginx/.htpasswd john
+sudo htpasswd -B /etc/nginx/.htpasswd mary
+
+# Secure the password file
+sudo chmod 640 /etc/nginx/.htpasswd
+sudo chown root:www-data /etc/nginx/.htpasswd
+```
+
+<Notice type="warning" title="Usa bcrypt (-B)">
+El hash predeterminado de <code>htpasswd</code> es MD5-crypt, débil frente a las GPU modernas. Usa siempre el flag <code>-B</code> para bcrypt. En la familia RHEL, <code>htpasswd</code> viene del paquete <code>httpd-tools</code>.
+</Notice>
+
+### Gestión avanzada de usuarios
+
+Para distintos niveles de acceso (admin, usuarios, lectura pública):
+
+```nginx
+# Admin access — full WebDAV methods
+location /admin {
+    alias /var/www/webdav/admin;
+    dav_methods PUT DELETE MKCOL COPY MOVE;
+    dav_ext_methods PROPFIND OPTIONS LOCK UNLOCK;
+    dav_ext_lock zone=davlock;
+    dav_access user:rw group:rw all:r;
+    create_full_put_path on;
+
+    auth_basic "Admin WebDAV";
+    auth_basic_user_file /etc/nginx/.htpasswd-admin;
+}
+
+# User access — limited methods
+location /users {
+    alias /var/www/webdav/users;
+    dav_methods PUT DELETE MKCOL;
+    dav_ext_methods PROPFIND OPTIONS;
+    dav_access user:rw group:rw all:r;
+    create_full_put_path on;
+
+    auth_basic "User WebDAV";
+    auth_basic_user_file /etc/nginx/.htpasswd-users;
+}
+
+# Public read-only access
+location /public {
+    alias /var/www/webdav/public;
+    limit_except GET {
+        deny all;
+    }
+    autoindex on;
+    autoindex_exact_size off;
+    autoindex_localtime on;
+}
+```
+
+<Notice type="warning" title="alias + DAV es el patrón del CVE-2026-27654">
+La directiva <code>alias</code> combinada con COPY/MOVE de DAV es el disparador exacto del CVE-2026-27654. Asegúrate de que tu nginx esté parcheado antes de usar estos bloques location. Consulta el aviso del CVE en Requisitos previos.
+</Notice>
+
+### Habilita y prueba la configuración
+
+```bash
+# Test configuration syntax
+sudo nginx -t
+
+# Enable the site
+sudo ln -s /etc/nginx/sites-available/webdav /etc/nginx/sites-enabled/
+
+# Remove default site if it conflicts
+sudo rm -f /etc/nginx/sites-enabled/default
+
+# Restart and enable nginx
+sudo systemctl restart nginx
+sudo systemctl enable nginx
+
+# Check status
+sudo systemctl status nginx
+```
+
+**Lista completa de verificación:**
+
+```bash
+# 1. Module loaded?
+nginx -V 2>&1 | grep -o with-http_dav_module
+
+# 2. Config valid?
+sudo nginx -t
+
+# 3. Methods advertised? (expect DAV: 2 + Allow list)
+curl -i -X OPTIONS https://webdav.yourdomain.com/ -u webdavuser:password
+
+# 4. Directory listing works?
+curl -i -X PROPFIND https://webdav.yourdomain.com/ -u webdavuser:password -H "Depth: 1"
+
+# 5. Upload works?
+curl -i -T test.txt https://webdav.yourdomain.com/test.txt -u webdavuser:password
+
+# 6. Move works?
+curl -i -X MOVE https://webdav.yourdomain.com/test.txt \
+  -H "Destination: https://webdav.yourdomain.com/final.txt" \
+  -u webdavuser:password
+```
+
+## Paso 3: conecta clientes WebDAV en cada plataforma
+
+### Windows: monta WebDAV como unidad de red
+
+```powershell
+# Map WebDAV as network drive
+net use W: https://webdav.yourdomain.com /user:webdavuser
+
+# Or via File Explorer:
+# 1. Open File Explorer
+# 2. Right-click "This PC" → "Map network drive"
+# 3. Enter: https://webdav.yourdomain.com
+# 4. Check "Connect using different credentials"
+# 5. Enter username and password
+```
+
+<Notice type="warning" title="Problemas conocidos de WebDAV en Windows">
+El WebDAV nativo de Windows es quisquilloso. Problemas habituales:
+<ul>
+<li><strong>Error 0x80070043</strong> ("The network name cannot be found") — normalmente significa que el servicio WebClient no está en ejecución o la URL es incorrecta</li>
+<li><strong>Autenticación básica sobre HTTP bloqueada</strong> — las versiones modernas de Windows requieren HTTPS para la autenticación básica por defecto</li>
+<li><strong>El servicio WebClient</strong> debe estar en ejecución: <code>net start WebClient</code></li>
+</ul>
+Si el mapeo nativo falla, usa un cliente de terceros como RaiDrive, Cyberduck o WinSCP.
+</Notice>
+
+### Linux: monta WebDAV con davfs2
+
+```bash
+# Install davfs2
+sudo apt install davfs2 -y
+
+# Create mount point
+sudo mkdir /mnt/webdav
+
+# Mount WebDAV share
+sudo mount -t davfs https://webdav.yourdomain.com /mnt/webdav
+
+# Verify
+mount | grep webdav
+```
+
+Para un montaje permanente, añade las credenciales y una entrada en fstab:
+
+```bash
+# Add credentials (one line per share)
+sudo nano /etc/davfs2/secrets
+# Add: https://webdav.yourdomain.com webdavuser your_password
+
+# Secure the secrets file
+sudo chmod 600 /etc/davfs2/secrets
+
+# Add to fstab for auto-mount on boot
+sudo nano /etc/fstab
+# Add: https://webdav.yourdomain.com /mnt/webdav davfs _netdev,user,uid=1000,gid=1000 0 0
+```
+
+**Los gestores de archivos gráficos** también funcionan:
+
+```bash
+# Nautilus (GNOME): Other Locations → Connect to Server
+# Enter: davs://webdav.yourdomain.com
+
+# Dolphin (KDE): Network → Add Network Folder → WebDAV
+```
+
+### Finder de macOS y mount_webdav
+
+1. Abre el **Finder**
+2. Pulsa `Cmd + K` (Conectar al servidor)
+3. Introduce: `https://webdav.yourdomain.com`
+4. Introduce las credenciales cuando se te pidan
+
+Finder monta en lectura/escritura solo si el servidor anuncia `DAV: 2` (soporte LOCK funcional). Si seguiste la configuración de bloqueo del paso 2, esto funciona directamente.
+
+Montaje por línea de comandos:
+
+```bash
+mkdir ~/webdav
+mount_webdav https://webdav.yourdomain.com ~/webdav
+
+# Unmount
+umount ~/webdav
+```
+
+### Apps WebDAV para móvil (iOS/Android)
+
+| App | Plataforma | Funciones | Precio |
+|-----|----------|----------|-------|
+| **Documents by Readdle** | iOS | Gestión de documentos + WebDAV | Gratis |
+| **FE File Explorer** | iOS/Android | Soporte multiprotocolo | Freemium |
+| **Solid Explorer** | Android | Gestor de archivos de doble panel | De pago |
+| **Total Commander** | Android | Con plugin WebDAV | Gratis |
+| **FX File Explorer** | Android | Soporte WebDAV | Freemium |
+
+### Usuarios avanzados: sincroniza y monta con rclone
+
+rclone es la navaja suiza de los clientes WebDAV. Gestiona sincronización, montaje y copias de seguridad con un solo binario.
+
+```bash
+# Install rclone
+curl https://rclone.org/install.sh | sudo bash
+
+# Configure a WebDAV remote
+rclone config
+# Choose: New remote → name: webdav-remote → type: webdav → vendor: other
+# URL: https://webdav.yourdomain.com
+# User: webdavuser / Password: your_password
+
+# Sync a local directory to WebDAV
+rclone sync /data/source webdav-remote:backup
+
+# Mount WebDAV as a local directory (with caching)
+rclone mount webdav-remote: ~/webdav --vfs-cache-mode full
+
+# List files
+rclone ls webdav-remote:
+```
+
+rclone también funciona como un servidor WebDAV ligero por sí mismo — útil para proyectos secundarios donde no necesitas nginx:
+
+```bash
+# Serve a local directory over WebDAV (single binary, TLS, user/pass)
+rclone serve webdav /data/to/share --addr :8080 --user admin --pass secret
+```
+
+## Paso 4: configuración avanzada y endurecimiento
+
+### Permitir/denegar por IP y limitación de tasa
+
+```nginx
+# Restrict access by IP range
+location / {
+    allow 192.168.1.0/24;
+    allow 10.0.0.0/8;
+    deny all;
+
+    # ... rest of WebDAV configuration ...
+}
+```
+
+Limitación de tasa en el bloque `http {}`:
+
+```nginx
+http {
+    limit_req_zone $binary_remote_addr zone=webdav:10m rate=30r/s;
+
+    location / {
+        limit_req zone=webdav burst=50 nodelay;
+        # ... WebDAV configuration ...
+    }
+}
+```
+
+<Notice type="info" title="Advertencia sobre la limitación de tasa">
+Los clientes WebDAV hacen muchas peticiones rápidas — PROPFIND con <code>Depth: 1</code> en carpetas grandes, PUTs multiarchivo de rclone, etc. Ajusta la tasa con generosidad o acota los límites a los fallos de autenticación. La regulación más agresiva corresponde a fail2ban, no al <code>limit_req</code> de nginx.
+</Notice>
+
+### Autenticación de dos factores con auth_request
+
+Para autenticación externa (SSO, TOTP, etc.), usa el módulo `auth_request` — no hace falta ninguna dependencia de Lua:
+
+```nginx
+# Internal auth endpoint
+location /auth {
+    internal;
+    proxy_pass http://your-auth-service/verify;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Original-URI $request_uri;
+}
+
+# Apply to WebDAV location
+location / {
+    auth_request /auth;
+    # ... WebDAV configuration ...
+}
+```
+
+### Ajusta Nginx para subidas de archivos grandes
+
+```nginx
+# In the WebDAV location block
+client_max_body_size 50G;
+client_body_buffer_size 256k;
+client_body_timeout 600s;
+client_header_timeout 300s;
+keepalive_timeout 300s;
+send_timeout 300s;
+
+# Use sendfile for downloads
+sendfile on;
+sendfile_max_chunk 1m;
+tcp_nopush on;
+tcp_nodelay on;
+```
+
+<Notice type="info" title="min_delete_depth">
+La directiva <code>min_delete_depth 1</code> (nginx ≥1.25.5) evita que las peticiones DELETE eliminen archivos de primer nivel en la raíz del recurso compartido. Es un mecanismo de seguridad útil — un cliente no puede borrar accidentalmente todo el recurso con una sola petición.
+</Notice>
+
+### Ejecuta WebDAV en Docker
+
+La imagen oficial `nginx:alpine` incluye el módulo DAV base pero **no** el módulo dav-ext. Montar una configuración con `dav_ext_methods` en `nginx:alpine` fallará con `unknown directive "dav_ext_methods"`. Aquí tienes tres opciones que funcionan:
+
+<Tabs>
+<Tab name="hacdias/webdav (recomendado)">
+Un servidor WebDAV basado en Go. 5,8k estrellas en GitHub, mantenido activamente (v5.14.2), permisos por usuario, soporte bcrypt.
+
+```yaml
+# docker-compose.yml
+services:
+  webdav:
+    image: hacdias/webdav:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6065:6065"
+    volumes:
+      - ./webdav-config.yml:/config.yml:ro
+      - /var/www/webdav:/data
+    command: -c /config.yml
+```
+
+Archivo de configuración (`webdav-config.yml`):
+
+```yaml
+address: 0.0.0.0
+port: 6065
+scope: /data
+modify: true
+rules: []
+users:
+  - username: webdavuser
+    password: "$2a$10$..."  # bcrypt hash
+    scope: /data
+```
+</Tab>
+<Tab name="nginx-webdav-nononsense">
+Una imagen basada en nginx con dav-ext preinstalado. Más de 500K descargas en Docker Hub, funciona con el Finder de macOS y Windows 11 sin configuración extra.
+
+```yaml
+# docker-compose.yml
+services:
+  webdav:
+    image: dgraziotin/nginx-webdav-nononsense:latest
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - /var/www/webdav:/var/www/webdav
+      - ./htpasswd:/etc/nginx/.htpasswd:ro
+    environment:
+      - WEBDAV_USERNAME=webdavuser
+      - WEBDAV_PASSWORD=your_password
+```
+</Tab>
+<Tab name="nginx:alpine + dav-ext">
+Para quienes quieren nginx puro en un contenedor. Requiere instalar el módulo ext dentro del contenedor.
+
+```yaml
+# docker-compose.yml
+services:
+  webdav:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - /var/www/webdav:/var/www/webdav
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    entrypoint: >
+      sh -c "apk add --no-cache nginx-mod-http-dav-ext &&
+             nginx -g 'daemon off;'"
+```
+
+Añade al `nginx.conf` montado, en el nivel superior:
+
+```nginx
+load_module modules/ngx_http_dav_ext_module.so;
+```
+</Tab>
+</Tabs>
+
+<Notice type="error" title="Evita bytemark/webdav">
+La imagen <code>bytemark/webdav</code> lleva más de 7 años sin actualizarse. Está basada en una configuración de Apache sin mantenimiento. Usa una de las opciones de arriba en su lugar.
+</Notice>
+
+Para más ideas con Docker, consulta [contenedores Docker para tu home server](/es/contenedores-docker-servidor-casa/) y [un gestor de archivos web autoalojado como FileBrowser](https://www.bitdoze.com/deploy-filebrowser-docker/).
+
+### Integra con NFS, Samba y copias de seguridad
+
+Crea un punto de acceso unificado que combine tus recursos compartidos existentes:
+
+```bash
+# Symlink NFS and Samba shares into WebDAV
+sudo ln -s /srv/samba/media /var/www/webdav/media
+sudo ln -s /srv/nfs/documents /var/www/webdav/documents
+
+# Set ownership on symlinks (note -h flag)
+sudo chown -h www-data:www-data /var/www/webdav/media
+sudo chown -h www-data:www-data /var/www/webdav/documents
+```
+
+Combínalo con tu [estrategia de copias de seguridad](https://www.bitdoze.com/add-new-drive-lvm/) — y **prueba la restauración, no solo la copia**:
+
+```bash
+#!/bin/bash
+# webdav-backup.sh
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="/var/www/webdav/backups"
+
+mkdir -p "$BACKUP_DIR/$DATE"
+
+# Backup configs
+cp /etc/nginx/sites-available/webdav "$BACKUP_DIR/$DATE/"
+cp /etc/nginx/.htpasswd "$BACKUP_DIR/$DATE/"
+
+# Backup content (use -l to preserve symlinks as-is)
+rsync -av /var/www/webdav/documents/ "$BACKUP_DIR/$DATE/documents/"
+```
+
+## Paso 5: monitoriza y mantén tu servidor WebDAV
+
+### Análisis de logs
+
+```bash
+# Monitor access in real time
+sudo tail -f /var/log/nginx/webdav_access.log
+
+# Check for errors
+sudo tail -f /var/log/nginx/webdav_error.log
+
+# Top IPs by request count
+sudo awk '{print $1}' /var/log/nginx/webdav_access.log | sort | uniq -c | sort -nr | head -20
+
+# Recent PUT/GET activity
+sudo grep -E "(PUT|GET)" /var/log/nginx/webdav_access.log | tail -20
+```
+
+Para una visión más amplia de la salud del servidor, mira cómo [monitorizar la CPU, la memoria y el disco de tu servidor](https://www.bitdoze.com/sever-monitoring/).
+
+<Accordion label="Script de monitorización de WebDAV" group="ops">
+
+```bash
+#!/bin/bash
+# webdav-monitor.sh
+
+echo "=== WebDAV Server Monitor ==="
+echo "Date: $(date)"
+echo
+
+echo "Nginx Status:"
+sudo systemctl status nginx --no-pager -l
+echo
+
+echo "SSL Certificate Status:"
+sudo certbot certificates
+echo
+
+echo "Active Connections:"
+ss -tlnp | grep :443 | wc -l
+echo
+
+echo "Disk Usage:"
+df -h /var/www/webdav
+echo
+
+echo "Recent Access (Last 10 entries):"
+sudo tail -10 /var/log/nginx/webdav_access.log
+```
+
+</Accordion>
+
+<Accordion label="Script de mantenimiento automatizado" group="ops">
+
+```bash
+#!/bin/bash
+# webdav-maintenance.sh
+
+# Rotate logs
+sudo logrotate /etc/logrotate.d/nginx
+
+# Clean temp files older than 1 day
+sudo find /var/www/webdav/.tmp -type f -mtime +1 -delete 2>/dev/null
+
+# Check SSL certificate expiry
+DAYS_LEFT=$(sudo certbot certificates 2>/dev/null | grep "VALID" | head -1 | grep -oP '\d+(?= days)')
+if [ -n "$DAYS_LEFT" ] && [ "$DAYS_LEFT" -lt 30 ]; then
+    echo "WARNING: SSL certificate expires in $DAYS_LEFT days"
+fi
+
+# Fix permissions
+sudo chown -R www-data:www-data /var/www/webdav
+sudo find /var/www/webdav -type d -exec chmod 755 {} \;
+sudo find /var/www/webdav -type f -exec chmod 644 {} \;
+```
+
+</Accordion>
+
+## Mejores prácticas de seguridad para WebDAV
+
+### Usa solo HTTPS y endurece TLS
+
+Nunca expongas WebDAV por HTTP plano. La configuración anterior ya redirige HTTP a HTTPS y solo habilita TLS 1.2+1.3.
+
+Para perfiles de cifrado personalizados, usa el [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/) para generar una configuración acorde a tu versión de nginx. Los valores por defecto de Certbot están bien para la mayoría de los casos.
+
+### Bloquea la fuerza bruta con fail2ban o CrowdSec
+
+```bash
+# Install fail2ban
+sudo apt install fail2ban -y
+
+# Create WebDAV jail
+sudo nano /etc/fail2ban/jail.local
+```
+
+```ini
+[webdav]
+enabled  = true
+port     = 443
+filter   = webdav
+logpath  = /var/log/nginx/webdav_access.log
+maxretry = 5
+bantime  = 3600
+findtime = 600
+```
+
+<Notice type="warning" title="Corrección del logpath de fail2ban">
+Las respuestas 401 de autenticación fallida se registran en el <strong>log de acceso</strong>, no en el log de errores. Asegúrate de que <code>logpath</code> apunte a <code>webdav_access.log</code>, no a <code>webdav_error.log</code>. El jail no encontrará coincidencias si vigila el archivo equivocado.
+</Notice>
+
+Crea el filtro:
+
+```bash
+sudo nano /etc/fail2ban/filter.d/webdav.conf
+```
+
+```ini
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST|PUT|DELETE|PROPFIND|MKCOL|COPY|MOVE|LOCK|UNLOCK)" .* (401|403) .*$
+ignoreregex =
+```
+
+Para un enfoque más moderno, considera [CrowdSec como alternativa moderna a fail2ban](https://www.bitdoze.com/crowdsec-secure-server/) — comparte inteligencia de amenazas a través de una red comunitaria.
+
+<Accordion label="Script de copia de seguridad y restauración" group="security">
+
+```bash
+#!/bin/bash
+# webdav-backup-config.sh
+
+BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_ROOT="/backup/webdav-config"
+
+mkdir -p "$BACKUP_ROOT/$BACKUP_DATE"
+
+# Backup Nginx configuration
+cp /etc/nginx/sites-available/webdav "$BACKUP_ROOT/$BACKUP_DATE/"
+
+# Backup authentication files
+cp /etc/nginx/.htpasswd* "$BACKUP_ROOT/$BACKUP_DATE/" 2>/dev/null
+
+# Backup SSL certificates
+cp -r /etc/letsencrypt "$BACKUP_ROOT/$BACKUP_DATE/"
+
+# Create restoration script
+cat > "$BACKUP_ROOT/$BACKUP_DATE/restore.sh" << 'EOF'
+#!/bin/bash
+set -e
+sudo cp webdav /etc/nginx/sites-available/
+sudo cp .htpasswd* /etc/nginx/
+sudo cp -r letsencrypt /etc/
+sudo nginx -t && sudo systemctl restart nginx
+echo "WebDAV configuration restored"
+EOF
+
+chmod +x "$BACKUP_ROOT/$BACKUP_DATE/restore.sh"
+echo "Backup completed: $BACKUP_ROOT/$BACKUP_DATE"
+```
+
+**Prueba la restauración** — ejecuta el script de restauración en un servidor de staging o en un contenedor antes de necesitarlo en producción.
+
+</Accordion>
+
+### Mantén Nginx parcheado
+
+<Notice type="warning" title="Mantente al día con los parches">
+CVE-2026-27654 no es la única corrección de seguridad de nginx en 2026. Comprueba tu versión con regularidad:
+<pre>nginx -v</pre>
+Si usas el paquete de la distro, las actualizaciones de seguridad llegan con <code>apt upgrade</code> / <code>dnf update</code>. Si usas el repo de nginx.org, sigue sus anuncios de versiones. En cualquier caso, no ejecutes un nginx sin parchear expuesto a internet.
+</Notice>
+
+## Resolución de problemas comunes de WebDAV
+
+### 405 Method Not Allowed
+
+El módulo WebDAV no está cargado o los métodos no están configurados.
+
+```bash
+# Verify module
+nginx -V 2>&1 | grep dav
+
+# Check config syntax
+sudo nginx -t
+
+# Test methods
+curl -X OPTIONS https://webdav.yourdomain.com/ -u webdavuser:password -v
+```
+
+### Fallos de autenticación
+
+```bash
+# Check password file exists and is readable
+ls -la /etc/nginx/.htpasswd
+
+# Test auth with curl
+curl -X GET https://webdav.yourdomain.com/ -u webdavuser:password -v
+
+# Reset a user's password
+sudo htpasswd -B /etc/nginx/.htpasswd webdavuser
+```
+
+### Problemas de SSL/TLS
+
+```bash
+# Test SSL handshake
+openssl s_client -connect webdav.yourdomain.com:443 -servername webdav.yourdomain.com
+
+# Check certificate validity
+sudo certbot certificates
+
+# Force renewal
+sudo certbot renew --force-renewal -d webdav.yourdomain.com
+```
+
+### Errores específicos de Windows
+
+- **0x80070043 "The network name cannot be found"**: inicia el servicio WebClient (`net start WebClient`), verifica que la URL use HTTPS y comprueba que el servidor responde a peticiones OPTIONS.
+- **"The user has not been authenticated"**: Windows bloquea la autenticación básica sobre HTTP por defecto. Usa HTTPS.
+- **¿Sigue fallando?**: usa RaiDrive, Cyberduck o WinSCP en lugar del Explorador de Windows.
+
+### Problemas del Finder de macOS
+
+- **Montaje de solo lectura**: el servidor no está anunciando `DAV: 2`. Añade las directivas `dav_ext_lock_zone` y `dav_ext_lock` del paso 2.
+- **Errores MKCOL 409**: el workaround para el MKCOL del Finder de macOS ya está en la configuración principal de arriba.
+
+### Permiso denegado por SELinux (RHEL/Fedora)
+
+Si PROPFIND devuelve 500 en sistemas de la familia RHEL, lo más probable es que SELinux esté impidiendo que nginx lea el directorio WebDAV.
+
+```bash
+# Set the correct SELinux context
+sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/webdav(/.*)?"
+sudo restorecon -Rv /var/www/webdav
+
+# Verify
+ls -laZ /var/www/webdav/
+```
+
+<Notice type="error" title="SELinux bloquea PROPFIND">
+Revisa <code>/var/log/audit/audit.log</code> buscando entradas <code>avc: denied</code> relacionadas con nginx. El viejo consejo de usar <code>httpd_exec_t</code> es incorrecto para directorios de datos — usa <code>httpd_sys_rw_content_t</code> en su lugar.
+</Notice>
+
+### Subida/descarga lenta
+
+```nginx
+# Increase buffer sizes
+client_body_buffer_size 256k;
+large_client_header_buffers 4 256k;
+
+# Optimize workers
+worker_processes auto;
+worker_connections 1024;
+
+# Enable HTTP/2 (use the directive, not the deprecated listen parameter)
+http2 on;
+```
+
+## Casos de uso y ejemplos de integración
+
+### Configuración para trabajo remoto
+
+Crea una ubicación de trabajo dedicada con sus propias credenciales:
+
+```nginx
+location /work {
+    alias /var/www/webdav/work;
+    dav_methods PUT DELETE MKCOL COPY MOVE;
+    dav_ext_methods PROPFIND OPTIONS LOCK UNLOCK;
+    dav_ext_lock zone=davlock;
+    dav_access user:rw group:rw all:r;
+    create_full_put_path on;
+
+    auth_basic "Work Files";
+    auth_basic_user_file /etc/nginx/.htpasswd-work;
+}
+```
+
+Para acceso con restricción horaria, usa reglas de fail2ban o listas blancas de IP en lugar de comprobaciones de hora basadas en Lua — más sencillo y sin dependencia de módulos extra.
+
+### Copia de seguridad de fotos desde el móvil
+
+```nginx
+location /photos {
+    alias /var/www/webdav/photos;
+    dav_methods PUT MKCOL;
+    dav_ext_methods PROPFIND OPTIONS;
+    dav_access user:rw group:rw all:r;
+    create_full_put_path on;
+
+    # Allow large image uploads
+    client_max_body_size 100M;
+
+    auth_basic "Photo Backup";
+    auth_basic_user_file /etc/nginx/.htpasswd-photos;
+}
+```
+
+### Endpoint unificado con NFS y Samba
+
+Combina WebDAV con los recursos compartidos de archivos de tu [home server](https://www.bitdoze.com/why-need-home-server/) existente:
+
+```bash
+# Create unified access point
+sudo mkdir -p /var/www/webdav/unified
+sudo ln -s /srv/nfs/media /var/www/webdav/unified/media-nfs
+sudo ln -s /srv/samba/documents /var/www/webdav/unified/docs-samba
+sudo ln -s /var/lib/docker/volumes /var/www/webdav/unified/container-data
+
+# Set permissions on symlinks
+sudo chown -h www-data:www-data /var/www/webdav/unified/*
+```
+
+Esto crea un único endpoint WebDAV que da acceso a archivos de tus configuraciones de [NFS](https://www.bitdoze.com/setup-nfs-linux/), [Samba](https://www.bitdoze.com/setup-samba-linux/) y [contenedores Docker](/es/contenedores-docker-servidor-casa/).
+
+## Conclusión
+
+WebDAV con Nginx te da acceso remoto seguro a los archivos y complementa tu infraestructura de archivos compartidos existente. A diferencia de [NFS](https://www.bitdoze.com/setup-nfs-linux/), que funciona mejor en redes locales, o [Samba](https://www.bitdoze.com/setup-samba-linux/) para compartir en local entre plataformas, WebDAV gestiona el acceso remoto a través de firewalls y NAT.
+
+En mi mini PC N100, WebDAV sirve de puente para acceder a los archivos en remoto mientras los protocolos locales cubren el acceso en la red interna. Ejecutar los tres protocolos cubre todo, desde el streaming de medios en local hasta el acceso remoto seguro a documentos.
+
+Empieza con la funcionalidad básica — pon primero en marcha SSL y la autenticación, luego añade el bloqueo, fail2ban y controles de acceso personalizados según los necesites. Si expones WebDAV a internet, mantén nginx parcheado y considera [CrowdSec](https://www.bitdoze.com/crowdsec-secure-server/) para el bloqueo automatizado de amenazas. Para acceso solo personal, una VPN como [autoalojar tu propio servidor de control de Tailscale](/es/headscale-tailscale-autoalojado/) suele ser la mejor opción — elimina por completo la superficie de ataque pública.
+
+Para más información sobre cómo montar un home server completo, consulta mis guías sobre [monitorización de servidores](https://www.bitdoze.com/sever-monitoring/) y los [mejores mini PCs para home servers](https://www.bitdoze.com/best-mini-pc-home-server/).
+
+<Button text="Despliega tu servidor WebDAV" size="lg" color="blue" variant="solid" />

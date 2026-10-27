@@ -1,0 +1,777 @@
+---
+date: 2025-11-12
+lastmod: 2026-09-15T00:00:00Z
+translationKey: "notifuse-self-host-newsletter"
+title: "Cómo autoalojar tu newsletter con Notifuse (guía 2026)"
+meta_title: "Autoaloja Notifuse v40: instalación con Docker y Dokploy (2026)"
+description: "Autoaloja Notifuse v40 en un VPS con Docker Compose o Dokploy: configuración de SECRET_KEY, la nueva licencia BSL, copias de seguridad, actualizaciones seguras y soluciones a fallos reales."
+image: "@assets/images/25/11/notifuse-yt-final.webp"
+imageAlt: "Consola de Notifuse autoalojada mostrando un editor de difusiones de newsletter respaldado por tu propio PostgreSQL y ESP"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["self-hosted", "newsletter", "docker"]
+canonical: "https://www.bitdoze.com/es/notifuse-newsletter-autoalojado/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+Notifuse ha cambiado lo suficiente en el último año como para que los pasos de la primera versión de esta guía ya no produzcan una instalación funcional. La versión actual es **v40.0**, publicada el 5 de septiembre de 2026. Dos cosas se movieron: la aplicación ahora toma un único `SECRET_KEY` en lugar de un par de claves PASETO, y el archivo Docker Compose incluido sirve la consola en el puerto **8081**, no en el 8080. Si copiaste el archivo compose antiguo y obtuviste un contenedor que arrancaba bien pero nunca respondía, esa es la razón.
+
+Esta es la guía corregida, escrita para el operador en solitario con un VPS y entre 2.000 y 50.000 suscriptores que quiere newsletter **y** correo transaccional sin pagar por cada correo. Cubre tres vías de despliegue, cómo verificar que cada una funciona de verdad, la operación del día a día, las copias de seguridad, actualizaciones que no te dejarán en un callejón sin salida y los fallos con los que te vas a encontrar.
+
+Una precisión honesta antes de cualquier comando: **Notifuse es la capa de aplicación, no un servicio de envío.** Tú alojas la app y la base de datos. La entregabilidad la sigues alquilando a un proveedor de correo. Presupuesta ambas cosas.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/kzULOnAuS0o"
+  label="Autoaloja tu newsletter con Notifuse"
+/>
+
+## Qué es Notifuse (y qué no es)
+
+El README de Docker Hub lo dice claramente: *Notifuse es la capa de aplicación, no un servicio de envío.* Guarda contactos, eventos y analítica en una base de datos Postgres que tú controlas. El correo sale por **tu** cuenta de Amazon SES, Mailgun, Postmark, SendGrid, SparkPost, Mailjet o SMTP genérico, a lo que ese proveedor cobre por mensaje.
+
+Esa división es la clave. Te llevas la parte cara (almacenamiento de contactos, segmentación, automatización, gestión de bajas) por el precio de un VPS pequeño, y pagas tarifas de producto básico por la parte que de verdad cuesta dinero. Amazon SES ronda los 0,10 $ por cada 1.000 correos. Mailchimp cobra por contacto, incluidos los inactivos.
+
+Está construido en Go con una consola en React, y depende de una sola cosa: PostgreSQL 17 o superior. Sin Redis, sin ClickHouse, sin Elasticsearch, sin flota de workers. Eso importa más que la lista de funciones cuando eres la única persona de guardia, porque cada servicio extra es otro contenedor en tu presupuesto de memoria y otra cosa que puede morir a las 2 de la madrugada.
+
+A septiembre de 2026 la imagen tiene más de 100.000 pulls y el repo unas 2,2 mil estrellas. No es un proyecto enorme, pero se publica activamente. Ya verás por qué eso corta en ambos sentidos en la sección de la licencia.
+
+<Notice type="info" title="Lo que 'autoalojado' significa aquí de verdad">
+Alojas la app y la base de datos. La entregabilidad la sigues alquilando a un ESP. Presupuesta ambas cosas: un VPS *y* un proveedor SMTP/API. Si omites el ESP, tienes una base de datos de contactos muy bonita que no puede enviar nada.
+</Notice>
+
+## Qué ha cambiado desde la primera versión de esta guía
+
+Reescribí esto en lugar de parchearlo, porque seis de los pasos antiguos eran incorrectos. Aquí va el registro de cambios con fechas, para que los lectores que vuelven vean qué se movió:
+
+<ListCheck>
+<ul>
+<li><strong>Licencia (v40.0, sep. 2026)</strong>: v40.0 y posteriores se publican bajo la Business Source License 1.1, que pasa a AGPL-3.0-or-later cuatro años después del lanzamiento de cada versión. v39.x y anteriores siguen siendo AGPL-3.0 de forma permanente. Cinco funciones requieren una clave de licencia.</li>
+<li><strong>`SECRET_KEY` sustituyó a las claves PASETO</strong>: el antiguo par `PASETO_PRIVATE_KEY` / `PASETO_PUBLIC_KEY` y el generador de paseto.notifuse.com ya no existen. Ahora generas una única clave con `openssl rand -base64 32`.</li>
+<li><strong>Puerto 8081</strong>: el archivo compose incluido sirve la consola en el 8081. La imagen independiente sigue usando el 8080. Confundirlos es el reporte más común de «arrancó pero la página no carga».</li>
+<li><strong>La instalación ahora es `git clone` + `docker compose up -d`</strong>: el archivo incluido compila desde el Dockerfile del repo e incluye Postgres. El archivo de 60 líneas hecho a mano de la guía antigua es ahora una variante opcional.</li>
+<li><strong>Automatizaciones visuales</strong>: un constructor de flujos con 10 tipos de nodo (`delay`, `email`, `branch`, `filter`, `add_to_list`, `remove_from_list`, `ab_test`, `webhook`, `list_status_branch`).</li>
+<li><strong>Analítica web integrada sin cookies</strong>: el conjunto de funciones de Staminads se fusionó, corriendo sobre el mismo Postgres. Sin cookies, sin un segundo motor de base de datos.</li>
+<li><strong>CMS de blog alojado, gestor de archivos S3, centro de preferencias, puente SMTP, inicio de sesión único OIDC</strong>: todo añadido desde el post original, todo en el mismo contenedor.</li>
+<li><strong>Asistente de IA con tu propia clave</strong>: Anthropic, OpenAI o Gemini. El coste cae en tu factura de API, no en la de Notifuse.</li>
+<li><strong>Zapier y claves de API con alcance limitado (v39.0)</strong>: las claves de API ahora pueden limitarse a recursos concretos en lugar de dar acceso completo al espacio de trabajo.</li>
+<li><strong>El guardián de migraciones (v39.0)</strong>: Notifuse se niega a arrancar cuando su base de datos fue migrada por una versión más reciente, y nombra ambas versiones. Buena red de seguridad, y cambia cómo haces rollback. Ver la sección de actualizaciones.</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="¿Actualizas desde la versión de 2025 de esta guía?">
+Dos correcciones importan más que el resto. Usa `SECRET_KEY`, no claves PASETO. Y revisa tu puerto: `8081` para el compose incluido, `8080` para la imagen independiente. Todo lo demás del archivo compose antiguo sigue funcionando, pero no arrancará limpio sin esas dos correcciones.
+</Notice>
+
+## Las funciones que de verdad importan para un operador en solitario
+
+La versión antigua de este post enumeraba nueve funciones y no te decía nada. Aquí va la versión corta.
+
+<Tabs>
+<Tab name="Marketing por email">
+<ul>
+<li><strong>Constructor MJML de arrastrar y soltar con Liquid.</strong> Variables como `{{ contact.first_name }}` y campos personalizados, con vista previa en tiempo real. Es la mayor mejora práctica frente a la edición en HTML puro de Listmonk.</li>
+<li><strong>Difusiones con segmentos, tests A/B y etiquetado UTM.</strong> Segmenta por campos, eventos personalizados o puntuaciones RFM, y luego haz A/B con el asunto, el contenido o la hora de envío.</li>
+<li><strong>Perfiles de contacto con una línea de tiempo completa.</strong> Cada envío, apertura, clic, cambio de lista y evento de webhook en una sola vista. Esto es lo que abres cuando alguien dice que nunca recibió tu correo.</li>
+<li><strong>Segmentación sin SQL.</strong> Reglas dinámicas con fechas relativas, comportamiento anidado y grupos RFM.</li>
+<li><strong>Espacios de trabajo multi-inquilino con aislamiento de base de datos por espacio de trabajo.</strong> Una sola instancia sirve de verdad a varias marcas o clientes.</li>
+<li><strong>Centro de preferencias y doble opt-in.</strong> Los suscriptores gestionan sus propias suscripciones y tú conservas un registro de consentimiento.</li>
+</ul>
+</Tab>
+<Tab name="Automatizaciones y extras">
+<ul>
+<li><strong>Constructor visual de flujos.</strong> Un disparador en la raíz, 10 tipos de nodo. La inscripción es `once` o `every_time`, con `exit_on_reply` opcional. Borrador, activa o en pausa; una automatización en pausa retiene sus inscripciones en lugar de descartarlas.</li>
+<li><strong>API transaccional más un puente SMTP.</strong> Envía desde tu app por REST, o deja que un SaaS antiguo que solo habla SMTP retransmita por Notifuse sin cambios de código.</li>
+<li><strong>Analítica propia sin cookies.</strong> Un script de unos 21 KB servido por tu propia instancia en `/na.js`, que guarda las sesiones junto a tus contactos. Tablas particionadas por mes, así que expirar datos viejos es un `DROP TABLE`.</li>
+<li><strong>Gestor de archivos compatible con S3.</strong> Las imágenes de correo viven en tu bucket, servidas por CDN, en lugar de inflar el contenedor.</li>
+<li><strong>Asistente de IA con tu propia clave de proveedor.</strong> El gasto en tokens es tuyo.</li>
+<li><strong>Webhooks salientes firmados</strong> y, desde v39.0, claves de API con alcance limitado.</li>
+</ul>
+</Tab>
+</Tabs>
+
+Si quieres una superficie menor y sin preguntas de licencia, [Keila es la opción más ligera](/keila-setup/): Elixir, Docker, un Postgres, sin particionado de base de datos por espacio de trabajo.
+
+## La realidad de la licencia (lee esto antes de comprometerte)
+
+Este es el cambio que más afecta a si deberías empezar.
+
+**Lo que aplica ahora:** Notifuse **v40.0 y todas las versiones posteriores** se publican bajo la **Business Source License 1.1**. Cada versión pasa a **AGPL-3.0-or-later cuatro años después de su publicación**. **v39.x y todas las anteriores siguen siendo AGPL-3.0 de forma permanente**; el cambio no es retroactivo y no puede hacerse retroactivo. El SDK de analítica web sigue siendo AGPL en todas las versiones.
+
+**Lo que aún puedes hacer sin pagar:** ejecutar Notifuse en producción, para un negocio, a cualquier escala. Leer, modificar y redistribuir el código fuente. Alojarlo para otras personas y cobrarles por ello, algo que la Additional Use Grant permite explícitamente.
+
+**Las cinco funciones que requieren una clave de licencia:**
+
+| Función | Autoalojado gratis (sin clave) | Con clave de licencia |
+|---|---|---|
+| Espacios de trabajo | Hasta 3, todos se conservan | Del 4.º espacio en adelante |
+| Permisos de equipo | Solo acceso completo | Permisos restringidos / por recurso |
+| Tenants de Amazon SES | Los tenants existentes siguen enviando | Aprovisionar un tenant SES nuevo |
+| Traducciones de plantillas | Las traducciones guardadas siguen enviándose | Añadir un idioma, editar uno |
+| Inicio de sesión único (OIDC) | Acceso mediante código de inicio de sesión | Botón SSO disponible |
+
+Las cuatro primeras se niegan en el momento en que creas o cambias algo y responden **402**, nombrando la función que falta. La quinta es más silenciosa: el botón SSO deja de ofrecerse, el log de arranque dice `sso_gated=true` y todo el mundo entra con un código de acceso. Instalar una clave recupera el botón sin reiniciar.
+
+**Lo que conserva una instalación sin licencia:** todo. Sin bloqueo por telemetría, sin activación, sin cuenta, sin phone-home; la verificación de la clave es offline contra una firma compilada en el binario. Ningún espacio de trabajo, contacto, clave o ajuste se borra, se oculta o pasa a solo lectura. La consola nunca cae en un modo restringido. Los permisos ya concedidos siguen aplicándose exactamente como se concedieron. Los tenants SES ya aprovisionados siguen enviando. **La vía de envío no contiene ninguna comprobación de licencia**, así que las difusiones programadas, las automatizaciones y los webhooks siguen funcionando tras expirar una clave. Una invitación emitida con licencia sigue aceptándose después.
+
+Instala una clave pegándola en **Settings** → **Licence** como root, o definiendo `NOTIFUSE_LICENSE_KEY` (la variable de entorno gana, y mientras esté definida la consola se niega a guardar un valor competidor). Una clave cubre un despliegue, es decir, una base de datos Postgres por muchos contenedores de API que ejecutes. Una clave vencida sigue otorgando durante 30 días más.
+
+<Notice type="warning" title="Si actualizas a v40.0+">
+No pierdes nada de lo que ya tienes. Una instalación con más de tres espacios de trabajo los conserva todos; simplemente no puede crear un cuarto sin una clave. Nada de lo que ya está en un conjunto de permisos restringido se amplía a acceso completo.
+</Notice>
+
+Sentry, HashiCorp, CockroachDB y Grafana hicieron el mismo movimiento en el momento en que su proyecto se convirtió en algo que la gente ejecuta en producción. Para un equipo pequeño el impacto práctico suele ser cero: la mayoría de operadores en solitario nunca crean un cuarto espacio de trabajo ni tocan las traducciones de plantillas ni el aislamiento de tenants SES. Si necesitas SSO o un cuarto espacio, ponle precio a la licencia frente a una alternativa gestionada y trátala como una partida más. No es una cuestión moral.
+
+## Notifuse frente a Listmonk, Keila y el SaaS que estás dejando
+
+| Opción | Qué obtienes | Qué te cuesta |
+|---|---|---|
+| **Notifuse (autoalojado)** | Constructor MJML, automatizaciones, segmentación, analítica web, aislamiento de BD por espacio de trabajo | Tu VPS, cuenta ESP, copias de seguridad y reputación DNS |
+| **Listmonk** | Herramienta más pequeña y afilada. Sin constructor visual. **Sin ningún concepto de clave de licencia** | Plantillas en HTML puro |
+| **Keila** (Elixir, Docker) | Simple, limpia, API transaccional, soporte MJML | Menos automatizaciones y analítica; la superficie más pequeña |
+| **Sendy** | Barato, maduro, formularios de captura de correo | Licencia de pago por adelantado, interfaz anticuada, sin MJML |
+| **Notifuse Cloud** | El mismo software, gestionado: copias diarias con PITR, actualizaciones sin caída, monitorización, SSL | Desde 16 $/mes, escalando con contactos activos |
+| **Mailchimp / ConvertKit / Klaviyo** | Nada que operar | Precio por contacto, tus datos en su base de datos, sin elección de ESP |
+
+**Frente al SaaS**: dejas de pagar por contacto, tus datos se quedan donde están y puedes apuntar la vía de envío al proveedor más barato del año. También heredas todos los problemas de entregabilidad que Mailchimp absorbía por ti.
+
+**Frente a Listmonk**: Notifuse gana en el constructor visual, el multi-inquilino nativo, las automatizaciones y la analítica web integrada. Listmonk gana en tamaño y en tener cero maquinaria de claves de licencia. Si la sección anterior te dejó mal sabor, es una razón legítima para elegir Listmonk o Keila.
+
+**Frente a Keila**: la respuesta correcta más pequeña si quieres una newsletter y nada más. Un Postgres, sin proliferación de bases de datos por espacio de trabajo. Mira la [guía de newsletter autoalojada con Keila](/keila-setup/) para esa vía.
+
+Si prefieres no gestionar ningún servidor, [EmailOctopus es una opción barata de email marketing alojado](https://go.bitdoze.com/emailoctopus) y [MailerLite es una sólida plataforma alojada de newsletter](https://go.bitdoze.com/mailerlite). Ninguna supera al autoalojamiento para alguien con 20.000 suscriptores y un VPS ya pagado. Son la respuesta correcta para quien no quiere ser dueño de un pg_dump.
+
+<Notice type="info" title="La recomendación corta">
+Autoaloja Notifuse si quieres los datos y vas a hacerte cargo de las copias de seguridad y el DNS. Elige Listmonk o Keila si la licencia te molesta. Paga por Cloud si tu tiempo vale más de 16-39 $/mes. ¿Eliges primero un PaaS? Empieza con [Dokploy vs Coolify vs Kamal 2](/es/coolify-vs-dokploy-vs-kamal-2/).
+</Notice>
+
+## Requisitos previos
+
+Todo lo de abajo tiene que existir antes del paso uno. Equivocarse en esta lista es cómo una instalación de 30 minutos se convierte en una tarde entera.
+
+<ListCheck>
+<ul>
+<li><strong>Un servidor:</strong> 2 vCPU / 2 GB de RAM / 40 GB de SSD es el mínimo para una lista pequeña. Sube a 4 GB para la analítica web integrada o varios espacios de trabajo. La imagen ocupa unos 63 MB; lo que crece es Postgres y las bases de datos por espacio de trabajo.</li>
+<li><strong>Cualquier Linux con Docker Engine y Compose v2.</strong> Funcionan tanto amd64 como arm64; la imagen es multi-arch, así que un Hetzner CAX o un Oracle Ampere valen.</li>
+<li><strong>Un dominio y un subdominio</strong> como <code>newsletter.yourdomain.com</code>, además de poder añadir un registro A y luego registros TXT SPF/DKIM/DMARC.</li>
+<li><strong>Un endpoint HTTPS público.</strong> No es opcional. Los enlaces de seguimiento, las URL de baja y los webhooks salientes apuntan a tu instancia.</li>
+<li><strong>Una cuenta SMTP o ESP</strong>: SES, Mailgun, Postmark, SendGrid, SparkPost, Mailjet o SMTP genérico. Necesaria para el <em>correo del sistema</em> (enlaces de acceso, invitaciones, restablecimientos de contraseña) antes de enviar una campaña.</li>
+<li><strong>PostgreSQL 17 o superior</strong> si no usas el compose incluido, con permisos <strong>CREATE DATABASE</strong> en el usuario de BD, porque Notifuse crea una base de datos por espacio de trabajo.</li>
+<li><strong>Puertos:</strong> 8080 (independiente) u 8081 (compose incluido), 443 para el proxy, opcionalmente 587/465 para el puente SMTP. Muchos proveedores de VPS bloquean el puerto 25 saliente por defecto.</li>
+</ul>
+</ListCheck>
+
+Un VPS europeo de 5-8 €/mes con 2 vCPU y 2 GB es suficiente. Hetzner Cloud es mi opción por defecto, y vale la pena [revisar los planes actuales de Hetzner](/es/hetzner-cloud-precios-2026/) antes de pedirlo. Hostinger es la alternativa económica. ¿Comparando proveedores? Mira [DigitalOcean vs Vultr vs Hetzner](/es/digitalocean-vs-vultr-vs-hetzner/). En hosts ARM, [instala primero Docker y Compose en Ubuntu ARM](/install-docker-ubuntu-arm/).
+
+<Button text="Prueba Hetzner Cloud" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+<Button text="Prueba el VPS de Hostinger" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás replanteándote una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="info" title="Empieza con un nivel gratuito de SMTP para probar">
+El nivel gratuito de Brevo basta para demostrar que la fontanería funciona. Pásate a Amazon SES (~0,10 $/1.000 correos) o a un relay barato cuando haya una lista real encima. Mira la [reseña de Mail.Baby](/mail-baby-review/) para pago por uso, o [monta un relay SMTP con ZeptoMail](/es/configurar-relay-smtp-zeptomail/) si quieres un solo host haciendo ambos trabajos.
+</Notice>
+
+## ¿Qué vía de despliegue elegir?
+
+Tres vías, una decisión.
+
+| Vía | Úsala cuando | Ojo con |
+|---|---|---|
+| **Compose incluido** (`git clone` + `up -d`) | Quieres tenerlo funcionando esta misma noche en un VPS. Incluye Postgres 17, sirve en :8081 | El puerto es 8081, no 8080. Fija la etiqueta de la imagen |
+| **Plantilla de Dokploy** | Ya usas Dokploy y quieres SSL, DNS y una GUI | Las variables de entorno de la plantilla pueden ir por detrás de la documentación oficial |
+| **Imagen independiente + tu propio Postgres** | Producción, la vía recomendada por el proveedor, el máximo control | El usuario de BD necesita CREATE DATABASE; `DB_HOST` es el host de Postgres, no `localhost` |
+
+![Arquitectura de Notifuse: el proxy inverso y el puente SMTP alimentan la API de Notifuse, que guarda los datos en PostgreSQL 17 con una base de datos por espacio de trabajo, mantiene las imágenes en un bucket compatible con S3 y envía el correo a través de tu propio proveedor de email](@assets/images/25/11/notifuse-architecture.svg)
+
+Una restricción de diseño que interiorizar ya: **Notifuse está diseñado para funcionar como una sola instancia.** No pongas dos réplicas de la app detrás de un balanceador de carga contra un mismo Postgres. Obtendrás entregas de webhook duplicadas y, desde v39.0, una negativa a arrancar en cuanto una réplica migre el esquema y la otra se reinicie. Escala la máquina, no el número de réplicas.
+
+## Opción 1: Docker Compose incluido (la vía más rápida)
+
+Este es el inicio rápido oficial. Clona el repo, compila la imagen desde el Dockerfile incluido y arranca Postgres junto a ella.
+
+### 1. Instala Docker Engine y Compose v2
+
+```sh
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+```
+
+Verifica:
+
+```sh
+docker --version && docker compose version
+```
+
+Quieres Compose v2 (`docker compose`, con espacio). Si `docker compose version` da error, tienes el binario antiguo de v1 y todos los comandos de abajo fallarán. Instala el paquete del plugin para tu distro y vuelve a comprobar.
+
+### 2. Clona y arranca el stack
+
+```sh
+git clone https://github.com/notifuse/notifuse.git
+cd notifuse
+docker compose up -d
+```
+
+La primera ejecución compila en local, así que dale unos minutos. La consola está en el **puerto 8081**:
+
+```sh
+docker compose ps
+curl -I http://localhost:8081
+```
+
+`curl` debería devolver una respuesta HTTP, ya sea un 200 o una redirección a la página de acceso. Si no devuelve nada, revisa `docker compose logs -f api`. La causa habitual es que Postgres aún no está healthy en una máquina de 2 GB.
+
+<Notice type="info" title="Esta vía también vale para producción">
+La documentación la llama vía de evaluación, pero no hay nada malo en usarla en producción en un solo VPS si fijas `image: notifuse/notifuse:v40.0` y haces copias de seguridad. Lo que no deberías hacer es usar `latest` y esperar que un `pull` nocturno transcurra sin incidentes.
+</Notice>
+
+### 3. Crea tu `.env` antes del primer arranque
+
+Crea un `.env` junto a `compose.yaml`:
+
+```ini
+SECRET_KEY="$(openssl rand -base64 32)"
+DB_PASSWORD="pick-something-long"
+ROOT_EMAIL="you@yourdomain.com"
+API_ENDPOINT="https://newsletter.yourdomain.com"
+```
+
+Ejecuta tú mismo `openssl rand -base64 32` y pega la salida entre comillas. Si el stack ya está arriba, otro `docker compose up -d` recoge el archivo. Las variables de entorno siempre prevalecen sobre lo que el asistente guardó en la base de datos, lo cual es una función hasta que es una sorpresa.
+
+<Notice type="error" title="¿Un # en tu contraseña? Entrecomíllala.">
+En un archivo `.env`, un `#` sin comillas inicia un comentario. `DB_PASSWORD=mypass#word123` se interpreta como `mypass`, y pasarás una hora convencido de que tus credenciales de Postgres están mal. Entrecomilla siempre:
+
+```ini
+DB_PASSWORD="mypass#word123"
+SECRET_KEY="abc123#xyz789"
+```
+Esto solo afecta a los archivos `.env`. Los valores definidos en tu shell, en Compose o en el almacén de secretos de una plataforma no tienen el problema.
+</Notice>
+
+<Notice type="warning" title="Nunca cambies SECRET_KEY tras el primer arranque">
+`SECRET_KEY` cifra todos los secretos de integración del espacio de trabajo: claves API del ESP, contraseñas SMTP, todo. Cambiarla no rota nada, los destruye permanentemente. Guarda el valor en tu gestor de contraseñas en el momento en que lo crees.
+</Notice>
+
+### 4. Completa el asistente de configuración
+
+Abre `http://<ip-del-servidor>:8081` y recorre el asistente:
+
+1. **Correo del administrador root**: la cuenta que puede crear espacios de trabajo y entrar en System Settings.
+2. **Endpoint de la API**: la URL pública completa, `https://newsletter.yourdomain.com`, no la IP.
+3. **Configuración SMTP**: para el correo del sistema. Hazlo ahora aunque no vayas a enviar campañas en un mes. Sin ella no puedes recibir un correo de acceso ni de restablecimiento de contraseña.
+4. **Contraseña de administrador**, o continuar con códigos de acceso.
+
+<Notice type="info" title="Varios administradores root">
+`ROOT_EMAIL` acepta una lista separada por comas o punto y coma, y se crea una cuenta por cada dirección al arrancar. La comparación distingue mayúsculas, así que `Alice@example.com` y `alice@example.com` son dos personas distintas.
+</Notice>
+
+### 5. Ponlo detrás de TLS
+
+La app escucha en HTTP plano en el 8081. Termina TLS con tu proxy y reenvía hacia ella.
+
+Caddy es el que menos trabajo da. Un archivo en `/etc/caddy/Caddyfile`:
+
+```
+newsletter.yourdomain.com {
+    reverse_proxy 127.0.0.1:8081
+}
+```
+
+Luego `sudo systemctl reload caddy`. Caddy obtiene y renueva el certificado de Let's Encrypt por sí solo. Para las etiquetas de Traefik dentro de Docker, mira [Traefik como proxy inverso en Docker](/traefik-proxy-docker/).
+
+Si prefieres seguir con Nginx, la configuración antigua sigue funcionando. Cambia `proxy_pass http://localhost:8080;` por `proxy_pass http://localhost:8081;`. Ese descuido de una línea es el 502 más común de este artículo.
+
+### 6. Verifica que realmente está arriba
+
+```sh
+docker compose ps
+docker compose logs -f api
+curl -I https://newsletter.yourdomain.com
+```
+
+Cómo se ve lo correcto: ambos contenedores `Up`, el log mostrando la migración de la base de datos completando sin errores, y un 200 sobre un certificado válido sin la bandera `-k`. Luego carga la página de acceso y ejecuta el correo de prueba del asistente. La lista completa de verificación está más abajo.
+
+<Notice type="info" title="No subas .env al repo">
+`.env` guarda la contraseña de tu base de datos y la clave que cifra cada credencial de integración. Mantenlo fuera de git. [Secretos en Docker Compose: qué funciona y qué no](/docker-compose-secrets/) cubre las opciones con honestidad.
+</Notice>
+
+## Opción 2: Despliega con Dokploy
+
+Dokploy es un PaaS autoalojado que te da una GUI, SSL automático y una plantilla de Notifuse. Si ya lo usas, esta es la vía más rápida.
+
+### 1. Instala Dokploy
+
+```sh
+curl -sSL https://dokploy.com/install.sh | sh
+```
+
+El recorrido completo está en la [guía de instalación de Dokploy](/dokploy-install/).
+
+### 2. Despliega la plantilla
+
+1. Entra en Dokploy y crea un proyecto nuevo.
+2. Abre **Templates**, busca **Notifuse**.
+3. Rellena el formulario: tu subdominio, host/puerto/usuario/contraseña SMTP, correo de administrador.
+4. Pulsa **Deploy**.
+
+Dokploy aprovisiona PostgreSQL 17, cablea la red y emite un certificado de Let's Encrypt.
+
+### 3. DNS
+
+Añade un registro A que apunte tu subdominio a la IP del VPS:
+
+| Tipo | Nombre | Valor |
+|---|---|---|
+| A | `newsletter` | la IP de tu VPS |
+
+### 4. Verifica
+
+Abre tu dominio e inicia sesión. Si la página da 502, Dokploy está proxyando al puerto equivocado. Si TLS falla, el registro aún no se ha propagado o Let's Encrypt ya te aplicó rate-limit por intentos anteriores. Revisa los logs de Dokploy antes de reintentar.
+
+<Notice type="warning" title="Deriva de la plantilla">
+Las plantillas van por detrás de la documentación oficial. Si la plantilla de Notifuse todavía pide claves PASETO, es anterior a v40. Usa la vía manual de Compose en lugar de pelear con ella, o sobrescribe con `SECRET_KEY` en el panel de variables de entorno. Fija la etiqueta de la imagen (`notifuse/notifuse:v40.0`) en lugar de dejar `latest`, para que un redespliegue no pueda saltar una versión mayor. Gestionar apps compose en Dokploy se cubre en [desplegar una app Docker Compose en Dokploy](/dokploy-docker-compose-app/).
+</Notice>
+
+## Opción 3: Contenedor independiente con tu propio PostgreSQL (producción)
+
+La vía de producción del proveedor: la imagen publicada contra tu propio Postgres 17. Te da la historia de actualizaciones más limpia y control sobre dónde viven los datos.
+
+La versión rápida de Docker Hub:
+
+```sh
+docker run -d --name notifuse \
+  -p 8080:8080 \
+  -e DB_HOST=your-postgres-host \
+  -e DB_PORT=5432 \
+  -e DB_USER=postgres \
+  -e DB_PASSWORD=your-password \
+  -e SECRET_KEY="$(openssl rand -base64 32)" \
+  notifuse/notifuse:latest
+```
+
+Para cualquier cosa que vayas a ejecutar de verdad, mantenlo en Compose. Esta es la variante «trae tu propio Postgres», corregida para v40. La versión anterior de esta guía incluía `PASETO_PRIVATE_KEY` aquí, que ya no existe:
+
+```yaml
+services:
+  notifuse:
+    image: notifuse/notifuse:v40.0
+    ports:
+      - '8080:8080'
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+      SECRET_KEY: ${SECRET_KEY}
+      API_ENDPOINT: https://newsletter.yourdomain.com
+      ROOT_EMAIL: you@yourdomain.com
+      ENVIRONMENT: production
+      TELEMETRY: 'false'
+      CHECK_FOR_UPDATES: 'false'
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+```
+
+Dos detalles hacen que esto funcione, y ambos son fáciles de meter mal:
+
+- **`DB_HOST: postgres`, no `localhost`.** Dentro de un contenedor, `localhost` es el contenedor. Usa el nombre del servicio, o un hostname externo si Postgres vive en otro sitio.
+- **El usuario de BD necesita permiso para crear bases de datos.** Notifuse crea una base de datos por espacio de trabajo más su propia `notifuse_system`. Un usuario limitado a una sola base de datos falla al crear el espacio de trabajo con un error de permisos.
+
+<Notice type="info" title="Fija tu versión">
+Usa `notifuse/notifuse:v40.0`, o la `vXX.Y` que hayas probado, no `latest`. Un `docker compose pull` desatendido contra `latest` puede saltar una versión mayor, ejecutar una migración de esquema y dejarte sin más camino de vuelta que restaurar un volcado. [Ejecutar varias bases de datos PostgreSQL desde un solo servicio Docker](/es/multiples-bases-datos-postgres-docker/) cubre la mecánica.
+</Notice>
+
+## Las variables de entorno que de verdad importan
+
+El asistente cubre mucho, pero las instalaciones de producción deberían poner los valores sensibles en variables de entorno, porque **las variables de entorno siempre prevalecen sobre lo guardado en la base de datos**.
+
+**Obligatorias:**
+
+| Variable | Notas |
+|---|---|
+| `DB_HOST` | Host de Postgres. Nombre del servicio dentro de Compose |
+| `DB_PORT` | `5432` por defecto |
+| `DB_USER` | Necesita permisos CREATE DATABASE |
+| `DB_PASSWORD` | Entrecomíllala si contiene `#` |
+| `SECRET_KEY` | `openssl rand -base64 32`. Inmutable tras el primer arranque |
+
+**Defínelas en producción:**
+
+| Variable | Notas |
+|---|---|
+| `ROOT_EMAIL` | Administrador root, o una lista separada por comas/punto y coma. Distingue mayúsculas |
+| `API_ENDPOINT` | URL pública, usada para enlaces de seguimiento y URL de baja |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` | Correo del sistema. `587` STARTTLS, `465` TLS implícito |
+| `SMTP_FROM_EMAIL` / `SMTP_FROM_NAME` | Lo que ven los destinatarios en el campo From |
+| `SMTP_EHLO_HOSTNAME` | Para servidores SMTP que rechazan `EHLO localhost` |
+| `ENVIRONMENT` | `production` |
+| `TELEMETRY` / `CHECK_FOR_UPDATES` | Ambas por defecto en `true`. Ponlas en `false` si el phone-home saliente es una cuestión de política |
+| `LOG_LEVEL` | `info` por defecto, `debug` cuando persigues algo |
+
+**Ajuste, conviene conocerlas antes de escalar:**
+
+| Variable | Por defecto | Por qué importa |
+|---|---|---|
+| `DB_MAX_CONNECTIONS` | `100` | Total entre todas las bases de datos |
+| `DB_MAX_CONNECTIONS_PER_DB` | `3` | Por espacio de trabajo. Diez espacios son 30 conexiones como mínimo |
+| `DB_CONNECTION_MAX_LIFETIME` / `_IDLE_TIME` | `10m` / `5m` | Reciclaje de conexiones |
+| `DB_PREFIX` | `notifuse` | Prefijo de tablas y base de los nombres de tus bases de datos |
+| `TASK_SCHEDULER_ENABLED` / `_INTERVAL` / `_MAX_TASKS` | `true` / `30` / `10` | Planificador de difusiones y automatizaciones. Déjalo activado |
+
+**Solo si las necesitas:** `SMTP_BRIDGE_*`, `OIDC_*`, `TRACING_*`, `NOTIFUSE_LICENSE_KEY`, `BROADCAST_DATA_FEED_ALLOW_PRIVATE_HOSTS`.
+
+<Notice type="error" title="BROADCAST_DATA_FEED_ALLOW_PRIVATE_HOSTS desactiva la protección SSRF">
+Poner esto en `true` permite a los feeds de datos de difusiones consultar direcciones privadas, de loopback y link-local. Existe para despliegues que deliberadamente traen un feed desde dentro de su propia red. Si tus feeds vienen de internet pública, déjalo en el `false` por defecto.
+</Notice>
+
+<Notice type="info" title="La telemetría viene activada por defecto">
+`TELEMETRY=true` y `CHECK_FOR_UPDATES=true` son los valores de fábrica. Con la telemetría activada, los campos reportados incluyen versión, nivel de licencia, si OIDC está habilitado, si hay RBAC personalizado en uso y si hay tenants SES configurados. Nunca una clave, una organización, un emisor o un nombre de tenant. Pon ambas en `false` si no quieres que eso salga de tu red.
+</Notice>
+
+## Conecta tu proveedor de envío (y no hundas tu entregabilidad)
+
+Hay dos vías de correo separadas en Notifuse, y confundirlas es la razón por la que la gente no puede entrar.
+
+1. **Correo del sistema**: enlaces de acceso, invitaciones, restablecimientos de contraseña. Se envía por la configuración SMTP del asistente. Obligatorio desde el día uno.
+2. **Correo de campañas y transaccional**: se envía por el ESP que conectas a un espacio de trabajo en sus integraciones.
+
+Para Amazon SES, crea credenciales SMTP en la sección SMTP settings del panel de SES. No son claves de acceso IAM, y debes solicitar el acceso de producción antes de enviar a direcciones arbitrarias. Luego añade el proveedor en tu espacio de trabajo, pega las credenciales y envía una prueba.
+
+Meter el correo en las bandejas de entrada es ahora tu trabajo:
+
+- **SPF, DKIM y DMARC** en registros TXT del dominio desde el que envías. Omite DKIM y Gmail y Microsoft te castigarán en un día.
+- **Una dirección From coherente.** Envía desde `newsletter@yourdomain.com`, no desde una dirección de gmail.com en nombre de yourdomain.com.
+- **Una rampa de calentamiento.** Pasar de cero a 20.000 envíos en una noche en un dominio nuevo es cómo se fabrica un problema de reputación.
+- **Gestión de rebotes y quejas.** SES suspende cuentas por una tasa de quejas lo bastante mala, y ningún ajuste a nivel de app arregla eso.
+
+El **puente SMTP** es una función distinta. Permite a apps que solo hablan SMTP (Supabase Auth, Firebase, Auth0, scripts de cron) retransmitir por Notifuse para que obtengan tus plantillas MJML en lugar de su texto plano por defecto. Desactivado por defecto. Actívalo con `SMTP_BRIDGE_ENABLED=true` y elige una postura TLS:
+
+| `SMTP_BRIDGE_TLS` | Puerto | Significado |
+|---|---|---|
+| `starttls` | 587 | Escucha en plano, el cliente debe hacer STARTTLS antes de AUTH. Automático cuando hay certificados |
+| `implicit` | 465 | TLS desde el primer byte, para clientes sin STARTTLS |
+| `off` | cualquiera | Sin TLS. Solo detrás de un proxy que termine TLS en una red de confianza |
+
+En `ENVIRONMENT=production` el puente **se niega a arrancar sin TLS** salvo que pongas explícitamente `SMTP_BRIDGE_TLS=off`. Suministrar certificados significa codificar en base64 `fullchain.pem` y `privkey.pem` en `SMTP_BRIDGE_TLS_CERT_BASE64` y `SMTP_BRIDGE_TLS_KEY_BASE64`, y tras cada renovación de certbot hay que recodificar y actualizar las variables de entorno.
+
+<Notice type="warning" title="La entregabilidad es ahora tu trabajo">
+Salir de Mailchimp también pone el trabajo de reputación DNS sobre tu mesa. Reserva una hora para SPF/DKIM/DMARC y unas semanas de vigilar tasas de rebotes y quejas. Si prefieres no hacerlo, [Postfix con un relay SMTP externo](/postfix-external-smtp/) es una vía razonable para el correo del sistema mientras arreglas el lado de campañas.
+</Notice>
+
+## Verifica la instalación de punta a punta
+
+Instalar no es lo mismo que funcionar. Ejecuta esto antes de apuntar una lista real hacia ella.
+
+<ListCheck>
+<ul>
+<li><strong>Contenedores sanos:</strong> <code>docker compose ps</code> muestra todo Up sin bucles de reinicio. Un contenedor reiniciándose cada 30 segundos es casi siempre un problema de conexión a la BD.</li>
+<li><strong>Migración completada:</strong> <code>docker compose logs -f api</code> muestra la migración del esquema terminando limpia. Errores aquí significan un Postgres incompatible o un usuario sin los grants adecuados.</li>
+<li><strong>HTTPS válido:</strong> <code>curl -I https://newsletter.yourdomain.com</code> devuelve 200 sin <code>-k</code>. Si necesitas <code>-k</code>, los enlaces de seguimiento se romperán en los clientes de correo.</li>
+<li><strong>El acceso de administrador funciona</strong> como cuenta root, y System Settings carga.</li>
+<li><strong>La difusión de prueba llega:</strong> envíatela, ábrela, haz clic en un enlace, y confirma que la apertura y el clic se registraron en el informe de campaña. Prueba la vía del ESP y las redirecciones de seguimiento a la vez.</li>
+<li><strong>La llamada transaccional devuelve 2xx.</strong> Mira la advertencia de abajo antes de copiar el endpoint.</li>
+<li><strong>El webhook saliente dispara.</strong> Un webhook silencioso suele ser firewall o egreso DNS, no un bug.</li>
+<li><strong>El correo de restablecimiento de contraseña llega.</strong> Esto prueba el SMTP del <em>sistema</em>, una vía completamente separada del ESP de campañas. Sáltalo y descubrirás que está roto cuando estés bloqueado fuera.</li>
+<li><strong>El enlace de baja resuelve</strong> en tu dominio público, no en <code>localhost</code>. Si apunta a localhost, <code>API_ENDPOINT</code> está mal y estás incumpliendo.</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="Verifica la ruta de la API antes de lanzarla">
+La versión anterior de esta guía usaba `POST /api/v1/send`. El ejemplo publicado por el proveedor usa en cambio el estilo punteado `<recurso>.<acción>`. Lo que sigue es lo que el proveedor documenta públicamente, pero **las claves del body y las rutas dependen de la versión**. Abre la referencia de API de tu instancia (o **Settings** → **Integrations** → **API**) y confirma antes de cablearlo en una aplicación. No lo pegues en producción solo por mi palabra:
+
+```bash
+curl -X POST https://newsletter.yourdomain.com/api/transactional.send \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspace_id": "your-workspace",
+    "notification": {
+      "id": "welcome-email",
+      "contact": { "email": "you@example.com" },
+      "data": { "first_name": "Dragos" }
+    }
+  }'
+```
+
+Dos detalles relacionados: desde v39.0 el envío transaccional requiere una clave de API con **Transactional write**, y los destinatarios fallidos de una difusión se conservan siete días con un botón Reintentar (`broadcasts.retryFailed`) en lugar de descartarse en silencio.
+</Notice>
+
+Si falla una comprobación de puerto, verifica desde fuera de la máquina con un chequeo TCP de verdad en lugar de `ping`: [comprueba puertos remotos con nc](/check-remote-port-in-linux-nc/).
+
+## Operarla en el día a día
+
+<Tabs>
+<Tab name="Contactos y campañas">
+<ul>
+<li><strong>Primero los espacios de trabajo.</strong> Todo vive dentro de uno, con su propia base de datos, integraciones y dominio. Tres sin clave de licencia; el cuarto necesita una.</li>
+<li><strong>Contactos y listas.</strong> Importa por CSV o API, añade campos personalizados, construye segmentos sobre campos, eventos personalizados o puntuaciones RFM. Activa el doble opt-in para cualquier cosa que no sea una dirección tecleada a mano.</li>
+<li><strong>Plantillas y difusiones.</strong> Construye en el editor MJML con variables Liquid, guarda como plantilla, programa contra un segmento. Haz A/B con el asunto, el contenido o la hora de envío, y deja que el etiquetado UTM gestione la atribución.</li>
+<li><strong>Centro de preferencias y centro de notificaciones.</strong> Los suscriptores gestionan sus propias suscripciones, que es la pieza que hace soportable el papeleo del GDPR.</li>
+</ul>
+</Tab>
+<Tab name="Automatizaciones y API">
+<ul>
+<li><strong>Las automatizaciones son grafos, no listas.</strong> Un disparador en la raíz, nodos para `delay`, `email`, `branch`, `filter`, `add_to_list`, `remove_from_list`, `ab_test`, `webhook` y `list_status_branch`.</li>
+<li><strong>Borrador, activa o en pausa.</strong> Pausar retiene las inscripciones en lugar de descartarlas. Cada inscripción registra su propio estado (`active`, `completed`, `exited`, `failed`) más un historial por nodo.</li>
+<li><strong>Claves de API con alcance.</strong> Desde v39.0 puedes limitar una clave a recursos concretos. Dos trampas: el envío transaccional necesita Transactional write, y Contacts write es también lo que permite borrar contactos.</li>
+<li><strong>Puente SMTP para apps antiguas.</strong> Apunta un SaaS que solo habla SMTP a tu puente y obtiene tus plantillas sin un cambio de código.</li>
+<li><strong>Auth root programática para CI.</strong> Un usuario root puede autenticarse con una firma HMAC-SHA256 contra `POST /api/user.rootSignin` en lugar de un código de acceso. Las marcas de tiempo deben estar a menos de 60 segundos de la hora del servidor, con límite de 5 intentos cada 5 minutos.</li>
+</ul>
+</Tab>
+<Tab name="Analítica y extras">
+<ul>
+<li><strong>Analítica web.</strong> Actívala por espacio de trabajo y pega el snippet `/na.js` en tu sitio. Sin cookies, de primera parte, mismo Postgres, con 40 reglas de atribución de canales por defecto que puedes editar y rellenar retroactivamente.</li>
+<li><strong>Retención por borrado de partición.</strong> Las sesiones caen en tablas mensuales como `web_sessions_y2026m08`. Expirar datos viejos es un `DROP TABLE` sobre la partición que ya no quieres, y el disco vuelve inmediatamente.</li>
+<li><strong>GeoLite2 para datos geográficos.</strong> Suelta tu propio `GeoLite2-City.mmdb` en el directorio `data/` montado (tiene precedencia) o apunta `GEOIP_DB_PATH` a él.</li>
+<li><strong>Gestor de archivos S3</strong> para imágenes y adjuntos de correo.</li>
+<li><strong>Asistente de IA.</strong> Funciona con tu propia clave de Anthropic, OpenAI o Gemini, así que el uso cae en tu factura de API.</li>
+<li><strong>Blog alojado.</strong> Con plantillas Liquid, en dominios personalizados que posee tu espacio de trabajo.</li>
+</ul>
+</Tab>
+</Tabs>
+
+Si el lado de la analítica te molesta, desactívala por espacio de trabajo o mantén la analítica del sitio separada. [Umami autoalojado](/umami-analytics-install/) y [Plausible](/es/instalar-plausible-analytics/) cumplen ambos sin analítica en tu stack de correo.
+
+## Lo que cuesta de verdad con 10.000 suscriptores (septiembre de 2026)
+
+Asume 10.000 contactos, cuatro envíos al mes (40.000 correos) y Amazon SES a unos 0,10 $ por 1.000 correos. Orden de magnitud, no un presupuesto.
+
+| Configuración | Mensual | Qué estás pagando |
+|---|---|---|
+| **Autoalojado** | 5-8 € de VPS + ~1-2 $ de SES + ~0-1 $ de almacenamiento | Una máquina de 2 vCPU / 2 GB, 40k correos, un bucket de objetos. Más tu tiempo |
+| **Notifuse Cloud** | 16 $ / 39 $ / 99 $ / 249 $ | Lite / Starter / Pro / Business. Correos ilimitados, BYO-ESP |
+| **SaaS tipo Mailchimp** | unas 10 veces la factura autoalojada a este tamaño | Precio por contacto, contactos inactivos incluidos |
+
+Niveles de Cloud a septiembre de 2026: Lite 16 $/mes (2.500 contactos activos, 1 espacio de trabajo, 3 miembros de equipo), Starter 39 $/mes (10.000 activos, 5 espacios), Pro 99 $/mes (25.000 activos, 10 espacios, 10 miembros), Business 249 $/mes (50.000 activos, 20 espacios, 25 miembros). Cada plan incluye todas las funciones y **correos ilimitados**; los planes difieren solo en escala y retención de datos.
+
+El modelo de facturación importa: Cloud cobra por **contactos activos**, definidos como cualquier contacto único con al menos un evento en los últimos 30 días (un correo enviado, un cambio de lista, una ejecución de automatización, un evento personalizado). Los contactos inactivos no cuentan. Mailchimp y Klaviyo facturan por la dirección haya abierto algo alguna vez o no. El autoalojamiento no tiene tarifa por contacto ni por correo, y por eso es barato con 10k y sigue siendo barato con 100k.
+
+<Notice type="info" title="El coste oculto">
+Tu tiempo, SPF/DKIM/DMARC y las copias de seguridad son la verdadera partida. Si tu tarifa por hora es alta y tu lista es pequeña, Cloud a 16-39 $/mes es genuinamente más barato. Dos horas de resolución de problemas cuestan más que un año del plan Lite. La misma lógica si la alternativa que realmente comprarías es [EmailOctopus](https://go.bitdoze.com/emailoctopus) sin nada que mantener.
+</Notice>
+
+<Button text="Prueba Hetzner Cloud" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="md" external={true} icon="rocket-launch" />
+
+## Copias de seguridad, actualizaciones y subidas de versión que no te romperán
+
+Esta sección decide si autoalojar fue una buena idea. Lee las tres partes antes de tocar una actualización.
+
+![Flujo de copia de seguridad y actualización: vuelca cada base de datos de notifuse y el directorio de datos, copia fuera del sitio, descarga una etiqueta de imagen fijada, deja que la app migre el esquema y luego verifica. El rollback significa restaurar el volcado previo a la actualización porque no existe down-migration](@assets/images/25/11/notifuse-backup-upgrade.svg)
+
+### Respalda lo que no puedes recrear
+
+**Notifuse crea una base de datos por espacio de trabajo más su propia base de datos del sistema, así que un único `pg_dump` de `notifuse_system` no es una copia de seguridad.** Si seguiste el consejo del artículo antiguo al pie de la letra, has estado respaldando configuración y perdiendo contactos.
+
+Este bucle vuelca todo. Ejecútalo desde el directorio del proyecto:
+
+```bash
+#!/usr/bin/env bash
+# Back up every Notifuse database plus the ./data mount.
+set -euo pipefail
+
+STAMP=$(date +%F-%H%M)
+OUT="/srv/backups/notifuse/$STAMP"
+mkdir -p "$OUT"
+
+DBS=$(docker compose exec -T postgres psql -U postgres -Atc \
+  "SELECT datname FROM pg_database
+   WHERE datname LIKE 'notifuse%' AND datistemplate = false;")
+
+for db in $DBS; do
+  docker compose exec -T postgres pg_dump -U postgres -Fc "$db" > "$OUT/$db.dump"
+done
+
+tar czf "$OUT/data-dir.tar.gz" -C "$HOME/notifuse/data" .
+echo "backed up: $DBS"
+```
+
+El bind mount `./data` guarda la base de datos GeoLite2 y cualquier recurso montado localmente, por eso va en el mismo archivo. Luego copia el directorio fuera del sitio. [Bunny Storage para copias offsite e imágenes de correo](https://go.bitdoze.com/bunny) cubre ambos trabajos a la vez. Una copia en el mismo disco que la base de datos es un duplicado, no un respaldo. Para versiones guiadas por configuración, [copias de seguridad de Dokploy con Cloudflare R2](/es/backups-dokploy-cloudflare-r2/) y [copias basadas en Restic](/es/pluton-backup-autoalojado/) son ambas sólidas.
+
+**Haz el ensayo de restauración.** Es la única prueba de que la copia funciona:
+
+```bash
+docker compose exec -T postgres createdb -U postgres notifuse_restore_test
+docker compose exec -T postgres pg_restore -U postgres -d notifuse_restore_test < /srv/backups/notifuse/2026-09-14-0300/notifuse_system.dump
+docker compose exec -T postgres psql -U postgres -d notifuse_restore_test -c "SELECT count(*) FROM contacts;"
+docker compose exec -T postgres dropdb -U postgres notifuse_restore_test
+```
+
+Si el conteo coincide con tu lista de contactos, tienes una vía de restauración. Si `pg_restore` da error por un rol o una extensión que falta, mejor ahora que durante un incidente.
+
+<Notice type="warning" title="Respalda antes de cada actualización — no solo de las que te asustan">
+Incluso una versión patch puede ejecutar una migración de esquema. Vuelca primero, actualiza después, conserva el volcado un par de semanas. El coste son unos minutos de disco; la alternativa es un postmortem de pérdida de datos.
+</Notice>
+
+### Actualiza la app
+
+1. Fija la etiqueta de la imagen en el archivo compose (`notifuse/notifuse:v40.0`).
+2. Ejecuta la copia de seguridad de arriba.
+3. Lee las notas de la versión objetivo, prestando atención a los cambios de licencia y funciones.
+4. Descarga y reinicia:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+En Dokploy, **Redeploy** hace lo mismo, y [actualizar el stack en Dokploy](/es/actualizar-docker-compose-dokploy/) cubre la vía por GUI. El caso genérico es [actualizar un contenedor con Docker Compose](/updating-container-docker-compose/).
+
+Luego verifica: `docker compose ps`, migración terminada en los logs, inicia sesión, envíate un correo de prueba. Un `pull` exitoso no prueba nada por sí solo.
+
+### Las trampas de actualizar (lee antes de hacer pull)
+
+**No existe la down-migration.** La app migra el esquema hacia adelante y nada lo mueve hacia atrás.
+
+**Desde v39.0, Notifuse se niega a arrancar cuando su base de datos fue migrada por una versión más reciente.** El log de arranque nombra ambas versiones y las dos salidas: desplegar una versión al menos tan nueva como la base de datos, o restaurar una base de datos con un sello no superior. Dos consecuencias:
+
+- Un despliegue rolling tiene que reemplazar **todas** las réplicas antes de que la primera migre, porque una réplica más vieja reiniciándose después nunca volverá a levantar. Otra razón para no ejecutar varias réplicas de la app.
+- Volver a una imagen anterior **requiere una base de datos de antes de la actualización**. Para la app, restaura el volcado previo a la actualización, luego arranca la imagen más vieja.
+
+**Actualizar el propio Postgres es un proyecto aparte.** El compose incluido se queda deliberadamente en Postgres 17, porque pasar a 18 necesita `pg_upgrade` y la 18 cambió el diseño de su directorio de datos. Eso es un problema de Postgres, no de Notifuse, y merece su propia ventana de mantenimiento.
+
+**Una clave de licencia expirada o eliminada no detiene el envío.** Pone en gris las cinco funciones limitadas y deja la vía de envío intacta.
+
+<Notice type="error" title="No existe la down-migration">
+Vuelve atrás la imagen sin restaurar la base de datos y la app se negará a arrancar, por diseño. La base de datos es la fuente de verdad, no el contenedor. Restaura primero los datos, luego la imagen.
+</Notice>
+
+## Resolución de problemas: los fallos con los que de verdad te vas a encontrar
+
+<Notice type="error" title="Los dos errores destructivos">
+Cambiar `SECRET_KEY` tras el primer arranque destruye permanentemente todas las credenciales de integración guardadas. Actualizar sin un volcado reciente te deja sin camino de rollback, porque no hay down-migration. Ambos se evitan en menos de un minuto de trabajo.
+</Notice>
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| El contenedor sale, los logs muestran conexión a BD rechazada | `DB_HOST=localhost` en lugar del nombre del servicio Postgres, o Postgres aún no está healthy | Pon `DB_HOST` al nombre del servicio o hostname real, y mantén `depends_on: condition: service_healthy` |
+| La creación del espacio de trabajo falla, permiso denegado | El usuario de BD no puede hacer `CREATE DATABASE` | Concede CREATEDB; Notifuse necesita una base de datos por espacio de trabajo |
+| Credenciales SMTP «incorrectas» pero son correctas | Un `#` en la contraseña fue truncado por el parseo del `.env` | Entrecomilla el valor: `SMTP_PASSWORD="pa#ss"` |
+| El correo de restablecimiento de contraseña nunca llega | SMTP del sistema sin configurar o mal configurado; una vía distinta del ESP de campañas | Configura `SMTP_*` y prueba un restablecimiento real |
+| Puerto ya asignado en 8080/8081 | Otra cosa posee el puerto | Revisa `ss -ltnp` y re-mapea. El compose incluido usa 8081 |
+| El puente SMTP no arranca en producción | El puente rechaza el arranque sin TLS | Proporciona los valores base64 de cert/clave, o pon `SMTP_BRIDGE_TLS=off` detrás de un proxy que termine TLS |
+| «database has been migrated by a newer build» | Volviste atrás la imagen pero no la base de datos | Restaura el volcado previo a la actualización, luego arranca la imagen más vieja |
+| 502 desde el proxy inverso | Puerto upstream equivocado, o la app ligada a `127.0.0.1` en el contenedor | Apunta el proxy a 8081 (incluido) u 8080 (independiente), liga en `0.0.0.0` |
+| Errores de permisos en el `./data` montado | Desajuste de UID/GID en el bind mount | Iguala la propiedad con el usuario del contenedor, o usa un volumen con nombre |
+| Respuestas 402 que nombran una función | Una función limitada por licencia | 4.º espacio de trabajo, permisos restringidos, nuevo tenant SES, autoría de traducciones, o SSO |
+| Las campañas se envían pero caen en spam | Faltan SPF/DKIM/DMARC, o no hubo calentamiento | Arregla primero los registros DNS, el calentamiento después |
+
+Si un puerto parece abierto en local pero no es alcanzable desde fuera, comprueba si Docker está saltándose las reglas de tu firewall: [Docker se salta UFW](/docker-bypasses-firewall/) explica el comportamiento de iptables y la solución.
+
+## Endurecimiento y notas de producción
+
+Lista corta, y todo lo que hay en ella sostiene peso.
+
+<ListCheck>
+<ul>
+<li><strong>Nunca expongas Postgres.</strong> Nada de <code>5432</code> en la lista blanca de tu firewall, nada de mapeo de puertos al host. La app es el único cliente.</li>
+<li><strong>Firewall, y luego la advertencia de Docker.</strong> UFW o firewalld más la conciencia de que Docker escribe sus propias reglas de iptables. Mira <a href="/es/informe-seguridad-bsi-docker-ufw/">el análisis del informe BSI de Hetzner</a> y <a href="/docker-bypasses-firewall/">Docker se salta el firewall</a>.</li>
+<li><strong>Los secretos fuera del repo.</strong> Mantén <code>.env</code> fuera de git; usa secretos de Docker o el almacén de tu plataforma. <code>SECRET_KEY</code> se escribe una sola vez.</li>
+<li><strong>Límites de recursos.</strong> Acota <code>mem_limit</code> y CPU para que una difusión desbocada no pueda agotar la memoria de la máquina. Recuerda que <code>DB_MAX_CONNECTIONS</code> es 100 en total y <code>DB_MAX_CONNECTIONS_PER_DB</code> es 3; haz esa aritmética antes de crear diez espacios de trabajo.</li>
+<li><strong>Monitorización.</strong> Un chequeo de uptime en el endpoint público más métricas de contenedores. <a href="/es/beszel-uptime-kuma/">Beszel y Uptime Kuma</a> cubren ambos, y <a href="/sever-monitoring/">la monitorización de recursos Docker</a> responde al «por qué está lleno el disco».</li>
+<li><strong>Fail2ban o CrowdSec</strong> delante del proxy: <a href="/crowdsec-secure-server/">asegurar un VPS con CrowdSec</a>.</li>
+<li><strong>Actualizaciones.</strong> Fija etiquetas, vigila los releases de GitHub, suscríbete a las notificaciones de versiones para que un parche de seguridad no se pase tres semanas sin leer.</li>
+<li><strong>Privacidad.</strong> <code>TELEMETRY=false</code> y <code>CHECK_FOR_UPDATES=false</code> si la política lo exige. La retención de datos es decisión tuya, y el truco del borrado de particiones hace barato aplicarla.</li>
+</ul>
+</ListCheck>
+
+## Cuándo autoalojar Notifuse es una mala decisión
+
+Tres casos en los que te diría que no te molestes.
+
+**Tu lista es diminuta y no crece.** Por debajo de unos pocos cientos de suscriptores, un nivel gratuito alojado es menos trabajo que cualquier opción autoalojada, y el precio por contacto aún no ha empezado a morder. Usa un plan gratis y revisa esto dentro de un año.
+
+**No tienes apetito por DNS, entregabilidad ni `pg_dump`.** Notifuse Cloud ejecuta el mismo software desde 16 $/mes. Si prefieres no ser dueño de una rutina de copias de Postgres ni depurar registros DKIM, pagar a alguien es racional, no una capitulación. Autoalojar solo es más barato si tu tiempo es gratis.
+
+**Necesitas un cuarto espacio de trabajo o SSO y no vas a comprar una clave.** Entonces elige [Keila](/keila-setup/) o Listmonk, ninguno de los cuales tiene concepto de clave de licencia. Ejecutar software cuyos términos de licencia resentías es una mala base para un proceso de negocio.
+
+Si caes en el primer o segundo saco, [MailerLite es una sólida plataforma alojada de newsletter](https://go.bitdoze.com/mailerlite) y [Sender tiene un plan gratis para siempre](https://go.bitdoze.com/sender) que vale la pena valorar contra tu tamaño de lista.
+
+<Notice type="info" title="Sigue siendo la opción más barata si tienes el tiempo">
+Para un operador en solitario con una lista real, desde 5.000 suscriptores en adelante, autoalojar sigue siendo la respuesta correcta más barata, normalmente por un orden de magnitud. Esta sección existe para que nadie empiece en el sitio equivocado y abandone dos semanas después con el correo en la carpeta de spam de todo el mundo.
+</Notice>
+
+## Preguntas frecuentes
+
+<Accordion label="¿Notifuse sigue siendo gratis?" group="faq" expanded="true">
+Sí, autoalojarlo es gratis. v40.0 y posteriores se publican bajo la Business Source License 1.1, que pasa a AGPL-3.0-or-later cuatro años después del lanzamiento de cada versión. v39.x y anteriores siguen siendo AGPL-3.0 de forma permanente. Puedes ejecutarlo en producción, para un negocio, a cualquier escala, y alojarlo para otras personas y cobrarles. Cinco funciones necesitan una clave de licencia; la vía de envío nunca.
+</Accordion>
+
+<Accordion label="¿Qué necesita exactamente una clave de licencia?" group="faq">
+Cinco cosas: crear un cuarto espacio de trabajo, otorgar permisos que no sean acceso completo, aprovisionar un nuevo tenant de Amazon SES, añadir o editar una traducción de plantilla, y el inicio de sesión único. Las cuatro primeras responden HTTP 402 nombrando la función que falta. SSO es más silencioso: el botón deja de ofrecerse y el log de arranque dice `sso_gated=true`. Nada de lo que ya tienes te es quitado.
+</Accordion>
+
+<Accordion label="¿Puedo migrar desde Mailchimp?" group="faq">
+Sí. Exporta los contactos como CSV, impórtalos en un espacio de trabajo, mapea tus campos personalizados. El coste real son las plantillas: hay que reconstruirlas en el editor MJML, y una exportación de Mailchimp no trae reglas de segmentación ni lógica de automatización. Reserva unas horas para una lista real.
+</Accordion>
+
+<Accordion label="¿Puedo migrar desde Listmonk?" group="faq">
+Los contactos pasan como CSV. No hay un importador oficial de Listmonk al que pueda señalarte, así que espera importar contactos por CSV y reconstruir plantillas y listas a mano. [Keila](/keila-setup/) es la tercera opción en esa clase de tamaño si estás comparando proyectos.
+</Accordion>
+
+<Accordion label="¿Hay límite de envío?" group="faq">
+Notifuse no impone ninguno. Tu límite es lo que permita tu cuenta ESP: cuotas de envío de SES, límites de tasa de Mailgun, el plan de tu proveedor. A unos 0,10 $ por 1.000 correos en Amazon SES, el volumen rara vez es la parte cara de este stack.
+</Accordion>
+
+<Accordion label="¿Necesito un desarrollador?" group="faq">
+La instalación necesita soltura básica con Linux y Docker: SSH, un archivo compose, registros DNS, un proxy inverso. El uso diario (campañas, segmentos, automatizaciones) es apuntar y hacer clic. El trabajo continuo con sabor a desarrollador son las copias de seguridad y las actualizaciones, y este artículo te da scripts para ambas.
+</Accordion>
+
+<Accordion label="¿Puede enviar correo transaccional?" group="faq">
+Sí, de dos maneras: una API REST para envíos disparados por la app, y un puente SMTP para que una app existente que solo habla SMTP retransmita por Notifuse sin cambios de código. Ambas necesitan una clave de API correctamente limitada o un permiso otorgado, y el puente necesita TLS en producción.
+</Accordion>
+
+<Accordion label="¿Necesita Redis, ClickHouse o Elasticsearch?" group="faq">
+No. Una base de datos Postgres 17, más una base de datos por espacio de trabajo. Esa es la lista completa de dependencias, y por eso corre cómodo en un VPS de 2 GB y por eso no hay ningún servicio extra que monitorizar.
+</Accordion>
+
+<Accordion label="¿Funciona en ARM (Hetzner CAX, Oracle Ampere)?" group="faq">
+Sí. La imagen publicada es multi-arch, `linux/amd64` y `linux/arm64`. En una máquina ARM nueva, instala Docker y Compose primero: [Docker en Ubuntu ARM](/install-docker-ubuntu-arm/).
+</Accordion>
+
+<Accordion label="¿Cómo actualizo de forma segura?" group="faq">
+Respalda cada base de datos de cada espacio de trabajo y el mount `./data`, lee las notas de la versión, fija la etiqueta de la imagen, luego `docker compose pull && docker compose up -d` (o Redeploy en Dokploy). Después verifica que la migración completó y envía un correo de prueba. No hay down-migration, así que el único camino de rollback es restaurar el volcado previo a la actualización.
+</Accordion>
+
+## Puntos clave
+
+<ListCheck>
+<ul>
+<li><strong>Notifuse v40 es la capa de aplicación, no un servicio de envío.</strong> Trae tu propio ESP y presupuesta un VPS más ese proveedor.</li>
+<li><strong>La licencia cambió en septiembre de 2026.</strong> v40.0+ es BSL 1.1, pasando a AGPL cuatro años después de cada versión; v39.x y anteriores siguen siendo AGPL permanentemente. Cinco funciones necesitan una clave.</li>
+<li><strong>La instalación es un clone y un comando compose,</strong> consola en el puerto 8081, un `SECRET_KEY` de `openssl rand -base64 32` que nunca vuelves a cambiar.</li>
+<li><strong>Respalda cada base de datos de cada espacio de trabajo.</strong> Un único volcado de `notifuse_system` no es una copia de seguridad, y no hay down-migration que te salve.</li>
+<li><strong>10k suscriptores cuestan dólares de un solo dígito al mes</strong> más tu tiempo. Cloud empieza en 16 $/mes si prefieres no ser dueño de la operación.</li>
+<li><strong>Verifica antes de confiar:</strong> difusión de prueba, llamada transaccional, webhook, restablecimiento de contraseña, enlace de baja. Una instalación que responde por HTTPS casi no ha probado nada.</li>
+</ul>
+</ListCheck>
+
+¿Quieres verlo antes de instalar? La [demo en vivo](https://demo.notifuse.com/console/signin?email=demo@notifuse.com) del proveedor ejecuta la consola completa, y la [documentación de autoalojamiento](https://docs.notifuse.com/self-hosting/installation) es la fuente primaria de cada variable de entorno aquí. ¿Aún decidiendo la plataforma? Empieza con la [guía de instalación de Dokploy](/dokploy-install/); se paga sola la segunda vez que despliegas algo.

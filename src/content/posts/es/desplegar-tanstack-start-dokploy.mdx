@@ -1,0 +1,810 @@
+---
+date: 2025-10-29
+lastmod: 2026-09-13T00:00:00Z
+translationKey: "tanstack-start-dokploy-deploy"
+title: "Despliega TanStack Start en tu VPS con Dokploy - Guía completa"
+meta_title: "Despliega TanStack Start en un VPS con Dokploy (guía 2026)"
+description: "Despliega TanStack Start en un VPS con Dokploy: Postgres 17, migraciones de Drizzle, builds con Railpack o Dockerfile, HTTPS, además de verificación y rollback en producción."
+image: "@assets/images/25/10/dokploy-db-tanstack.jpeg"
+imageAlt: "App TanStack Start desplegada en un VPS con Dokploy y PostgreSQL en una red interna de Docker"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["tanstack", "dokploy", "deployment"]
+canonical: "https://www.bitdoze.com/es/desplegar-tanstack-start-dokploy/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+TanStack Start te da SSR, enrutado basado en archivos y funciones de servidor con tipado seguro en un solo proyecto Vite. Lo que no te da es un lugar donde ejecutarlo. Vercel aceptará encantado el despliegue y la factura, pero una app SSR pequeña no necesita edge functions ni precios por petición. Necesita un proceso en el puerto 3000 y una máquina Postgres al lado.
+
+Esta guía despliega una app TanStack Start con Drizzle ORM y PostgreSQL 17 en un VPS que controlas, usando Dokploy para el build, el proxy inverso y la base de datos. Haces push a `main`, se compila, las migraciones se ejecutan y el HTTPS ya viene resuelto.
+
+Esta es una reescritura de mi guía original. Tres cosas han cambiado:
+
+- La app habla con Postgres a través de la red interna de Docker de Dokploy, así que el puerto 5432 nunca queda expuesto a internet.
+- Producción ejecuta migraciones generadas y versionadas en lugar de `drizzle-kit push`, que puede eliminar columnas ante un cambio de esquema que no pensaste del todo.
+- Hay un Dockerfile multi-etapa para cuando la autodetección de Railpack falla, y explico cuándo importa.
+
+## Por qué ejecutar TanStack Start en tu propio VPS
+
+**Vídeo de configuración de Dokploy**
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/EaOvNN-RJgI"
+  label="Autoalojamiento sin complicaciones: VPS seguro + HTTPS + configuración de Dokploy"
+/>
+
+Este montaje funciona bien por varias razones:
+
+- **Control total**: tu infraestructura, tus datos, sin lock-in de plataforma en la ruta de despliegue
+- **Coste predecible**: una factura mensual fija de VPS en lugar de precios por petición. Una instancia de 2 vCPU / 4 GB en [Hetzner Cloud](https://go.bitdoze.com/hetzner) cuesta unos pocos euros al mes y ejecuta la app más Postgres con comodidad
+- **Sin límites de runtime**: sin timeouts de funciones, sin sorpresas de ancho de banda, sin cold starts
+- **Base de datos incluida**: PostgreSQL 17 gestionado desde el mismo panel, con backups programados
+- **Despliegues con git push**: el mismo flujo de trabajo que tenías en Vercel, sin el proveedor
+- **Stack moderno**: TanStack Start, Drizzle ORM, tRPC si lo quieres, todo con tipado de extremo a extremo
+
+_Los precios de los VPS subieron en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+El compromiso es claro: tú te encargas de los parches, los backups y el aviso de las 3 de la madrugada. Para un SaaS pequeño o una herramienta interna, es un buen trato. Para un sitio con audiencia global y cero ganas de operaciones, no lo es.
+
+<Notice type="info" title="Requisito previo: instala Dokploy">
+Antes de empezar, asegúrate de que tu servidor Dokploy está instalado y configurado. Sigue la guía completa de montaje: <a href="https://www.bitdoze.com/dokploy-install/" rel="noopener">Instalación de Dokploy – Olvídate de Vercel/Heroku y autoaloja tu SaaS</a>. Cubre la configuración del VPS, el endurecimiento de seguridad con CrowdSec y la instalación de Dokploy. Para actualizar apps ya desplegadas, consulta <a href="https://www.bitdoze.com/es/actualizar-docker-compose-dokploy/" rel="noopener">Cómo actualizar stacks de Docker Compose en Dokploy</a>.
+</Notice>
+
+## Qué necesitas
+
+<ListCheck>
+<ul>
+<li>Un VPS con Dokploy instalado. 2 vCPU / 4 GB es el mínimo realista para compilar y ejecutar una app Node SSR, y es lo que yo aprovisionaría. <a href="https://go.bitdoze.com/hetzner">Hetzner Cloud</a> es mi opción por defecto, <a href="https://go.bitdoze.com/hostinger-vps">Hostinger VPS</a> es la alternativa económica. Si aún estás eligiendo máquina, mi <a href="https://www.bitdoze.com/es/digitalocean-vs-vultr-vs-hetzner/">comparativa DigitalOcean vs Vultr vs Hetzner</a> cubre las diferencias de precio y facturación.</li>
+<li>Un dominio o subdominio con un registro A apuntando a la IP del VPS (por ejemplo <code>app.yourdomain.com</code>)</li>
+<li>Node.js 22 o 24 LTS en tu portátil (<code>node -v</code> debería mostrar 22.x o superior)</li>
+<li>Una cuenta de GitHub (o GitLab/Gitea) para el repositorio</li>
+<li>PostgreSQL 17 en Dokploy, o la disposición de crearlo en el paso 2</li>
+</ul>
+</ListCheck>
+
+Unos 45 minutos de principio a fin. El primer build de Dokploy es la parte lenta, de 2 a 5 minutos.
+
+---
+
+## Vídeo con todo el montaje en Dokploy
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/K3O2Cjq6Iho"
+  label="Despliega TanStack Start en tu VPS con Dokploy"
+/>
+
+## El despliegue de un vistazo
+
+<figure class="not-prose my-6 overflow-x-auto">
+<svg viewBox="0 0 800 130" width="800" height="130" role="img" aria-label="Flujo de despliegue: navegador, registro DNS A, Traefik en los puertos 80 y 443, contenedor de TanStack Start en el puerto 3000, PostgreSQL 17 en la red interna de Dokploy, el push a GitHub dispara el build" font-family="sans-serif" font-size="10" fill="#e2e8f0" text-anchor="middle">
+  <rect x="0" y="0" width="800" height="130" rx="12" fill="#0f172a" stroke="#0f172a" />
+
+  <rect x="10" y="38" width="110" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" />
+  <text x="65" y="61">Navegador</text>
+  <text x="65" y="75">https://app…</text>
+
+  <rect x="140" y="38" width="110" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" />
+  <text x="195" y="61">Registro DNS A</text>
+  <text x="195" y="75">VPS IPv4</text>
+
+  <rect x="270" y="38" width="120" height="50" rx="8" fill="#1e293b" stroke="#facc15" />
+  <text x="330" y="61">Traefik :80/:443</text>
+  <text x="330" y="75">Let's Encrypt TLS</text>
+
+  <rect x="410" y="38" width="130" height="50" rx="8" fill="#1e293b" stroke="#22c55e" />
+  <text x="475" y="61">contenedor app</text>
+  <text x="475" y="75">node :3000 (SSR)</text>
+
+  <rect x="560" y="38" width="130" height="50" rx="8" fill="#1e293b" stroke="#22c55e" />
+  <text x="625" y="61">postgres 17</text>
+  <text x="625" y="75">interno :5432</text>
+
+  <rect x="705" y="38" width="85" height="50" rx="8" fill="#1e293b" stroke="#94a3b8" />
+  <text x="747" y="61">GitHub</text>
+  <text x="747" y="75">push → build</text>
+
+  <text x="132" y="67" fill="#38bdf8" font-size="13">›</text>
+  <text x="262" y="67" fill="#38bdf8" font-size="13">›</text>
+  <text x="402" y="67" fill="#38bdf8" font-size="13">›</text>
+  <text x="552" y="67" fill="#38bdf8" font-size="13">›</text>
+
+  <text x="400" y="112" fill="#94a3b8">Solo los puertos 80 y 443 son públicos. Postgres es accesible en la red interna de Docker, no desde internet.</text>
+</svg>
+</figure>
+
+## Paso 1: verifica el servidor antes de desplegar nada
+
+Entra por SSH al VPS y confirma tres cosas: Docker está activo, el panel de Dokploy responde y tienes memoria suficiente para ejecutar un build de Node sin que el OOM killer lo detenga a mitad de camino.
+
+```sh
+ssh root@your-vps-ip
+
+# Docker and Dokploy running?
+docker ps --format '{{.Names}}\t{{.Status}}' | head
+
+# Memory and swap
+free -h
+
+# Panel listening locally
+curl -sI http://localhost:3000 | head -1
+```
+
+Salida esperada: los contenedores `dokploy` y `dokploy-traefik` listados como `Up`, y un `HTTP/1.1 200 OK` del panel. Si `free -h` muestra 0B de swap en una máquina de 2 a 4 GB, añade un swapfile antes de tu primer build. Los builds de Node consumen mucha memoria y un build matado se manifiesta como un "deployment failed" aleatorio sin log útil.
+
+```sh
+fallocate -l 2G /swapfile && chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+free -h
+```
+
+Si el swap sigue en 0B después de `swapon`, el archivo no se llegó a asignar (a menudo un disco lleno). Revisa `df -h /` antes de culpar al kernel.
+
+---
+
+## Paso 2: crea PostgreSQL 17 en Dokploy
+
+Crea la base de datos antes que la app para tener los datos de conexión cuando conectes Drizzle. Uso Postgres 17 porque es lo que llevo ejecutando en producción y no hay motivo para perseguir la 18 hasta que necesites algo de ella. Si tu versión de Dokploy ofrece la 18 y la quieres, funciona igual.
+
+1. Abre tu URL de Dokploy (`https://app.yourdomain.com`) y ve a **Databases** en la barra lateral
+2. **New Database** → **PostgreSQL**
+3. Configura:
+   - **Version**: `17`
+   - **Name**: `saas-app-db` (se convierte en el hostname interno, así que mantenlo corto y en minúsculas)
+   - **Database Name**: `saas-app`
+   - **Username**: `saas-app`
+   - **Password**: deja que Dokploy genere una y cópiala
+   - **External Port**: déjalo **desactivado**
+4. Créala y espera a que el servicio se levante
+
+### Deja el puerto externo desactivado
+
+La versión original de esta guía te decía que expusieras el 5432 y abrieras un agujero en iptables para él. No lo hagas. Tu contenedor de la app y el contenedor de Postgres están en el mismo servidor Dokploy y en la misma red de Docker, así que la app se conecta a `saas-app-db:5432` por la red interna. La base de datos nunca necesita un puerto público, y nunca tendrás un puerto de Postgres abierto a internet esperando a que alguien lo encuentre.
+
+En el dashboard existen dos cadenas de conexión. Usa la interna:
+
+```sh
+# Internal (what the app uses in production)
+postgresql://saas-app:<password>@saas-app-db:5432/saas-app
+
+# External (only if you insist on connecting from your laptop)
+postgresql://saas-app:<password>@91.98.95.196:5432/saas-app
+```
+
+Verifica que la base de datos realmente está escuchando antes de seguir. Abre la pestaña **Terminal** de la base de datos en Dokploy y ejecuta:
+
+```sh
+psql -U saas-app -d saas-app -c 'select version();'
+```
+
+Deberías ver `PostgreSQL 17.x` en la salida. `psql: FATAL: role "saas-app" does not exist` significa que estás en el contenedor equivocado o que el usuario se escribió mal al crearlo.
+
+<Notice type="warning" title="Si debes abrir el puerto 5432">
+Si la base de datos vive en un servidor distinto al de la app, necesitas el puerto externo. Ábrelo solo para tu IP, y recuerda que Docker escribe sus propias reglas de iptables, así que una regla de UFW por sí sola puede no bastar (<a href="https://www.bitdoze.com/docker-bypasses-firewall/" rel="noopener">Docker se salta UFW</a>). Restringe en el origen: <code>iptables -I INPUT -p tcp --dport 5432 -s YOUR.HOME.IP -j ACCEPT</code> más un DROP para todo lo demás, y luego <code>netfilter-persistent save</code>. Mejor aún, pásalo por WireGuard o una subred privada de VCN.
+</Notice>
+
+---
+
+## Paso 3: genera el esqueleto de la app TanStack Start
+
+La documentación actual de TanStack empuja a la gente hacia la CLI de TanStack. Las plantillas antiguas usaban `npm create @tanstack/start@latest`. Ambas te llevan al mismo flujo interactivo, así que usa la que documente tu versión:
+
+```sh
+npx @tanstack/cli@latest create tanstack-dokploy-test
+```
+
+Si ese comando falla en tu versión, vuelve a:
+
+```sh
+npm create @tanstack/start@latest
+```
+
+Los prompts se ven así, con mis respuestas:
+
+```
+◇  What would you like to name your project?
+│  tanstack-dokploy-test
+│
+◇  Would you like to use Tailwind CSS?
+│  Yes
+│
+◇  Select toolchain
+│  Biome
+│
+◇  What add-ons would you like for your project?
+│  Drizzle, Shadcn, tRPC, Query
+│
+◇  Would you like any examples?
+│  none
+│
+◇  Drizzle: Database Provider
+│  PostgreSQL
+```
+
+Por qué estas opciones: Drizzle te da un archivo de esquema que puedes comparar con diff, tRPC mantiene la API tipada sin clientes escritos a mano, y shadcn te da componentes que son tuyos en lugar de una dependencia. Si estás sopesando Start frente a Next.js o Astro para este proyecto, comparé los tres en [Astro vs Next.js vs TanStack Start](/es/astro-vs-nextjs-vs-tanstack-start-cual-gana/).
+
+```sh
+cd tanstack-dokploy-test
+npm run dev
+```
+
+Abre `http://localhost:3000`. Deberías ver la página de inicio sin errores en consola. Si el puerto está ocupado, Vite elige el siguiente libre y lo imprime, así que lee la salida del terminal en lugar de asumir el 3000.
+
+---
+
+## Paso 4: conecta Drizzle a Postgres
+
+### 4.1 Ejecuta un Postgres local para desarrollo
+
+No desarrolles contra la base de datos de producción. Levanta un Postgres desechable en Docker en local:
+
+```sh
+docker run -d --name pg-dev \
+  -e POSTGRES_USER=saas-app \
+  -e POSTGRES_PASSWORD=devpass \
+  -e POSTGRES_DB=saas-app \
+  -p 5432:5432 \
+  postgres:17
+```
+
+Crea `.env` en la raíz del proyecto:
+
+```sh
+# .env  (local development only)
+DATABASE_URL="postgresql://saas-app:devpass@localhost:5432/saas-app"
+```
+
+Y asegúrate de que nunca se suba al repo:
+
+```sh
+grep -qxF '.env' .gitignore || echo '.env' >> .gitignore
+git check-ignore -v .env
+```
+
+Ese último comando debería imprimir una línea de `.gitignore`. Si no imprime nada, el archivo está en staging y tienes una contraseña camino de GitHub.
+
+### 4.2 Apunta Drizzle a tu esquema
+
+El add-on de Drizzle genera un archivo de configuración. Ajústalo a tus rutas y asegúrate de que el dialecto coincide con tu base de datos:
+
+```ts
+// drizzle.config.ts
+import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./src/db/schema.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+  strict: true,
+  verbose: true,
+});
+```
+
+Un esquema mínimo para tener algo real que migrar:
+
+```ts
+// src/db/schema.ts
+import { boolean, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+
+export const todos = pgTable("todos", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  title: text("title").notNull(),
+  done: boolean("done").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+```
+
+### 4.3 Genera las migraciones y aplícalas
+
+```sh
+npm run db:generate   # writes SQL to ./drizzle
+npm run db:migrate    # applies pending migrations
+npm run db:studio     # optional GUI on http://localhost:4983
+```
+
+Verifica que la tabla existe y luego confirma que la migración quedó registrada:
+
+```sh
+docker exec -it pg-dev psql -U saas-app -d saas-app -c '\dt'
+docker exec -it pg-dev psql -U saas-app -d saas-app -c 'select hash from drizzle.__drizzle_migrations;'
+```
+
+Deberías ver `todos` en la lista de tablas y una fila en la tabla de migraciones por cada migración aplicada. Si `\dt` no muestra nada, `db:migrate` se conectó a una base de datos distinta de la que crees (normalmente un `DATABASE_URL` viejo en tu shell).
+
+<Notice type="warning" title="Nunca ejecutes drizzle-kit push contra producción">
+`db:push` aplica el diff de tu esquema directamente sobre la base de datos en vivo y eliminará una columna sin dudarlo para que tu código y la base de datos coincidan. Eso está bien para trastear en local, y es un incidente de pérdida de datos en producción. Genera el SQL en local, sube los archivos de `drizzle/` al repo y ejecuta `db:migrate` en producción (paso 8). Esta es también la razón de peso para mantener el esquema de Drizzle en control de versiones.
+</Notice>
+
+Las migraciones viven en git, así que cada entorno aplica las mismas sentencias en el mismo orden. Si trabajas con un esquema que cambia a menudo y quieres ver el flujo primero en una app más pequeña, la [guía de la app de tareas con TanStack Start + Drizzle](/es/tanstack-start-bunny-database-drizzle/) recorre el mismo patrón sobre una base de datos libSQL gestionada.
+
+---
+
+## Paso 5: prepara la app para producción
+
+### 5.1 Construye un servidor independiente
+
+El plugin de Vite de TanStack Start renderiza y sirve tu app en desarrollo, pero producción necesita un proceso Node de verdad. El preset `node-server` de Nitro genera uno en `.output/server/index.mjs`.
+
+```sh
+npm install @tanstack/nitro-v2-vite-plugin
+```
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import viteReact from "@vitejs/plugin-react";
+import viteTsConfigPaths from "vite-tsconfig-paths";
+import tailwindcss from "@tailwindcss/vite";
+import { nitroV2Plugin } from "@tanstack/nitro-v2-vite-plugin";
+
+export default defineConfig({
+  plugins: [
+    viteTsConfigPaths({ projects: ["./tsconfig.json"] }),
+    tailwindcss(),
+    tanstackStart(),
+    nitroV2Plugin({ preset: "node-server" }),
+    viteReact(),
+  ],
+});
+```
+
+<Notice type="info" title="Plugin Nitro v2 vs Nitro v3">
+La historia de hosting de TanStack Start ha cambiado. Las versiones más nuevas se combinan con Nitro v3, donde el plugin viene del propio Nitro, se importa como `nitro` desde `nitro/vite` y se llama con el preset `node-server`. Las plantillas antiguas de Start 1.x usan `@tanstack/nitro-v2-vite-plugin` como arriba. Comprueba qué instaló tu plantilla con `npm ls nitro` y sigue la página de hosting de esa versión. En ambos casos la salida cae en `.output/` y el comando de arranque es el mismo, que es lo único que le importa a Dokploy.
+</Notice>
+
+### 5.2 Fija los scripts y la versión de Node
+
+Tanto Railpack como Nixpacks leen `package.json` para decidir qué hacer. Sé explícito para que ninguno tenga que adivinar:
+
+```json
+{
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start": "node .output/server/index.mjs",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
+```
+
+Añade un archivo `.node-version` para que los builds no deriven cuando cambie el default del builder:
+
+```sh
+echo "22" > .node-version
+```
+
+Los builders de la máquina pueden leer `.node-version` o `.nvmrc`; Nixpacks también acepta una variable de build `NIXPACKS_NODE_VERSION`. Fijarlo en el repo es mejor que fijarlo en el panel, porque el repo viaja con la app.
+
+### 5.3 Añade un endpoint de salud
+
+Quieres una URL que te diga "el proceso está vivo y la base de datos responde". Una ruta de servidor es la versión más barata:
+
+```ts
+// src/routes/api/health.ts
+import { createFileRoute } from "@tanstack/react-router";
+import { sql } from "drizzle-orm";
+import { db } from "@/db";
+
+export const Route = createFileRoute("/api/health")({
+  server: {
+    handlers: {
+      GET: async () => {
+        try {
+          await db.execute(sql`select 1`);
+          return Response.json({ ok: true, db: "up" });
+        } catch {
+          return Response.json({ ok: false, db: "down" }, { status: 503 });
+        }
+      },
+    },
+  },
+});
+```
+
+En versiones antiguas de Start, la API de rutas de servidor basadas en archivos es `createServerFileRoute().methods({...})` en lugar de `server.handlers`. Si el build se queja de `server`, esa es la diferencia de versión.
+
+### 5.4 Prueba la build de producción en local
+
+Este es el paso que detecta la mayoría de los fallos de despliegue antes de que lleguen a Dokploy:
+
+```sh
+npm run build
+PORT=3000 node .output/server/index.mjs
+```
+
+En otra terminal:
+
+```sh
+curl -sI http://localhost:3000 | head -1          # HTTP/1.1 200 OK
+curl -s http://localhost:3000/api/health          # {"ok":true,"db":"up"}
+```
+
+Si `.output/server/index.mjs` no existe, tu build no ejecutó Nitro: comprueba que el plugin está en `vite.config.ts` y que `npm run build` realmente ejecutó `vite build` y no un script envoltorio. Si la ruta de salud devuelve `db: "down"` en local, tu `DATABASE_URL` ya está mal antes de que Docker entre en juego.
+
+### 5.5 Añade un Dockerfile (opcional pero merece la pena)
+
+Railpack va bien para una app Node estándar. Un Dockerfile gana cuando necesitas una imagen base concreta, paquetes de sistema extra o un build que puedas reproducir byte a byte en tu portátil. También es la vía de escape cuando la autodetección elige el comando de arranque equivocado y no quieres pelearte con ella.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM node:22-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:22-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+COPY --from=build /app/.output ./.output
+USER node
+EXPOSE 3000
+CMD ["node", ".output/server/index.mjs"]
+```
+
+Y un `.dockerignore` para que `node_modules` y los secretos se queden fuera de la imagen:
+
+```sh
+node_modules
+.output
+.git
+.env
+.env.*
+```
+
+Dos apuntes. La etapa de runtime solo copia `.output`, así que `drizzle-kit` no está en la imagen de producción. Es deliberado, y es la razón por la que el paso 8 ejecuta las migraciones desde la shell del contenedor usando `npx` o desde un paso aparte, no desde el comando de arranque de la app. Y `USER node` funciona porque la app no escribe en disco; si añades subida de archivos, haz chown de un directorio de datos o la escritura fallará con EACCES.
+
+---
+
+## Paso 6: sube tu código a GitHub
+
+Crea un repositorio vacío en [github.com/new](https://github.com/new). No lo inicialices con un README; ya tienes archivos en local. Después:
+
+```sh
+git add -A
+git commit -m "first commit"
+git branch -M main
+git remote add origin git@github.com:yourusername/tanstack-dokploy-test.git
+git push -u origin main
+```
+
+Verifica antes de salir de la terminal:
+
+```sh
+git log --oneline -1
+git status -sb          # should say "## main...origin/main"
+```
+
+Si `git push` falla con `Permission denied (publickey)`, tu clave no está en la cuenta. Pruébalo con `ssh -T git@github.com`. Si prefieres usar HTTPS: `git remote set-url origin https://github.com/yourusername/tanstack-dokploy-test.git`.
+
+Lo único que conviene revisar dos veces en la UI de GitHub es que `.env` no está en el repo. Ejecuta `git ls-files | grep -x '.env'`. Ninguna salida es la salida correcta.
+
+---
+
+## Paso 7: crea la app en Dokploy y despliega
+
+### 7.1 Conecta tu proveedor Git
+
+En Dokploy, ve a **Settings → Git** (las builds antiguas lo ponen bajo **Providers**) y conecta GitHub. La GitHub App es mejor opción que un personal access token: tiene permisos por repositorio y se puede revocar sin romper nada más.
+
+### 7.2 Crea la aplicación
+
+Ve a **Applications → Create Application → Git**, elige tu repositorio y configura:
+
+- **Name**: `tanstack-dokploy-app`
+- **Branch**: `main`
+- **Root Directory**: `/` (o `./` según tu build; si tu app vive en un subdirectorio, aquí es donde lo indicas)
+- **Build Type**: elige una de las pestañas de abajo
+
+Las etiquetas de los menús de Dokploy se mueven entre versiones. Si tu build no coincide con los nombres de aquí, busca el selector de tipo de build en General y sigue la misma lógica.
+
+<Tabs>
+<Tab name="Railpack (por defecto)">
+Railpack autodetecta Node desde `package.json`, instala las dependencias, ejecuta `build` si el script existe y arranca la app desde `start`. Con los scripts fijados en el paso 5.2, no hay nada más que configurar.
+
+- **Build Type**: `Railpack`
+- **Build Command**: déjalo vacío (Railpack lee `package.json`)
+- **Start Command**: déjalo vacío
+- **Internal Port**: `3000`
+
+Fija la versión del builder si quieres builds reproducibles y no quieres que una release de Railpack te cambie la imagen sin avisar. Dokploy lo expone en los ajustes de build. Para ver en qué se diferencia Railpack del antiguo Nixpacks, consulta [Railpack vs Nixpacks](/es/railpack-vs-nixpacks/).
+</Tab>
+<Tab name="Nixpacks (legado)">
+Nixpacks fue el default original de Dokploy y sigue funcionando. Úsalo solo si tienes un proyecto existente configurado para él; los proyectos nuevos deberían ir con Railpack.
+
+- **Build Type**: `Nixpacks`
+- **Internal Port**: `3000`
+- **Variable de build** (solo si necesitas forzar una versión de Node): `NIXPACKS_NODE_VERSION=22`
+</Tab>
+<Tab name="Dockerfile (máximo control)">
+Usa esta opción cuando hayas creado el Dockerfile del paso 5.5 o necesites paquetes de sistema que Railpack no instala.
+
+- **Build Type**: `Dockerfile`
+- **Dockerfile Path**: `./Dockerfile`
+- **Docker Context Path**: `/` (raíz del proyecto)
+- **Internal Port**: `3000`
+
+Esta vía te da la misma imagen en local y en producción, lo que hace que el "en mi máquina compilaba bien" deje de ser un ejercicio de depuración.
+</Tab>
+</Tabs>
+
+### 7.3 Configura las variables de entorno
+
+Abre la pestaña **Environment** y añade:
+
+```sh
+DATABASE_URL=postgresql://saas-app:<password>@saas-app-db:5432/saas-app
+NODE_ENV=production
+PORT=3000
+```
+
+Fíjate en el hostname: `saas-app-db`, el nombre del servicio del paso 2, por la red interna. Sin IP pública, sin puerto expuesto.
+
+Verifica que la app realmente puede resolver ese host antes de perder tiempo depurando un build. Abre la pestaña **Terminal** de la aplicación (se conecta al contenedor en ejecución) y ejecuta:
+
+```sh
+getent hosts saas-app-db
+nc -zv saas-app-db 5432
+```
+
+Quieres una IP de vuelta y un `succeeded!` de `nc`. Que `getent` no devuelva nada significa que los dos servicios están en redes Docker distintas, lo que suele pasar cuando la base de datos vive en un proyecto de Dokploy diferente. O mueves la base de datos al mismo proyecto, o vuelves a la cadena de conexión externa con la regla de firewall del paso 2.
+
+<Notice type="warning" title="No uses el prefijo VITE_ en los secretos">
+Vite inserta cada variable `VITE_*` en el bundle del cliente. `VITE_DATABASE_URL` enviaría tu contraseña de base de datos a cada visitante en texto plano. Mantén los secretos del servidor sin prefijo y léelos con `process.env` solo en el servidor. Más sobre ese patrón en <a href="https://www.bitdoze.com/docker-compose-secrets/" rel="noopener">secretos de Docker Compose</a>.
+</Notice>
+
+### 7.4 Añade el dominio
+
+En la pestaña **Domains**, añade `app.yourdomain.com` y pon el puerto a `3000`. La instancia de Traefik de Dokploy obtiene el certificado de Let's Encrypt automáticamente, así que no hay paso de certbot. Asegúrate de que el registro A de DNS ya apunta al VPS antes de pulsar deploy; si no, el reto ACME falla y obtienes un error de certificado en lugar de un sitio.
+
+### 7.5 Despliega y verifica
+
+Pulsa **Deploy** y observa la pestaña **Logs**. En el primer build buscas:
+
+- que la instalación de dependencias termine
+- que `vite build` finalice y escriba `.output/`
+- una línea de arranque del contenedor (`Listening on http://0.0.0.0:3000` o similar)
+
+Luego verifica desde fuera:
+
+```sh
+curl -sI https://app.yourdomain.com | head -1     # HTTP/2 200
+curl -s https://app.yourdomain.com/api/health     # {"ok":true,"db":"up"}
+```
+
+Un `200` en `/` y `db: "up"` en la ruta de salud significa que toda la cadena funciona: DNS, Traefik, TLS, contenedor, red, Postgres. Un `502` con un contenedor sano es casi siempre un desajuste de puerto entre el contenedor y la pestaña Domains. Ese modo de fallo tiene su propia entrada en la sección de solución de problemas de abajo.
+
+---
+
+## Paso 8: ejecuta las migraciones en producción
+
+El primer despliegue tiene una base de datos vacía. Aplica las migraciones que subiste al repo en el paso 4 desde dentro del contenedor de la app, para que la conexión use la red interna y nunca expongas Postgres:
+
+```sh
+# In the app's Terminal tab in Dokploy
+npx drizzle-kit migrate
+```
+
+Si `npx` intenta descargar el paquete, `drizzle-kit` está solo en `devDependencies` y no está en la imagen de producción. O lo añades a `dependencies`, o usas la variante Dockerfile de la imagen para el despliegue, o defines un comando pre-deploy en los ajustes avanzados de Dokploy si tu versión lo expone. Cualquiera de esas opciones vale; lo que no debes hacer es abrir el 5432 a tu portátil solo para ejecutar una migración.
+
+Verifica:
+
+```sh
+# In the app Terminal
+npx drizzle-kit --version
+psql "$DATABASE_URL" -c '\dt'
+```
+
+Deberías ver tus tablas. Si la app lanza `relation "todos" does not exist` en una petición, la migración se ejecutó contra una base de datos distinta de la que usa la app: compara el hostname de `$DATABASE_URL` dentro del contenedor con el nombre del servicio del paso 7.3.
+
+Para cambios de esquema posteriores, mantenlos no destructivos dentro de un mismo despliegue: añade la columna, despliega, rellena los datos, y elimina la antigua en un despliegue posterior. Una migración que elimina una columna y un despliegue que falla son una mala tarde.
+
+---
+
+## Paso 9: autodespliegue, rollback y backups
+
+### Autodespliegue al hacer push
+
+En los ajustes de la aplicación, activa **Auto Deploy** para `main`. Si quieres saltarte rebuilds por cambios solo de documentación, configura **Watch Paths** con los directorios que importan. A partir de ahí:
+
+```sh
+git add .
+git commit -m "feat: new page"
+git push origin main
+```
+
+Dokploy detecta el push y recompila. Síguelo en la pestaña **Deployments**.
+
+### Rollback
+
+Cada despliegue queda registrado en la pestaña **Deployments**. Si una release sale mal, ese historial es tu primer movimiento: redespliega el despliegue anterior correcto o revierte el commit y deja que Auto Deploy recompile.
+
+```sh
+git revert --no-edit <bad-commit-sha>
+git push origin main
+```
+
+Revertir código no revierte migraciones de base de datos. Si el despliegue malo incluía una migración destructiva, el rollback significa restaurar desde un backup, que es la razón por la que las migraciones destructivas van en su propio despliegue.
+
+### Copia de seguridad de la base de datos
+
+Una base de datos autoalojada sin backup es una cuenta atrás, no un montaje. Los servicios de base de datos de Dokploy tienen una pestaña Backup donde los apuntas a almacenamiento compatible con S3 en una programación. Cloudflare R2 es la opción barata que yo elegiría. Recorrido completo: [Configura backups de Dokploy con Cloudflare R2](/es/backups-dokploy-cloudflare-r2/).
+
+Verifica el backup restaurándolo una vez, en una base de datos de prueba. Un backup no probado es una esperanza, no un plan.
+
+---
+
+## Cómo funciona todo en conjunto
+
+Flujo de una petición al cargar una página:
+
+1. El navegador resuelve `app.yourdomain.com` a la IP de tu VPS
+2. Traefik responde en el 443 y termina el TLS con el certificado de Let's Encrypt
+3. Traefik aplica la regla de host y reenvía a tu contenedor en el puerto 3000
+4. TanStack Start renderiza la ruta en el servidor, ejecuta las llamadas `createServerFn` que haga falta y consulta Postgres a través de Drizzle por la red interna de Docker
+5. La respuesta vuelve a salir por Traefik con tu HTML de SSR dentro
+
+Responsabilidades de cada componente:
+
+- **Dokploy**: orquestación, disparadores de build, configuración de dominio y TLS, ciclo de vida de la base de datos
+- **Railpack o Docker**: convierte el repo en una imagen de contenedor
+- **Docker Swarm**: ejecuta y reinicia el contenedor
+- **Traefik**: proxy inverso, HTTPS, enrutado por host
+- **PostgreSQL 17**: datos, en la red interna
+- **GitHub**: fuente de verdad y disparador del despliegue
+
+---
+
+## Solución de problemas
+
+<Accordion label="502 o 504 tras un despliegue correcto" group="tanstack-dokploy">
+
+**Causa**: desajuste de puerto. El contenedor escucha en el 3000 pero la pestaña Domains apunta a un puerto distinto (o al default).
+
+**Solución**: revisa la línea de arranque del contenedor en los logs para ver el puerto real, pon el puerto de la pestaña Domains a juego y guarda. Redespliega después de cambiarlo. Es el fallo más común de este stack con diferencia.
+
+</Accordion>
+
+<Accordion label="Build interrumpido a mitad de camino (código de salida 137)" group="tanstack-dokploy">
+
+**Causa**: falta de memoria. El OOM killer detiene el build y los logs simplemente se cortan.
+
+**Solución**: añade swap (paso 1) y reintenta. En un VPS de 2 GB, considera compilar la imagen Docker en tu portátil y subirla, o sube a 4 GB. `dmesg -T | tail` en el host mostrará el kill si quieres pruebas.
+
+</Accordion>
+
+<Accordion label="Error: Cannot find module 'x' durante el build" group="tanstack-dokploy">
+
+**Causa**: falta una dependencia en `package.json`, o un desajuste de lockfile hizo que la instalación resolviera un árbol distinto.
+
+**Solución**: reprodúcelo en local con una instalación limpia (`rm -rf node_modules && npm install`), luego `npm install --save <missing-package>` y haz push. Si tienes varios lockfiles (`package-lock.json` más `pnpm-lock.yaml`), borra los que no uses. Los builders detectan el gestor de paquetes por los lockfiles y adivinarán mal si hay dos presentes.
+
+</Accordion>
+
+<Accordion label="El contenedor arranca y se reinicia en bucle" group="tanstack-dokploy">
+
+**Causa**: el proceso termina inmediatamente, normalmente por una variable de entorno que falta, un `DATABASE_URL` incorrecto o un comando de arranque que apunta a un archivo que no existe.
+
+**Solución**: abre los logs de runtime (no los de build). `Error: connect ECONNREFUSED` significa que el hostname o el puerto de la base de datos están mal. `Cannot find module '/app/.output/server/index.mjs'` significa que el build no produjo salida de Nitro, así que vuelve al paso 5.1.
+
+</Accordion>
+
+<Accordion label="El certificado TLS no se emite" group="tanstack-dokploy">
+
+**Causa**: Let's Encrypt no puede alcanzar tu dominio. Casi siempre es DNS, o los puertos 80/443 bloqueados.
+
+**Solución**: `dig +short app.yourdomain.com` debería devolver la IP de tu VPS. Confirma que 80 y 443 están abiertos y que nada más en la máquina los está ocupando. Luego revisa los logs de Traefik en Dokploy. Los cambios de DNS pueden tardar unos minutos en propagarse, así que reintenta el despliegue después de un café en lugar de hacerlo inmediatamente.
+
+</Accordion>
+
+<Accordion label="El health check dice db: down pero la app parece bien" group="tanstack-dokploy">
+
+**Causa**: el contenedor de la app y la base de datos no están en la misma red, o la contraseña tiene caracteres especiales que necesitan codificación URL en la cadena de conexión.
+
+**Solución**: ejecuta `getent hosts <db-name>` desde el Terminal de la app. Salida vacía significa problema de red; una IP significa credenciales. Para contraseñas con `@`, `/` o `#`, codifícalas en porcentaje (`@` se convierte en `%40`) o regenera una contraseña sin esos caracteres.
+
+</Accordion>
+
+<Accordion label="Las migraciones se ejecutaron pero la tabla sigue sin existir" group="tanstack-dokploy">
+
+**Causa**: migraste una base de datos distinta. Esto pasa cuando ejecutas `db:migrate` en local con una shell que todavía tiene el `DATABASE_URL` de desarrollo exportado.
+
+**Solución**: ejecuta las migraciones dentro del contenedor para que herede el entorno de la app, y comprueba `select hash from drizzle.__drizzle_migrations;` en la misma base de datos a la que se conecta la app.
+
+</Accordion>
+
+---
+
+## Notas de rendimiento y operaciones
+
+**Conexiones en pool.** Cada instancia del contenedor debería mantener un pool pequeño. Postgres permite 100 conexiones en total por defecto, y un pool de 20 por contenedor te mete en problemas en cuanto escales o añadas un worker en segundo plano.
+
+```ts
+// src/db/index.ts
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import * as schema from "./schema";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+});
+
+export const db = drizzle(pool, { schema });
+```
+
+**Quédate en la red interna.** Conectar a través de la IP pública añade latencia y una superficie de ataque pública para nada. Si ejecutas varias apps contra un mismo Postgres y te topas con límites de conexiones, consulta [varias bases de datos PostgreSQL en un solo servicio Docker](/es/multiples-bases-datos-postgres-docker/).
+
+**Cachea los assets estáticos.** Tus assets compilados llevan hash de contenido, así que pueden cachearse para siempre. Un CDN delante solo merece la pena cuando tienes tráfico real, pero es barato de añadir después. [Bunny.net](https://go.bitdoze.com/bunny) es lo que yo uso cuando un sitio necesita entrega en el edge sin los juegos de precios de Cloudflare.
+
+**Monitóralo.** Dokploy muestra CPU y memoria por contenedor, suficiente para empezar, pero no te despertará a las 3 de la madrugada. Pon [Beszel y Uptime Kuma](/es/beszel-uptime-kuma/) en la misma máquina y apunta el monitor a `/api/health`. Treinta minutos de montaje, y te enterarás de un despliegue roto antes que tus usuarios.
+
+**Vigila el disco.** Las imágenes Docker se acumulan rápido. `docker system df` te dice qué está comiendo espacio; `docker image prune -a` y la poda de la caché de build son mantenimiento rutinario en un VPS pequeño.
+
+---
+
+## Checklist de endurecimiento
+
+<ListCheck>
+<ul>
+<li>Postgres <strong>no tiene puerto externo</strong>, así que nada excepto el contenedor de la app puede alcanzarlo</li>
+<li>La contraseña de la base de datos es única para esta app y está guardada en la pestaña Environment de Dokploy, no en git</li>
+<li>Sin secretos con prefijo <code>VITE_</code>, ya que Vite los inserta en el bundle del cliente</li>
+<li>SSH solo por clave y CrowdSec en ejecución (cubierto en la <a href="https://www.bitdoze.com/dokploy-install/">guía de instalación de Dokploy</a>)</li>
+<li>El contenedor de la app corre como usuario no-root cuando usas la vía Dockerfile</li>
+<li>Los backups de la base de datos están programados hacia un bucket compatible con S3 y se ha probado una restauración al menos una vez</li>
+<li><code>npm audit</code> y las actualizaciones de dependencias ocurren en una programación, no cuando algo se rompe</li>
+</ul>
+</ListCheck>
+
+## Cuánto cuesta esto en realidad
+
+El VPS es casi toda la factura la mayoría de los meses. Una máquina de 2 vCPU / 4 GB en Hetzner cuesta unos pocos euros, y eso cubre la app, Postgres, Traefik y el origen de tus backups. Añade un dominio, y opcionalmente un CDN cuando el tráfico lo justifique. Mis notas sobre los [precios actuales de Hetzner Cloud tras la subida de abril de 2026](/es/hetzner-cloud-precios-2026/) tienen los números.
+
+Como comparación, Dokploy Cloud empieza en torno a $4.50/mes por servidor si prefieres que otro parchee el panel. Misma app, mismo modelo de despliegue, una cosa menos que mantener. Autoalojar el panel es Apache-2.0 y gratis, que es lo que se ejecuta en esta guía.
+
+Frente a Vercel, la matemática es menos dramática de lo que se afirma hasta que tienes tráfico estable. Lo que realmente compras al autoalojar es la ausencia de un contrato de runtime: sin techo de duración de funciones, sin precios por invocación, sin una plataforma diciéndote dónde tiene que vivir tu base de datos.
+
+---
+
+## Conclusión
+
+Ahora tienes una app TanStack Start ejecutándose en tu propio VPS con Postgres 17, migraciones generadas, HTTPS y una ruta de despliegue que puedes repetir con un solo push. Los defaults importantes de esta actualización:
+
+- Postgres se queda en la red interna de Docker, nunca en internet pública
+- Producción ejecuta `drizzle-kit migrate` contra SQL subido al repo, nunca `drizzle-kit push`
+- El build queda fijado por `.node-version` y scripts explícitos, así que las actualizaciones del builder no te sorprenden
+- Hay un Dockerfile para cuando necesites reproducibilidad por encima de comodidad
+
+Prueba el despliegue subiendo un cambio trivial y observándolo pasar. Una ruta de despliegue que solo has ejecutado una vez no es una ruta de despliegue.
+
+Si prefieres usar una base de datos gestionada en lugar de ejecutar Postgres tú mismo, tengo una guía complementaria sobre [cómo construir una app TanStack Start con Bunny Database y Drizzle](/es/tanstack-start-bunny-database-drizzle/), que cambia Postgres por libSQL gestionado que se duerme a cero cuando no se usa. Y si aún estás decidiendo el framework, [TanStack Start y Convex](/tanstack-start-get-start/) cubre la ruta del backend en tiempo real.
+
+## Primeros pasos con Dokploy
+
+Si todavía no has montado Dokploy, empieza aquí:
+
+<Button link="https://www.bitdoze.com/dokploy-install/" text="Guía de instalación de Dokploy" />
+
+La guía de instalación cubre todo, desde la configuración del VPS hasta el endurecimiento de seguridad con CrowdSec, asegurando que tu infraestructura autoalojada esté lista para producción.
+
+¡Feliz despliegue! 🚀

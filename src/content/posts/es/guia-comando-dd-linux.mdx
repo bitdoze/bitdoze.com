@@ -1,0 +1,751 @@
+---
+date: 2025-07-29
+lastmod: 2026-08-29T00:00:00Z
+translationKey: "linux-dd-command-guide"
+updated: 2026-07-25T00:00:00Z
+title: "Creación de imágenes de disco y clonación con el comando dd de Linux"
+meta_title: "Comando dd de Linux: guía de imágenes y clonación de discos (2026)"
+description: "Aprende a usar el comando dd de Linux para crear imágenes de disco, clonar unidades, preparar medios de arranque y hacer borrado seguro. Guía 2026 actualizada con NIST 800-88 y los flags modernos de dd."
+image: "@assets/images/25/07/linux-dd-command-guide.webp"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["dd", "backup"]
+canonical: "https://www.bitdoze.com/es/guia-comando-dd-linux/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+El comando `dd` es una herramienta potente pero peligrosa en Linux. Conocido como «disk duplicator» o «data destroyer» porque puede sobrescribir discos enteros sin marcha atrás, `dd` se encarga de crear imágenes de disco, clonar unidades y realizar operaciones de datos de bajo nivel.
+
+Uso `dd` en mi servidor doméstico para crear imágenes de disco exactas antes de las actualizaciones, clonar unidades y preparar medios de arranque. Tanto si administras un [servidor doméstico](https://www.bitdoze.com/why-need-home-server/) como sistemas empresariales, entender `dd` te ayuda con la gestión de datos y la recuperación ante desastres.
+
+Una aclaración importante: `dd` sirve para copias exactas a nivel de bloque, imágenes de rescate y trabajo forense. No es la herramienta adecuada para copias de seguridad de archivos rutinarias ni para sistemas de archivos activos sin snapshots. Esta guía explica cuándo y cómo usarlo de forma segura.
+
+## Cuándo usar dd (y cuándo no)
+
+Antes de lanzarte a los comandos, elige la herramienta adecuada para cada tarea. Esta es la decisión rápida:
+
+<ListCheck>
+
+**Usa dd cuando necesites:**
+- Clones exactos de discos o particiones (byte a byte)
+- Imágenes de rescate de unidades que fallan (con ddrescue)
+- Copias forenses de disco que conservan cada sector
+- USB de arranque de Linux desde ISO híbridas
+- Copia de seguridad de la tabla de particiones MBR/GPT
+- Imágenes de plantillas de VM desde bare metal
+- Migración bare-metal entre unidades físicas
+
+</ListCheck>
+
+<ListCheck>
+
+**Usa otra herramienta cuando necesites:**
+- Copias de seguridad de archivos rutinarias (usa restic, borg o rsync)
+- Imágenes de sistemas de archivos activos (usa snapshots de LVM + dd, o snapshots del proveedor)
+- USB de arranque de Windows (usa Ventoy o WoeUSB; dd no funciona)
+- Copias de seguridad de volúmenes cloud/VPS (usa snapshots del proveedor)
+- Copias solo de sectores usados en particiones casi vacías (usa partclone)
+- Grabación rápida y verificada con comprobación de hash (usa bmaptool)
+
+</ListCheck>
+
+<Accordion label="¿Por qué no usar dd para las copias de seguridad diarias?" group="faq">
+Las imágenes raw completas ocupan el tamaño del disco aunque esté vacío al 90 %. Un disco de 500 GB con 50 GB de datos sigue produciendo una imagen de 500 GB (a menos que uses `conv=sparse`, que ayuda pero no deduplica). Herramientas como restic y borg ofrecen copias incrementales, deduplicación, cifrado y restauración granular de archivos. dd no te da nada de eso. Te da una copia exacta a nivel de bloque, que es lo que quieres para clonar y rescatar, pero resulta excesivo para las copias diarias.
+</Accordion>
+
+En [Hetzner Cloud](https://go.bitdoze.com/hetzner) o proveedores similares, las copias mediante snapshots son más baratas y consistentes que ejecutar dd dentro de la VM. Reserva dd para bare-metal, tarjetas USB/SD y rescates.
+
+_Los precios de los VPS subieron en todos los proveedores en 2026: si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+## Requisitos previos y preparación de seguridad
+
+### Herramientas que necesitas
+
+- `dd` (GNU coreutils 9.x)
+- `lsblk`, `fdisk -l`, `blkid` para identificar dispositivos
+- Opcionales pero recomendados: `ddrescue` (1.30), `pv` (1.11.0), `bmaptool`, `sgdisk`/`sfdisk`, `smartctl`, `zstd`
+
+### Verifica tu dd
+
+<Notice type="warning" title="Verifica tu dd: riesgo de uutils">
+Ubuntu 25.10 incluye rust-coreutils (uutils) por defecto, con una implementación de `dd` que ha mostrado divergencias respecto a GNU dd en `bs=`/`ibs=`. En Ubuntu 25.10+, verifica siempre que estás ejecutando GNU coreutils:
+
+```bash
+dd --version
+# Should show: "dd (coreutils) 9.x"
+# If it shows "dd (uutils)" or similar, you have the Rust version
+
+dpkg -l coreutils
+```
+
+Si estás usando uutils-dd y detectas un comportamiento inesperado, prueba a pasar `ibs=` explícitamente, o reinstala GNU coreutils: `sudo apt install coreutils`.
+</Notice>
+
+### Lista de comprobaciones previa
+
+<ListCheck>
+
+- **Identifica los dispositivos con nombres persistentes**: `lsblk -o NAME,SIZE,MODEL,SERIAL,MOUNTPOINT`. Prefiere `/dev/disk/by-id/...` antes que `/dev/sda`. Las letras de dispositivo cambian entre arranques
+- **Desmonta los dispositivos de destino**: `mount | grep /dev/sdX`. Nunca ejecutes dd sobre un dispositivo montado
+- **Comprueba la salud de la unidad**: `sudo smartctl -a /dev/sdX` para ver el estado SMART antes de leer de una unidad sospechosa
+- **Ten copias de seguridad** de cualquier dato que no puedas permitirte perder
+- **Prueba los comandos** primero en sistemas no críticos o en archivos loopback
+- **Verifica el espacio libre**: asegúrate de que el destino (para las imágenes) tiene suficiente espacio
+
+</ListCheck>
+
+Esto combina bien con las [configuraciones de LVM](https://www.bitdoze.com/add-new-drive-lvm/), donde puedes usar snapshots para hacer copias consistentes de sistemas en ejecución.
+
+## Parámetros esenciales de dd
+
+### Tabla de referencia de parámetros
+
+| Parámetro | Descripción | Ejemplo |
+|-----------|-------------|---------|
+| `if=` | Archivo de entrada (origen) | `if=/dev/sda` |
+| `of=` | Archivo de salida (destino) | `of=/backup/disk.img` |
+| `bs=` | Tamaño de bloque | `bs=4M` (4 megabytes) |
+| `count=` | Número de bloques a copiar | `count=1000` |
+| `skip=` | Saltar bloques al inicio de la entrada | `skip=100` |
+| `seek=` | Saltar bloques al inicio de la salida | `seek=50` |
+| `conv=` | Opciones de conversión | `conv=sync,noerror` |
+| `status=` | Visualización del progreso | `status=progress` |
+| `iflag=` | Flags de entrada | `iflag=fullblock,direct` |
+| `oflag=` | Flags de salida | `oflag=direct,nocache` |
+
+<Notice type="error" title="Peligro: riesgo de destrucción de datos">
+El comando dd puede destruir datos de forma permanente si se usa incorrectamente. Comprueba siempre dos veces los parámetros `if=` (entrada) y `of=` (salida). No hay marcha atrás. Usa los nombres persistentes `/dev/disk/by-id/...` para no apuntar al dispositivo equivocado.
+</Notice>
+
+### Cómo elegir el tamaño de bloque
+
+<Notice type="info" title="El mito del tamaño de bloque">
+El manual de GNU coreutils dice que los tamaños de bloque superiores a unos pocos MB son «generalmente un desperdicio». El tamaño óptimo depende de tu hardware real, no de una tabla que leas en internet. Empieza con `bs=4M` como valor seguro y luego haz benchmarks:
+
+```bash
+for bs in 1M 4M 8M 16M 64M; do
+  echo "== bs=$bs =="
+  dd if=/dev/zero of=/tmp/bench bs=$bs count=512 oflag=direct 2>&1 | tail -1
+  rm /tmp/bench
+done
+```
+
+`oflag=direct` evita la caché de páginas para medir el rendimiento real del disco, no escrituras en caché. El ganador depende de tu unidad, controladora y del planificador de E/S del kernel.
+</Notice>
+
+![Rendimiento de dd](@assets/images/25/07/dd-perf.svg)
+
+*Ilustrativo. Tus resultados variarán según el hardware. Haz benchmarks en local antes de asumir que más grande = más rápido.*
+
+## Imágenes de disco (crear, comprimir, restaurar)
+
+### Crear imágenes de disco
+
+```bash
+# Create image of entire disk
+sudo dd if=/dev/sda of=/backup/disk.img bs=4M status=progress
+
+# Create image of specific partition
+sudo dd if=/dev/sda1 of=/backup/part.img bs=4M status=progress
+
+# Create sparse image (skips zero-filled blocks, huge space saver on mostly-empty disks)
+sudo dd if=/dev/sda of=/backup/disk.img bs=4M conv=sparse status=progress
+```
+
+<Notice type="info" title="Imágenes dispersas (sparse)">
+`conv=sparse` indica a dd que salte los bloques llenos de ceros en lugar de escribirlos en el archivo de salida. Un disco de 500 GB vacío al 90 % puede producir una imagen de 60 GB en lugar de 500 GB. NO uses `conv=sparse` al restaurar: necesitas que cada cero se escriba de vuelta en el dispositivo para que el sistema de archivos sea correcto.
+</Notice>
+
+### Comprimir imágenes
+
+```bash
+# gzip (widely available)
+sudo dd if=/dev/sda bs=4M status=progress | gzip > /backup/disk.img.gz
+
+# zstd (better ratio, ~60% faster decompression than pigz, use this)
+sudo dd if=/dev/sda bs=4M status=progress | zstd -T0 > /backup/disk.img.zst
+```
+
+zstd con `-T0` usa todos los hilos de CPU disponibles. La ventaja en velocidad de descompresión es notable en las restauraciones, donde estás esperando a la tubería.
+
+### Restaurar desde imágenes
+
+```bash
+# Restore complete disk from image
+sudo dd if=/backup/disk.img of=/dev/sda bs=4M status=progress
+
+# Restore from gzip-compressed image
+gunzip -c /backup/disk.img.gz | sudo dd of=/dev/sda bs=4M iflag=fullblock conv=fsync status=progress
+
+# Restore from zstd-compressed image
+zstdcat /backup/disk.img.zst | sudo dd of=/dev/sda bs=4M iflag=fullblock conv=fsync status=progress
+
+# Restore specific partition
+sudo dd if=/backup/part.img of=/dev/sda1 bs=4M iflag=fullblock conv=fsync status=progress
+```
+
+Fíjate en los flags `iflag=fullblock` y `conv=fsync` de los comandos de restauración desde tubería. `iflag=fullblock` evita las lecturas cortas desde la tubería (que corrompen la salida). `conv=fsync` garantiza que los datos se escriben físicamente en el disco antes de que dd termine, mejor que un `sync` final que podrías olvidar.
+
+### Estimaciones de tiempo
+
+Planifica ventanas de mantenimiento para las operaciones grandes. Cifras aproximadas:
+
+| Origen | Tamaño | Velocidad | Tiempo |
+|--------|------|-----------|--------|
+| HDD | 2 TB | ~150 MB/s | ~3,7 horas |
+| NVMe | 1 TB | ~1 GB/s | ~33 min |
+| SSD | 500 GB | ~500 MB/s | ~17 min |
+
+Usa `status=progress` para monitorizar el rendimiento y estimar el tiempo restante. La compresión añade tiempo de CPU pero ahorra almacenamiento y tiempo de transferencia por red de la imagen.
+
+## Clonación de discos
+
+### Clonación directa de disco a disco
+
+```bash
+# Clone entire disk
+sudo dd if=/dev/sda of=/dev/sdb bs=4M status=progress
+
+# Clone with persistent device names (safer, /dev/sdX can change between boots)
+sudo dd if=/dev/disk/by-id/ata-Samsung_SSD_860_EVO_500GB_S3Z9NB0K of=/dev/disk/by-id/ata-WDC_WD10EZEX_WD-WMC1T0123456 bs=4M status=progress
+
+# Verify clone (reads entire disk twice, slow but correct)
+sudo cmp /dev/sda /dev/sdb
+```
+
+Después de clonar, ejecuta `sync` para vaciar las escrituras pendientes y verifica con `cmp` si los datos son críticos. `cmp` lee ambos discos por completo, así que tardará tanto como la propia clonación.
+
+### Copia y restauración de la tabla de particiones
+
+<Notice type="warning" title="MBR frente a GPT">
+`dd if=/dev/sda of=/dev/sdb bs=512 count=1` solo copia el LBA 0, el MBR. Si tu disco usa GPT (como la mayoría de los discos modernos), la tabla de particiones abarca los LBA 1-33 más una copia de seguridad al final del disco. Copiar solo los primeros 512 bytes te deja un MBR protector roto sin ninguno de los datos GPT reales.
+</Notice>
+
+**Tabla de particiones MBR (legacy):**
+
+```bash
+# Backup MBR (first 512 bytes)
+sudo dd if=/dev/sda of=/backup/mbr.img bs=512 count=1
+
+# Restore MBR
+sudo dd if=/backup/mbr.img of=/dev/sda bs=512 count=1
+```
+
+**Tabla de particiones GPT (usa esto para discos modernos):**
+
+```bash
+# Backup GPT with sgdisk (binary format, includes backup GPT)
+sudo sgdisk --backup=/backup/gpt-sda.bin /dev/sda
+
+# Restore GPT to a different disk
+sudo sgdisk --load-backup=/backup/gpt-sda.bin /dev/sdb
+
+# Alternative: text dump with sfdisk (human-readable, editable)
+sudo sfdisk -d /dev/sda > /backup/sda.parts
+
+# Restore to another disk
+sudo sfdisk /dev/sdb < /backup/sda.parts
+```
+
+### Copias de seguridad consistentes de sistemas en ejecución
+
+<Notice type="error" title="Nunca uses dd en un sistema de archivos montado y activo">
+Ejecutar dd sobre un disco montado y activo produce imágenes inconsistentes. Los archivos, el journal y los metadatos se leen en momentos distintos y pueden no coincidir. Ejecutar `sync` antes de dd NO lo soluciona: dd lee a través de la caché de páginas, no de un snapshot congelado. El resultado puede ser una imagen que no arranca, corrupta o sutilmente rota de formas que no notarás hasta que intentes restaurarla.
+</Notice>
+
+**Enfoque con snapshots de LVM** (la forma correcta; consulta [Añadir un disco nuevo con LVM](https://www.bitdoze.com/add-new-drive-lvm/) para la configuración de LVM):
+
+```bash
+# Create a snapshot (size the COW area vs. expected write rate during backup)
+lvcreate -L 20G -s -n root-snap /dev/vg0/root
+
+# Image the frozen snapshot (not the live volume)
+sudo dd if=/dev/vg0/root-snap of=/srv/backups/root-$(date +%F).img bs=4M status=progress
+
+# Clean up the snapshot
+lvremove -f /dev/vg0/root-snap
+```
+
+**Importante**: dimensiona el área COW del snapshot en función de las escrituras esperadas durante la ventana de copia. Si el área COW se llena, el snapshot se destruye silenciosamente ([guía de LVM de SystemRescue](https://www.system-rescue.org/lvm-guide-en/Making-consistent-backups-with-LVM/)). Para un snapshot de 20 GB en un servidor tranquilo, esto rara vez es un problema. Para un servidor de bases de datos ocupado, dale más tamaño.
+
+**Enfoque con `fsfreeze`** para configuraciones sin LVM (ventana de inactividad corta):
+
+```bash
+# Freeze the filesystem (blocks all writes)
+sudo fsfreeze -f /mnt/data
+
+# Image while frozen
+sudo dd if=/dev/sda1 of=/srv/backups/data-$(date +%F).img bs=4M status=progress
+
+# Unfreeze immediately after dd finishes
+sudo fsfreeze -u /mnt/data
+```
+
+Para las bases de datos que se ejecutan en la máquina (PostgreSQL, MySQL, etc.), dd a nivel de bloque sigue sin ser consistente a nivel de aplicación. Combínalo con volcados a nivel de aplicación (`pg_dump`, `pg_basebackup`, `mysqldump`) para restauraciones fiables.
+
+## Crear medios de arranque
+
+### De ISO de Linux a USB
+
+```bash
+# Create bootable USB from Linux ISO
+sudo dd if=/path/to/linux.iso of=/dev/sdX bs=4M status=progress && sync
+```
+
+Las ISO de Linux son imágenes híbridas: funcionan tanto como medio óptico como arranque USB. `dd` las gestiona correctamente.
+
+### De ISO de Windows a USB
+
+<Notice type="error" title="dd no funciona con las ISO de Windows">
+Las ISO de Windows 10/11 no son imágenes híbridas. Grabarlas con dd en un USB suele producir una memoria que arranca el instalador pero luego «no encuentra ninguna unidad» (faltan la tabla de particiones y el código de arranque). Además, `install.wim` suele superar los 4 GB, lo que rompe los medios de arranque FAT32. Usa una de estas opciones en su lugar:
+</Notice>
+
+```bash
+# Ventoy — install once, then just copy ISOs to the USB stick
+sudo ventoy -i /dev/sdX
+# Then copy any ISOs: cp /path/to/Win11.iso /dev/sdX1/
+
+# WoeUSB — creates a proper Windows bootable USB
+sudo woeusb --target-filesystem NTFS --device /path/to/Win11.iso /dev/sdX
+
+# Rufus (from Windows or another OS) also works well
+```
+
+### Verificación de medios de arranque
+
+El viejo truco de `dd if=/dev/sdX bs=4M count=1 | md5sum` solo comprueba los primeros 4 MiB del USB: no verifica nada significativo sobre el resto de la imagen. Así se verifica correctamente:
+
+```bash
+# Full-image hash comparison (correct but slow — reads entire disk)
+sha256sum /path/to/linux.iso
+sudo dd if=/dev/sdX bs=4M status=progress | sha256sum
+
+# Or use bmaptool which verifies SHA256 while flashing (see alternatives section)
+bmaptool create disk.img -o disk.img.bmap
+sudo bmaptool copy /backup/disk.img.gz /dev/sdX
+```
+
+## Borrado seguro
+
+### Borrado de HDD («Clear» de NIST 800-88)
+
+Una sola pasada de relleno con ceros es suficiente según NIST SP 800-88 Rev. 1 para los discos duros modernos:
+
+```bash
+# Single-pass zero fill (NIST "Clear" — sufficient for modern HDDs)
+sudo dd if=/dev/zero of=/dev/sda bs=4M status=progress conv=fsync
+
+# Verify
+sudo hexdump -C /dev/sda | head -20
+```
+
+### Borrado de SSD y NVMe
+
+<Notice type="warning" title="No uses dd en SSD">
+Sobrescribir SSD con dd es ineficaz y perjudicial. El wear leveling y el over-provisioning hacen que las escrituras de dd no lleguen de forma fiable a todas las celdas. Añades desgaste de escritura innecesario sin borrar realmente los datos. Usa comandos de borrado a nivel de firmware en su lugar.
+</Notice>
+
+```bash
+# SATA SSD — secure discard
+sudo blkdiscard -s /dev/sda
+
+# NVMe — user data erase
+sudo nvme format --ses=1 /dev/nvme0n1
+
+# ATA Secure Erase (SATA drives)
+sudo hdparm --user-master u --security-set-pass p /dev/sdX
+sudo hdparm --security-erase p /dev/sdX
+```
+
+### Borrado criptográfico LUKS (instantáneo)
+
+Si la unidad está cifrada con LUKS, eliminar la clave es instantáneo y es un método Purge legítimo según NIST 800-88:
+
+```bash
+# Destroy all key slots — data is permanently inaccessible
+sudo cryptsetup luksErase /dev/sda2
+```
+
+Es mucho más rápido y fiable que sobrescribir en unidades cifradas. Los datos siguen físicamente en el disco, pero son criptográficamente irrecuperables.
+
+<Accordion label="¿Por qué no el borrado de 3 pasadas DoD 5220.22-M?" group="faq">
+El estándar DoD 5220.22-M está obsoleto. Se escribió para los medios magnéticos de los años 90 y no tiene relevancia en las unidades modernas. Las pasadas de sobrescritura múltiples en HDD modernos añaden desgaste sin añadir seguridad (una sola pasada con verificación es suficiente según NIST 800-88). En los SSD, las sobrescrituras no llegan de forma fiable a todas las celdas sin importar cuántas pasadas hagas. Los estándares actuales son NIST SP 800-88 Rev. 1 e IEEE 2883: usa esos en su lugar.
+</Accordion>
+
+## Técnicas avanzadas de dd
+
+### Flags modernos de dd
+
+Todos estos flags están documentados en el [manual de GNU coreutils 9.11](https://www.gnu.org/software/coreutils/manual/html_node/dd-invocation.html):
+
+```bash
+# conv=sparse — skip zero-filled blocks on output (saves space on mostly-empty disks)
+sudo dd if=/dev/sda of=/backup/disk.img bs=4M conv=sparse status=progress
+# Do NOT use conv=sparse when restoring to a device
+
+# iflag=fullblock — fill incomplete reads to full block size (critical for pipes)
+# Used automatically when reading from pipes with count=
+gunzip -c /backup/disk.img.gz | sudo dd of=/dev/sdb bs=4M iflag=fullblock
+
+# conv=fsync — fsync output before dd exits (ensures data hits physical disk)
+sudo dd if=/backup/disk.img of=/dev/sda bs=4M conv=fsync status=progress
+
+# oflag=direct — bypass page cache (useful for benchmarking and raw device writes)
+dd if=/dev/zero of=/tmp/benchmark bs=4M count=1024 oflag=direct
+
+# oflag=nocache — drop page cache after writing (coreutils 9.7+ improved detection)
+sudo dd if=/dev/sda of=/backup/disk.img bs=4M oflag=nocache status=progress
+```
+
+<Notice type="info" title="Señal de progreso SIGUSR1">
+En Linux, GNU dd responde a `SIGUSR1` mostrando el progreso actual:
+
+```bash
+sudo dd if=/dev/sda of=/backup/disk.img bs=4M &
+# In another terminal:
+sudo kill -USR1 $(pidof dd)
+```
+
+Ojo: si `POSIXLY_CORRECT` está definida, dd espera `SIGINFO` en lugar de `SIGUSR1`. En la mayoría de los sistemas Linux `SIGUSR1` funciona bien. Cuando envíes señales durante una operación con tuberías, usa `iflag=fullblock` para evitar lecturas cortas.
+</Notice>
+
+### Tuberías y compresión
+
+```bash
+# Compressed image on-the-fly with zstd
+sudo dd if=/dev/sda bs=4M status=progress | zstd -T0 > /backup/disk.img.zst
+
+# Compressed image on-the-fly with gzip
+sudo dd if=/dev/sda bs=4M status=progress | gzip -c > /backup/disk.img.gz
+
+# Network transfer with compression
+sudo dd if=/dev/sda bs=4M status=progress | zstd -T0 | ssh user@remote 'cat > /backup/remote.img.zst'
+
+# With progress monitoring via pv (pipe viewer v1.11.0)
+sudo dd if=/dev/sda bs=4M | pv -s $(sudo blockdev --getsize64 /dev/sda) | zstd -T0 > /backup/disk.img.zst
+```
+
+### Recuperación ante errores
+
+```bash
+# Continue copying despite read errors
+sudo dd conv=noerror,sync iflag=fullblock if=/dev/sda1 of=/backup/rescue.img
+
+# Use ddrescue for better error handling (almost always the right choice for failing drives)
+sudo ddrescue -d -r3 /dev/sda /backup/image.img /backup/rescue.log
+```
+
+### Crear archivos de prueba y benchmarks
+
+```bash
+# Create file with random data for testing
+dd if=/dev/urandom of=/tmp/test-1gb.dat bs=1M count=1024
+
+# Create file with zeros (faster, compressible)
+dd if=/dev/zero of=/tmp/test-1gb-zeros.dat bs=1M count=1024
+
+# Create sparse file (doesn't use actual disk space)
+dd if=/dev/zero of=/tmp/sparse.dat bs=1M count=1024 seek=1024
+
+# Benchmark disk write speed
+dd if=/dev/zero of=/tmp/benchmark bs=1M count=1024 oflag=direct
+rm /tmp/benchmark
+```
+
+## Monitorización y progreso
+
+### Progreso integrado
+
+```bash
+# status=progress shows throughput and bytes transferred
+sudo dd if=/dev/sda of=/backup/image.img bs=4M status=progress
+
+# Manual signal for progress (background dd)
+sudo dd if=/dev/sda of=/backup/image.img bs=4M &
+# In another terminal:
+sudo kill -USR1 $(pidof dd)
+
+# Continuous monitoring with watch
+watch -n 1 'sudo kill -USR1 $(pidof dd) 2>/dev/null'
+```
+
+### Monitorización mejorada con pv e iostat
+
+```bash
+# Using pv (pipe viewer) for better progress display
+sudo dd if=/dev/sda bs=4M | pv -s $(sudo blockdev --getsize64 /dev/sda) | dd of=/backup/image.img bs=4M
+
+# Monitor disk I/O during operation
+iostat -x 1 /dev/sda
+```
+
+### Estimar el tiempo restante
+
+`status=progress` muestra los bytes transferidos y el rendimiento. Para estimar el tiempo restante:
+
+```
+remaining_time = (total_bytes - bytes_transferred) / current_speed
+```
+
+Obtén el tamaño total del disco con `sudo blockdev --getsize64 /dev/sda`. Para operaciones grandes (varios TB), planifica ventanas de mantenimiento y valora si la compresión ayuda (ahorra disco y tiempo de red pero suma tiempo de CPU).
+
+## Solución de problemas
+
+### Errores de entrada/salida
+
+<Notice type="error" title="Error común: Input/output error">
+Normalmente indica sectores defectuosos en la unidad de origen o problemas de hardware (cable en mal estado, controladora fallando).
+</Notice>
+
+**Soluciones:**
+
+<ListCheck>
+
+- **Usa `conv=noerror,sync` con `iflag=fullblock`**: continúa copiando a pesar de los errores y rellena los bloques fallidos con ceros
+- **Comprueba la salud de la unidad**: ejecuta `sudo smartctl -a /dev/sda` para ver el estado SMART y el número de sectores reasignados
+- **Usa ddrescue**: mejor recuperación de errores que el dd estándar: mapea, reintenta y rescata de forma estructurada
+- **Reduce el tamaño de bloque**: los bloques más pequeños pueden sortear los sectores defectuosos con más facilidad
+</ListCheck>
+
+```bash
+# Check drive health
+sudo smartctl -a /dev/sda
+
+# Error-tolerant copying with dd
+sudo dd if=/dev/sda of=/backup/image.img bs=4M conv=noerror,sync iflag=fullblock status=progress
+
+# Better error recovery with ddrescue (1.30)
+sudo ddrescue -d -r3 /dev/sda /backup/image.img /backup/rescue.log
+```
+
+### Problemas de permisos y acceso
+
+```bash
+# Check if device is mounted
+lsblk | grep sda
+mount | grep sda
+
+# Unmount if necessary
+sudo umount /dev/sda1
+
+# Ensure proper permissions (usually requires root)
+sudo dd if=/dev/sda of=/backup/image.img bs=4M status=progress
+```
+
+### Imágenes restauradas inconsistentes o que no arrancan
+
+**Causa**: se aplicó dd a un sistema de archivos montado y activo: el journal, los metadatos y los datos de los archivos no coinciden.
+
+**Solución**: usa snapshots de LVM o `fsfreeze` antes de dd (consulta la sección de copias consistentes más arriba).
+
+**Causa**: la tabla de particiones no coincide (imagen MBR restaurada en un disco GPT, o viceversa).
+
+**Solución**: verifica con `fdisk -l` o `gdisk -l` antes y después de la operación. Usa `sgdisk`/`sfdisk` para restaurar las tablas de particiones correctamente.
+
+### Divergencia de uutils-dd
+
+En Ubuntu 25.10+, si dd se comporta de forma inesperada (tamaños de bloque incorrectos, errores sorprendentes), comprueba tu versión:
+
+```bash
+dd --version
+# If it shows uutils, install GNU coreutils:
+sudo apt install coreutils
+```
+
+## Herramientas alternativas y cuándo usarlas
+
+| Herramienta | Ideal para | Ventajas |
+|-------------|------------|----------|
+| **rsync** | Sincronización a nivel de archivo | Incremental, preparada para red, conserva permisos |
+| **cp / tar** | Copia simple / archivado | Conservan permisos; compresión y restauración selectiva |
+| **ddrescue** | Unidades dañadas | Recuperación de errores superior, recuperación con cabezales muertos (v1.30) |
+| **bmaptool** | Grabación rápida y verificada | 5-7 veces más rápido que dd, SHA256 al escribir, rechaza destinos montados |
+| **Clonezilla** | Clonación de discos con GUI | Fácil de usar, compresión (v3.3.3-15) |
+| **partclone** | Clonación consciente de particiones | Solo copia los sectores usados: imágenes mucho más pequeñas |
+| **Ventoy / WoeUSB** | Multi-ISO / USB de Windows | dd falla con las ISO de Windows |
+| **restic / borg** | Copias de seguridad de archivos rutinarias | Dedup + cifrado; no son a nivel de bloque |
+| **Snapshots del proveedor** | Volúmenes cloud/VPS | Consistentes, sin almacenamiento local, baratos |
+
+### ddrescue en profundidad
+
+Instalación: `sudo apt install gddrescue` (ojo: esto es GNU ddrescue, no `dd_rescue`, que es una herramienta distinta de Kurt Garloff).
+
+```bash
+# Basic rescue operation
+sudo ddrescue -d -r3 /dev/sda /backup/image.img /backup/rescue.log
+
+# New in ddrescue 1.29.1: treat known garbage as read errors
+# (for drives that return fake data instead of erroring)
+sudo ddrescue --bad-sector-data=/tmp/garbage.bin /dev/sda /backup/image.img /backup/rescue.log
+
+# New in ddrescue 1.30: dead-head recovery is orders of magnitude better
+# (283 errors vs 3,782,794 in testing with a 4-head drive and one dead head)
+# Also: --no-sweep, --size=output for --force overwrite, underscore numbers in args
+sudo ddrescue -d -r3 --no-sweep /dev/sda /backup/image.img /backup/rescue.log
+```
+
+ddrescue 1.30 (2026-01-04) añadió una fase de barrido en la pasada 5 y mejoró drásticamente la recuperación con cabezales muertos. Si vas a rescatar unidades que fallan, actualiza a la 1.30.
+
+### bmaptool en profundidad
+
+bmaptool, del proyecto Yocto, solo escribe los bloques mapeados y verifica SHA256 durante la escritura. Es 5-7 veces más rápido que dd con imágenes dispersas:
+
+```bash
+# Create a block map from your image
+bmaptool create disk.img -o disk.img.bmap
+
+# Flash with verification (refuses to write to mounted devices)
+sudo bmaptool copy /backup/disk.img.gz /dev/sdX
+```
+
+### Snapshots del proveedor de cloud/VPS
+
+En almacenamiento de bloques virtual, prefiere los snapshots del proveedor antes que ejecutar dd dentro de la VM. La mayoría de los proveedores cloud como [Hetzner](https://go.bitdoze.com/hetzner), [DigitalOcean](https://go.bitdoze.com/do) y Vultr ofrecen una función de snapshots integrada más fiable que dd. Los snapshots son consistentes (con el sistema en reposo), no requieren almacenamiento local y no facturan el almacenamiento dos veces.
+
+dd sigue siendo la opción correcta para: clones bare-metal, tarjetas USB/SD, imágenes de plantillas de VM y operaciones de rescate.
+
+## Resumen de buenas prácticas
+
+### Lista de comprobaciones previa a la operación
+
+<ListCheck>
+
+- **Identifica los dispositivos correctamente** con `lsblk -o NAME,SIZE,MODEL,SERIAL,MOUNTPOINT`
+- **Usa nombres persistentes** `/dev/disk/by-id/...` en lugar de `/dev/sda`
+- **Desmonta todas las particiones** de los dispositivos de destino
+- **Comprueba el espacio disponible en disco** para los archivos de imagen
+- **Comprueba la salud** con `smartctl` en las unidades sospechosas
+- **Prueba primero en datos no críticos**
+- **Documenta el procedimiento** para poder repetirlo
+
+</ListCheck>
+
+### Consejos de rendimiento
+
+| Escenario | Configuración recomendada | Notas |
+|-----------|---------------------------|-------|
+| **Valor general** | `bs=4M`, `status=progress` | Punto de partida seguro para la mayoría de operaciones |
+| **Escrituras directas a dispositivo** | `oflag=direct` | Evita la caché de páginas para medir el rendimiento real |
+| **Restauración desde imagen** | `conv=fsync`, `iflag=fullblock` | Garantiza que los datos llegan al disco; evita lecturas cortas desde tuberías |
+| **Imágenes forenses** | `bs=512`, `conv=noerror,sync` | Conserva la estructura exacta, sector a sector |
+| **Benchmark** | `oflag=direct`, `bs` variable | Prueba distintos tamaños de bloque en tu hardware real |
+
+### Resumen de seguridad
+
+- **HDD**: una sola pasada de ceros según el método «Clear» de NIST 800-88
+- **SSD/NVMe**: borrado por firmware (`blkdiscard`, `nvme format`, ATA Secure Erase); nunca dd
+- **LUKS**: borrado criptográfico (`cryptsetup luksErase`): instantáneo y fiable
+
+Consulta la [sección de borrado seguro](#borrado-seguro) para ver los comandos concretos.
+
+## Casos de uso reales
+
+### Script de copia de seguridad para servidor doméstico
+
+Esta versión usa snapshots de LVM para lograr consistencia (a diferencia de aplicar dd a un disco montado y activo):
+
+```bash
+#!/bin/bash
+# lvm-snapshot-backup.sh — consistent backup via LVM snapshot
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="/srv/backups/disk-images"
+LOG_FILE="/var/log/disk-backup.log"
+SNAP_SIZE="20G"
+SNAP_NAME="root-snap"
+
+mkdir -p "$BACKUP_DIR"
+
+echo "$(date): Creating LVM snapshot" >> "$LOG_FILE"
+lvcreate -L "$SNAP_SIZE" -s -n "$SNAP_NAME" /dev/vg0/root >> "$LOG_FILE" 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "$(date): Starting snapshot backup" >> "$LOG_FILE"
+    sudo dd if="/dev/vg0/$SNAP_NAME" of="$BACKUP_DIR/system-backup-$DATE.img" bs=4M iflag=fullblock conv=fsync status=progress 2>> "$LOG_FILE"
+
+    if [ $? -eq 0 ]; then
+        echo "$(date): Backup completed, compressing with zstd" >> "$LOG_FILE"
+        zstd --rm "$BACKUP_DIR/system-backup-$DATE.img"
+    else
+        echo "$(date): Backup failed!" >> "$LOG_FILE"
+    fi
+
+    # Clean up snapshot
+    lvremove -f "/dev/vg0/$SNAP_NAME" >> "$LOG_FILE" 2>&1
+
+    # Retention: keep 7 days of compressed backups
+    find "$BACKUP_DIR" -name "*.img.zst" -mtime +7 -delete
+else
+    echo "$(date): Snapshot creation failed!" >> "$LOG_FILE"
+    exit 1
+fi
+```
+
+Esto combina bien con las [configuraciones de LVM](https://www.bitdoze.com/add-new-drive-lvm/).
+
+### Recuperación ante desastres
+
+```bash
+# Emergency system restore from image
+sudo dd if=/backup/system-backup.img of=/dev/sda bs=4M iflag=fullblock conv=fsync status=progress
+
+# Restore from network (zstd-compressed)
+ssh backup-server 'cat /backup/system.img.zst' | zstdcat | sudo dd of=/dev/sda bs=4M iflag=fullblock conv=fsync status=progress
+
+# Quick MBR repair from backup
+sudo dd if=/backup/mbr.img of=/dev/sda bs=512 count=1
+
+# GPT repair from backup
+sudo sgdisk --load-backup=/backup/gpt-sda.bin /dev/sda
+```
+
+### Creación de plantillas de VM
+
+```bash
+# Create base image for VM templates
+sudo dd if=/dev/sda of=/vm-images/template.img bs=4M status=progress
+
+# Compress for storage
+zstd /vm-images/template.img
+```
+
+Para VMs en la nube de [Hetzner](https://go.bitdoze.com/hetzner) o proveedores similares, plantéate usar las APIs de snapshots del proveedor en lugar de plantillas basadas en dd: son más rápidas y no requieren almacenamiento local.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Puedo usar dd para clonar un sistema en ejecución?" group="faq">
+No de forma segura. Aplicar dd a un sistema de archivos montado y activo produce imágenes inconsistentes porque los archivos, el journal y los metadatos se leen en momentos distintos. Usa snapshots de LVM (crear snapshot → dd sobre el snapshot → eliminar el snapshot) o `fsfreeze` para dejar el sistema de archivos en reposo primero. Consulta la sección de copias consistentes para ver los comandos.
+</Accordion>
+
+<Accordion label="¿Qué tamaño de bloque debo usar?" group="faq">
+Empieza con `bs=4M` como valor seguro. El manual de GNU coreutils dice que los tamaños superiores a unos pocos MB son «generalmente un desperdicio». El tamaño óptimo depende de tu hardware real. Haz benchmarks con el bucle de la sección de tamaño de bloque: no te fíes de tablas genéricas.
+</Accordion>
+
+<Accordion label="¿Es dd lo bastante seguro para borrar SSD?" group="faq">
+No. Las sobrescrituras en SSD no llegan de forma fiable a todas las celdas por el wear leveling y el over-provisioning. Usa el borrado a nivel de firmware: `blkdiscard -s` para SSD SATA, `nvme format --ses=1` para NVMe, o ATA Secure Erase mediante `hdparm`. Si la unidad está cifrada con LUKS, `cryptsetup luksErase` es instantáneo y criptográficamente suficiente.
+</Accordion>
+
+<Accordion label="dd frente a rsync: ¿cuál debo usar?" group="faq">
+dd para copias exactas a nivel de bloque: clonación, rescate, imágenes forenses y medios de arranque. rsync para sincronización a nivel de archivo, copias incrementales y transferencias por red donde solo quieres copiar los archivos modificados. Resuelven problemas distintos. Para las copias diarias, rsync (o restic/borg) es casi siempre la elección correcta.
+</Accordion>
+
+<Accordion label="¿Cómo verifico que una imagen dd es correcta?" group="faq">
+Compara el `sha256sum` del dispositivo de origen con el del archivo de imagen. O usa `cmp` para comparar dos dispositivos de bloque directamente. Ojo: tanto `cmp` como el hash del disco completo leen todo el dispositivo, así que tardarán tanto como la copia. El `sync` después de dd es un vaciado, no una verificación. Para grabar USB, bmaptool verifica SHA256 mientras escribe, mucho mejor que dd más una comprobación posterior.
+</Accordion>
+
+<Accordion label="¿Por qué no funciona mi USB de Windows creado con dd?" group="faq">
+Las ISO de Windows no son imágenes híbridas como las de Linux. dd produce un USB que arranca el instalador pero no encuentra unidades (faltan la tabla de particiones y el código de arranque), y `install.wim` suele superar los 4 GB, lo que rompe FAT32. Usa Ventoy (instálalo una vez y copia las ISO) o WoeUSB en su lugar.
+</Accordion>
+
+## Conclusión
+
+`dd` es una herramienta esencial para quien necesita copias exactas a nivel de bloque: clonación de discos, imágenes de rescate, trabajo forense, medios de arranque y copias de tablas de particiones. No es una navaja suiza para cualquier tarea con datos.
+
+Quien sabe cuándo NO usar dd (copias rutinarias, sistemas activos, borrado de SSD, USB de Windows) es más eficaz que quien lo usa para todo. Usa nombres de dispositivo persistentes (`/dev/disk/by-id/...`), verifica la identidad de los dispositivos antes de cada operación y usa snapshots para copias consistentes de sistemas en ejecución.
+
+Para más guías de administración de Linux, explora el resto del sitio:
+
+<Button text="Explora más guías de Linux" link="/categories/linux/" size="lg" color="blue" variant="solid" />

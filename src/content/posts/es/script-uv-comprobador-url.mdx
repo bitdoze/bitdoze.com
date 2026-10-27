@@ -1,0 +1,555 @@
+---
+date: 2025-07-24
+lastmod: 2026-08-27T00:00:00Z
+translationKey: "uv-url-checker-script"
+title: "Comprobador masivo de URLs con uv: encuentra enlaces rotos en Python"
+meta_title: "Comprobador masivo de URLs con uv | Encuentra enlaces rotos en Python"
+description: "Aprende a crear un comprobador masivo de URLs en Python con uv: verifica cientos de URLs a la vez, detecta enlaces rotos, errores 404 y tiempos de espera, y prográmalo en CI."
+image: "@images/25/01/uv-url-checker.webp"
+imageAlt: "Terminal ejecutando un script de Python de comprobación masiva de URLs con uv, mostrando códigos de estado HTTP para una lista de URLs"
+categories: ["tools"]
+authors: ["Dragos"]
+tags: ["uv", "python", "url-checker"]
+canonical: "https://www.bitdoze.com/es/script-uv-comprobador-url/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Los enlaces rotos perjudican tu SEO, molestan a los visitantes y hacen que un sitio parezca abandonado. Escribí este comprobador masivo de URLs para escanear cientos de URLs a la vez, marcar errores 404, 500, tiempos de espera y errores de conexión, y luego escribir las rotas en un archivo para revisarlas. Funciona como un único script de Python con `uv run`. Sin virtualenv, sin `requirements.txt`, sin pip install. Actualizado para uv 0.12 (ago 2026).
+
+<Notice type="info" title="¿Nuevo en uv?">
+  Si eres nuevo en uv o quieres aprender a configurar proyectos completos de Python, empieza
+  con [Primeros pasos con uv: configuración de proyectos Python en
+  2026](https://www.bitdoze.com/uv-get-start/) antes de sumergirte en este script.
+</Notice>
+
+## Qué hace este script
+
+<ListCheck>
+<ul>
+<li>Comprueba varias URLs concurrentemente con ThreadPoolExecutor</li>
+<li>Añade `https://` automáticamente cuando no se indica el esquema</li>
+<li>Clasifica los errores: TIMEOUT, CONNECTION_ERROR, SSL_ERROR, CLIENT_ERROR, SERVER_ERROR</li>
+<li>Lee las URLs desde un archivo de texto (omite comentarios y líneas en blanco)</li>
+<li>Escribe las URLs rotas en un archivo de salida para revisarlas</li>
+<li>Contador de progreso en tiempo real durante la comprobación</li>
+<li>Flags de CLI para automatización: `--timeout`, `--workers`, `--output`, `--head`, `--insecure`</li>
+<li>Sale con código 1 cuando encuentra enlaces rotos (para integración con CI)</li>
+</ul>
+</ListCheck>
+
+## ¿Por qué uv? Ejecuta scripts de Python sin configuración
+
+El script usa los [metadatos inline de scripts de PEP 723](https://peps.python.org/pep-0723/), un bloque `# /// script` al principio del archivo que declara las dependencias. Cuando ejecutas `uv run url_checker.py`, uv lee ese bloque, instala `requests` en un entorno aislado y ejecuta el script. Sin activar un virtualenv, sin `requirements.txt`, sin `pip install`.
+
+Puedes fijar la versión de Python con `requires-python`, fijar versiones de dependencias (`requests<3`) y bloquear toda la resolución con `uv lock --script url_checker.py` para obtener un archivo `.lock` con ejecuciones reproducibles. El mismo patrón impulsa otras herramientas de un solo archivo. Consulta [uv run: ejecuta scripts de Python sin gestión de dependencias](https://www.bitdoze.com/uv-run-scripts-guide/) para ver el flujo de trabajo completo, y [el mismo patrón impulsa nuestro script de texto a voz con uv](https://www.bitdoze.com/uv-text-to-speech-script/) como otro ejemplo.
+
+## El script
+
+Guárdalo como `url_checker.py`:
+
+```python
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "requests<3",
+# ]
+# [tool.uv]
+# exclude-newer = "2026-08-01T00:00:00Z"
+# ///
+
+"""
+Bulk URL checker — checks hundreds of URLs concurrently,
+flags broken links (4xx, 5xx, timeouts, SSL errors), and
+writes results to a file.
+
+Usage:
+    uv run url_checker.py urls.txt
+    uv run url_checker.py urls.txt --workers 20 --timeout 15
+    uv run url_checker.py urls.txt --head --output broken.txt
+"""
+
+import argparse
+import csv
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Shared session with connection pooling and a realistic User-Agent
+SESSION = requests.Session()
+SESSION.headers["User-Agent"] = "url-checker/2.0 (bitdoze.com)"
+retries = Retry(total=1, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+SESSION.mount("https://", HTTPAdapter(max_retries=retries))
+SESSION.mount("http://", HTTPAdapter(max_retries=retries))
+
+
+def normalize_url(url: str) -> str:
+    """Add https:// if no scheme is present."""
+    if not url.startswith(("http://", "https://")):
+        return "https://" + url
+    return url
+
+
+def check_url(url: str, timeout: float = 10, use_head: bool = False, verify: bool = True) -> dict:
+    """
+    Check a single URL and return a result dict.
+
+    Returns dict with keys: url, status, status_code, error_type, response_time
+    """
+    url = normalize_url(url)
+    start = time.monotonic()
+
+    methods = ("head", "get") if use_head else ("get",)
+
+    for method in methods:
+        try:
+            r = SESSION.request(
+                method, url, timeout=timeout, allow_redirects=True, verify=verify
+            )
+            elapsed = round(time.monotonic() - start, 2)
+
+            # HEAD rejected — fall back to GET
+            if r.status_code == 405 and method == "head":
+                continue
+
+            code = r.status_code
+            if 200 <= code < 300:
+                return {"url": url, "status": "OK", "status_code": code, "error_type": None, "response_time": elapsed}
+            elif 400 <= code < 500:
+                return {"url": url, "status": "CLIENT_ERROR", "status_code": code, "error_type": f"{code} Client Error", "response_time": elapsed}
+            else:
+                return {"url": url, "status": "SERVER_ERROR", "status_code": code, "error_type": f"{code} Server Error", "response_time": elapsed}
+
+        except requests.exceptions.SSLError as e:
+            return {"url": url, "status": "SSL_ERROR", "status_code": None, "error_type": f"SSL error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.Timeout:
+            return {"url": url, "status": "TIMEOUT", "status_code": None, "error_type": "Connection timeout", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.ConnectionError as e:
+            return {"url": url, "status": "CONNECTION_ERROR", "status_code": None, "error_type": f"Connection error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
+        except requests.exceptions.RequestException as e:
+            return {"url": url, "status": "ERROR", "status_code": None, "error_type": f"Request error: {str(e)[:80]}", "response_time": round(time.monotonic() - start, 2)}
+
+    return {"url": url, "status": "ERROR", "status_code": None, "error_type": "All methods failed", "response_time": round(time.monotonic() - start, 2)}
+
+
+def read_urls(filename: str) -> list[str]:
+    """Read URLs from a text file, one per line. Skips blank lines and # comments."""
+    urls = []
+    try:
+        with open(filename, encoding="utf-8") as f:
+            for line in f:
+                url = line.strip()
+                if url and not url.startswith("#"):
+                    urls.append(url)
+    except FileNotFoundError:
+        print(f"Error: file '{filename}' not found.", file=sys.stderr)
+        sys.exit(1)
+    return urls
+
+
+def check_urls(urls: list[str], timeout: float, workers: int, use_head: bool, verify: bool) -> list[dict]:
+    """Check URLs concurrently and return a list of result dicts."""
+    results = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(check_url, u, timeout, use_head, verify): u for u in urls}
+        for i, future in enumerate(as_completed(futures), 1):
+            result = future.result()
+            results.append(result)
+            status_icon = "✓" if result["status"] == "OK" else "✗"
+            code_str = f" ({result['status_code']})" if result["status_code"] else ""
+            print(f"  [{i}/{len(urls)}] {status_icon} {result['url']} — {result['status']}{code_str}  ({result['response_time']}s)")
+    return results
+
+
+def save_broken(results: list[dict], filename: str) -> None:
+    """Write broken URLs grouped by error type."""
+    broken = [r for r in results if r["status"] != "OK"]
+    if not broken:
+        return
+
+    groups: dict[str, list[dict]] = {}
+    for r in broken:
+        groups.setdefault(r["status"], []).append(r)
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"# Broken URLs — checked {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        for group_name in ("CLIENT_ERROR", "SERVER_ERROR", "TIMEOUT", "CONNECTION_ERROR", "SSL_ERROR", "ERROR"):
+            items = groups.get(group_name, [])
+            if items:
+                f.write(f"# {group_name}\n")
+                for r in items:
+                    code = f" ({r['status_code']})" if r["status_code"] else ""
+                    f.write(f"{r['url']}{code}\n")
+                f.write("\n")
+
+
+def save_to_csv(results: list[dict], filename: str) -> None:
+    """Export all results to CSV."""
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["url", "status", "status_code", "error_type", "response_time"])
+        writer.writeheader()
+        writer.writerows(results)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Bulk URL checker — find broken links fast")
+    parser.add_argument("file", nargs="?", default="urls.txt", help="file with URLs, one per line (default: urls.txt)")
+    parser.add_argument("--timeout", type=float, default=10, help="request timeout in seconds (default: 10)")
+    parser.add_argument("--workers", type=int, default=10, help="concurrent threads (default: 10)")
+    parser.add_argument("--output", default="problematic_urls.txt", help="output file for broken URLs")
+    parser.add_argument("--csv", default=None, help="export all results to a CSV file")
+    parser.add_argument("--head", action="store_true", help="use HEAD requests, fall back to GET on 405")
+    parser.add_argument("--insecure", action="store_true", help="disable TLS verification (internal hosts only)")
+    args = parser.parse_args()
+
+    if args.insecure:
+        print("WARNING: TLS verification disabled. Do not use --insecure on public URLs.", file=sys.stderr)
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    verify = not args.insecure
+
+    print(f"Reading URLs from '{args.file}'...")
+    urls = read_urls(args.file)
+    if not urls:
+        print("No URLs found.")
+        return 0
+
+    print(f"Found {len(urls)} URLs — checking with {args.workers} workers, {args.timeout}s timeout\n")
+    results = check_urls(urls, timeout=args.timeout, workers=args.workers, use_head=args.head, verify=verify)
+
+    ok = [r for r in results if r["status"] == "OK"]
+    broken = [r for r in results if r["status"] != "OK"]
+
+    print(f"\n{'=' * 50}")
+    print(f"RESULTS: {len(ok)} working, {len(broken)} broken out of {len(results)}")
+    print(f"{'=' * 50}")
+
+    if broken:
+        save_broken(results, args.output)
+        print(f"\nBroken URLs saved to '{args.output}'")
+
+        # Group summary
+        groups: dict[str, int] = {}
+        for r in broken:
+            groups[r["status"]] = groups.get(r["status"], 0) + 1
+        for name, count in sorted(groups.items()):
+            print(f"  {name}: {count}")
+
+    if args.csv:
+        save_to_csv(results, args.csv)
+        print(f"All results exported to '{args.csv}'")
+
+    return 1 if broken else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+## Cómo funciona
+
+### Comprueba el código de estado, no solo las excepciones
+
+La versión original de este script tenía un bug: solo capturaba excepciones. Una respuesta 404 o 500 no lanza ninguna. `requests.get()` devuelve con normalidad. Así que `httpstat.us/404` aparecía como «OK» en la salida de ejemplo. Para una herramienta cuyo único propósito es encontrar enlaces rotos, eso es un problema.
+
+La solución: clasificar según `response.status_code`. Solo 2xx es OK. Todo lo demás (errores de cliente 4xx, errores de servidor 5xx) se marca como roto. Si una URL redirige (301 a 404), `allow_redirects=True` hace que el script vea el código de estado final, así que una redirección a una página inexistente se marca correctamente.
+
+<Notice type="warning" title="Error común">
+  Comprobar solo las excepciones pasa por alto por completo las respuestas 4xx y 5xx. Un 404 Not Found devuelve un objeto de respuesta normal. No lanza nada. Comprueba siempre `response.status_code` para ver el panorama completo.
+</Notice>
+
+### Reutiliza conexiones con requests.Session()
+
+Cada llamada suelta a `requests.get()` abre una nueva conexión TCP. El script actualizado crea un `requests.Session()` compartido con pooling de conexiones y HTTP keep-alive. En una lista de más de 200 URLs, esto es notablemente más rápido porque el script reutiliza las conexiones existentes al mismo host en lugar de hacer un nuevo handshake TCP cada vez.
+
+La sesión también establece un encabezado User-Agent por defecto y configura reintentos automáticos para errores transitorios del servidor (429, 500, 502, 503, 504) con backoff exponencial.
+
+### Primero peticiones HEAD, con GET como respaldo
+
+Con el flag `--head`, el script envía peticiones HEAD, que solo descargan los encabezados, no el cuerpo de la respuesta. Esto es mucho más rápido para comprobaciones de estado en páginas con HTML pesado o imágenes. Si un servidor devuelve 405 (Method Not Allowed) para HEAD, el script recurre automáticamente a GET.
+
+Algunos servidores se comportan mal con las peticiones HEAD (devolviendo códigos de estado incorrectos o rechazándolas directamente). El respaldo a GET lo resuelve. Usa `--head` cuando compruebes listas grandes de páginas con mucho contenido; omítelo cuando necesites verificar que la página realmente carga.
+
+### Tipos de error
+
+| Estado | Significado | Cuándo se dispara |
+|--------|-------------|-------------------|
+| OK | respuesta 2xx | La URL funciona |
+| CLIENT_ERROR | respuesta 4xx | 404 Not Found, 403 Forbidden, etc. |
+| SERVER_ERROR | respuesta 5xx | 500 Internal Server Error, 503, etc. |
+| TIMEOUT | la petición agotó el tiempo | Servidor demasiado lento o inalcanzable |
+| CONNECTION_ERROR | fallo de DNS o de red | El host no existe, la resolución DNS falló |
+| SSL_ERROR | problema de certificado | Certificado caducado, autofirmado o no coincidente |
+| ERROR | otro fallo de petición | Cajón de sastre para problemas inesperados |
+
+### Gestión de SSL/TLS
+
+Los certificados autofirmados y caducados son habituales en flotas de servidores internos. El script captura `SSLError` como una categoría de error distinta para que puedas ver de un vistazo qué URLs tienen problemas de certificado.
+
+Para hosts internos con certificados autofirmados, pasa `--insecure` para desactivar la verificación TLS:
+
+```bash
+uv run url_checker.py internal-urls.txt --insecure
+```
+
+<Notice type="warning" title="Advertencia de seguridad">
+  Nunca uses `--insecure` en URLs públicas. Desactiva por completo la verificación de certificados, lo que significa que la conexión queda vulnerable a ataques de intermediario (man-in-the-middle). Úsalo solo para hosts internos o de intranet donde controlas la red.
+</Notice>
+
+## Cómo ejecutarlo
+
+### Inicio rápido
+
+1. Guarda el script como `url_checker.py`
+2. Crea un `urls.txt` con una URL por línea (`#` para comentarios):
+```text
+# URLs to check
+https://www.google.com
+https://www.github.com
+https://nonexistent-website-12345.com
+bitdoze.com
+example.com
+```
+3. Ejecútalo:
+```bash
+uv run url_checker.py urls.txt
+```
+
+Combinaciones de flags habituales:
+
+```bash
+# Check with 20 workers and 15s timeout
+uv run url_checker.py urls.txt --workers 20 --timeout 15
+
+# Use HEAD requests, save broken URLs to a custom file
+uv run url_checker.py urls.txt --head --output broken.txt
+
+# Export all results to CSV
+uv run url_checker.py urls.txt --csv results.csv
+```
+
+### Bloquea el script para reproducibilidad
+
+Bloquea la resolución de dependencias para que cada ejecución use las mismas versiones de paquetes:
+
+```bash
+uv lock --script url_checker.py
+# Creates url_checker.py.lock
+```
+
+Si ejecutas el script dentro de un repo que tiene un `pyproject.toml`, uv 0.12+ descubre el proyecto desde el directorio del script y puede arrastrar dependencias del proyecto que no tienen relación. Usa `--no-project` para evitarlo:
+
+```bash
+uv run --no-project url_checker.py urls.txt --workers 10
+```
+
+## Pruébalo tú mismo
+
+Aquí tienes un archivo de prueba determinista usando los endpoints de httpbin.org. Créalo como `urls.txt`:
+
+```text
+https://httpbin.org/status/200      # should be OK
+https://httpbin.org/status/404      # should be CLIENT_ERROR (broken)
+https://httpbin.org/status/500      # should be SERVER_ERROR (broken)
+https://httpbin.org/delay/5         # should TIMEOUT with --timeout 3
+https://nonexistent-website-12345.invalid  # should be CONNECTION_ERROR
+https://expired.badssl.com          # should be SSL_ERROR
+```
+
+Ejecútalo:
+
+```bash
+uv run url_checker.py urls.txt --timeout 3 --workers 4
+```
+
+Resultados esperados:
+
+| URL | Estado esperado | Por qué |
+|-----|----------------|---------|
+| httpbin.org/status/200 | OK | respuesta 2xx |
+| httpbin.org/status/404 | CLIENT_ERROR | 404 no es 2xx |
+| httpbin.org/status/500 | SERVER_ERROR | 500 no es 2xx |
+| httpbin.org/delay/5 | TIMEOUT | el retardo de 5 s supera el timeout de 3 s |
+| nonexistent...invalid | CONNECTION_ERROR | la resolución DNS falla |
+| expired.badssl.com | SSL_ERROR | certificado caducado |
+
+<Notice type="info" title="Verifica antes de publicar">
+  Si adaptas esto para tu propio blog o documentación, ejecuta primero el archivo de prueba. Los endpoints de httpbin.org y badssl.com son servicios públicos, así que verifica que estén activos en el momento de publicar. Los endpoints de httpstat.us usados en versiones antiguas de este artículo estaban inaccesibles durante la investigación; httpbin.org es más fiable.
+</Notice>
+
+## Cómo leer la salida
+
+| Código | Significado | Qué hacer |
+|--------|-------------|-----------|
+| 200 | OK | Nada, el enlace funciona |
+| 301/302 | Redirección | el script sigue las redirecciones; comprueba el destino final |
+| 403 | Forbidden | puede necesitar encabezados de autenticación o un User-Agent realista |
+| 404 | Not found | corrige o elimina el enlace |
+| 429 | Rate limited | reduce `--workers` o añade pausas entre peticiones |
+| 500 | Server error | contacta con el dueño del sitio o reintenta más tarde |
+| TIMEOUT | Demasiado lento | aumenta `--timeout` o comprueba la conectividad |
+| CONNECTION_ERROR | DNS/red | comprueba la ortografía de la URL y la resolución DNS |
+| SSL_ERROR | Problema de certificado | usa `--insecure` solo para hosts internos |
+
+El script escribe las URLs rotas en `problematic_urls.txt` (o lo que pases con `--output`), agrupadas por tipo de error con una cabecera de marca de tiempo. También sale con código 0 cuando todas las URLs están bien y código 1 cuando alguna está rota, que es lo que hace posible la integración con CI.
+
+Si necesitas hacer pruebas de carga a los endpoints que compruebas, echa un vistazo a [oha para pruebas de rendimiento web](https://www.bitdoze.com/oha-website-load-testing/) como herramienta complementaria.
+
+## Prográmalo en CI con GitHub Actions
+
+Aquí tienes un workflow completo que ejecuta el comprobador de URLs semanalmente y hace fallar el build cuando encuentra enlaces rotos:
+
+```yaml
+name: URL Check
+on:
+  schedule:
+    - cron: "0 9 * * 1"      # weekly, Monday 09:00 UTC
+  workflow_dispatch:          # allow manual runs
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@7d8f2266908b6c964bc9f6b357c94adc9594baf3 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.6"
+          enable-cache: true
+          prune-cache: true
+      - name: Run URL check
+        run: uv run --no-project url_checker.py urls.txt --workers 20 --output problematic_urls.txt
+```
+
+Algunas cosas que debes saber:
+
+- **Fija tags inmutables para setup-uv.** La versión 8.0.0 eliminó los tags de tipo `@v8` de major/minor. Ya no se resuelven. Usa `@v10.0.1` (tag inmutable) o un SHA de commit completo.
+- **`--no-project` en repos.** Desde uv 0.12.0, `uv run` descubre el proyecto desde el directorio del script. Si tu comprobador vive en un repo con un `pyproject.toml`, pasa `--no-project` para no arrastrar dependencias ajenas.
+- **`prune-cache: true`.** Setup-uv v9.0.0 cambió el valor por defecto a `false`, lo que significa que la caché puede crecer y comerse tu cuota de caché de Actions (límite blando de 100 GB por repo). Pon `prune-cache: true` para mantenerla a raya.
+- **`workflow_dispatch`.** Te permite lanzar la comprobación manualmente desde la pestaña de Actions, útil tras arreglar una tanda de enlaces rotos.
+- **Código de salida 1.** El script sale con 1 cuando encuentra enlaces rotos, así que el workflow realmente falla en lugar de pasar en silencio.
+
+<Notice type="info" title="Nota sobre costes">
+  El nivel gratuito de GitHub Actions cubre sin problemas comprobaciones semanales de unos cientos de URLs. Si prefieres ejecutarlo desde un VPS, un cron job en un [VPS de Hetzner Cloud](https://go.bitdoze.com/hetzner) funciona bien. El script solo hace GETs de lectura, sin radio de impacto. Prográmalo con `0 9 * * 1` y redirige la salida a un archivo de log.
+</Notice>
+
+_Los precios de los VPS subieron en todo el sector en 2026: si estás replanteándote alquilar un servidor, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+Para monitorización continua (no solo cron semanal), considera una instancia de [Uptime Kuma autoalojado](https://www.bitdoze.com/uptime-kuma-tool/) o [un stack de monitorización con Beszel y Uptime Kuma](/es/beszel-uptime-kuma/) para una observabilidad más amplia del servidor.
+
+## Cuando Python es excesivo: usa lychee
+
+Si la comprobación de enlaces es todo el trabajo —sin encabezados de autenticación personalizados, sin puntuación, sin persistencia en base de datos— una herramienta dedicada supera a un script de Python. [lychee](https://github.com/lycheeverse/lychee) es un comprobador de enlaces basado en Rust: un único binario estático, asíncrono, con limitación por host integrada, caché y código de salida 1 cuando hay enlaces rotos.
+
+<Tabs>
+<Tab name="Script de Python">
+**Cuándo usarlo:** necesitas lógica personalizada —encabezados de autenticación, puntuación propia, persistencia en BD, comprobaciones específicas de API o integrar el comprobador en un pipeline mayor.
+
+**Instalación:** nada —`uv run` se encarga.
+
+**Ejecutar:**
+```bash
+uv run url_checker.py urls.txt --head --workers 20
+```
+</Tab>
+<Tab name="lychee">
+**Cuándo usarlo:** la comprobación de enlaces ES el trabajo. Binario listo para usar, sin código que mantener, limitación por host integrada.
+
+**Instalación:**
+```bash
+# macOS
+brew install lychee
+# Linux (binary)
+curl -LO https://github.com/lycheeverse/lychee/releases/latest/download/lychee-x86_64-unknown-linux-gnu.tar.gz
+tar xzf lychee-x86_64-unknown-linux-gnu.tar.gz
+```
+
+**Ejecutar:**
+```bash
+lychee --verbose urls.txt
+```
+
+También disponible como GitHub Action (`lycheeverse/lychee-action`) y como imagen Docker.
+</Tab>
+</Tabs>
+
+## Trucos y consejos
+
+### Envía un User-Agent realista
+
+Algunos sitios bloquean las peticiones que no parecen de navegadores. El script establece un User-Agent por defecto (`url-checker/2.0 (bitdoze.com)`). Si necesitas otro, cambia el encabezado de la sesión cerca del principio del script:
+
+```python
+SESSION.headers["User-Agent"] = "Mozilla/5.0 (compatible; MyBot/1.0)"
+```
+
+### Exporta los resultados a CSV
+
+Pasa `--csv results.csv` para obtener una exportación CSV completa de cada URL con su estado, código de estado, tipo de error y tiempo de respuesta:
+
+```bash
+uv run url_checker.py urls.txt --csv results.csv
+```
+
+La función CSV usa el `csv.DictWriter` incorporado de Python —sin dependencias extra:
+
+```python
+import csv
+
+def save_to_csv(results, filename="results.csv"):
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["url", "status", "status_code", "error_type", "response_time"])
+        writer.writeheader()
+        writer.writerows(results)
+```
+
+### Sé educado: limitación por host
+
+Entre diez y veinte hilos machacando un solo dominio activarán la protección anti-bots en la mayoría de los sitios. Si tu lista de URLs apunta a un solo dominio, reduce `--workers` a 3-5. Para listas de dominios variados, ThreadPoolExecutor reparte la carga de forma natural entre los distintos hosts.
+
+Para una limitación por host más potente, lychee tiene `--host-concurrency` y `--host-request-interval` integrados.
+
+## Conclusión
+
+Este comprobador masivo de URLs te da un script de Python de un solo archivo que se ejecuta con `uv run` —sin virtualenv, sin pip, sin configuración. Comprueba cientos de URLs concurrentemente, clasifica correctamente los 4xx y 5xx como rotos (no «OK»), admite peticiones HEAD para más velocidad y sale con código 1 para integración con CI. Bloquéalo con `uv lock --script` para ejecuciones reproducibles, prográmalo en GitHub Actions o en un cron de VPS, y exporta los resultados a CSV cuando los necesites.
+
+Si necesitas darle las URLs de un sitio completo, puedes [exportar todas las URLs y títulos de entradas de WordPress](/es/exportar-urls-titulos-wordpress/) primero. Y para un contexto de operaciones más amplio —[monitoriza tu servidor y los recursos de Docker](https://www.bitdoze.com/sever-monitoring/) para mantener sana la infraestructura detrás de tus sitios.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Cuántas URLs puede comprobar este script?" group="faq">
+Cientos cómodamente con los 10 workers por defecto. Para más de 10.000 URLs, sube `--workers` a 20-30, pero sé educado con los servidores de destino —demasiadas peticiones concurrentes a un dominio activa la protección anti-bots. Para listas muy grandes, considera procesar por lotes por dominio o usar el motor asíncrono de lychee.
+</Accordion>
+
+<Accordion label="¿Puedo comprobar URLs que requieren autenticación?" group="faq">
+Sí. Añade los encabezados de autenticación a la sesión cerca del principio del script:
+
+```python
+SESSION.headers["Authorization"] = "Bearer YOUR_TOKEN"
+```
+
+Para autenticación basada en cookies, usa `SESSION.cookies`. La sesión se comparte entre todos los hilos, así que cada petición lleva los mismos encabezados.
+</Accordion>
+
+<Accordion label="¿Por qué no usar simplemente curl en un bucle?" group="faq">
+Puedes, pero pierdes concurrencia, clasificación de errores y reporte de progreso. Un bucle `for url in $(cat urls.txt); do curl ...; done` comprueba una URL cada vez y te da códigos HTTP en crudo, sin agrupar ni archivo de salida. Este script envuelve la misma lógica HTTP con ejecución en paralelo, salida estructurada y códigos de salida amigables para CI.
+</Accordion>
+
+<Accordion label="¿Funciona en Windows?" group="faq">
+Sí. uv funciona en Windows, macOS y Linux. El script solo usa la stdlib de Python más `requests` —nada de código específico de plataforma. Instala uv con `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` en Windows.
+</Accordion>
+
+<Accordion label="¿Cómo compruebo los enlaces de todo mi sitio?" group="faq">
+Exporta primero tu sitemap o lista de URLs. Para sitios WordPress, [exporta todas las URLs y títulos de entradas de WordPress](/es/exportar-urls-titulos-wordpress/) para obtener una lista completa, y luego dásela a este script. Para sitios estáticos, parsea tu sitemap.xml o usa un crawler para generar la lista de URLs.
+</Accordion>
