@@ -1,0 +1,611 @@
+---
+date: 2025-01-17
+lastmod: 2026-08-10T00:00:00Z
+translationKey: "docker-bypasses-firewall"
+title: "Cómo evitar que Docker se salte el firewall: guía completa"
+meta_title: "¿Docker se salta el firewall? Cómo solucionarlo (guía 2026)"
+description: "Docker se salta las reglas del firewall UFW. Protege tus contenedores con vinculación a localhost, reglas en la cadena DOCKER-USER de iptables, la herramienta ufw-docker y un…"
+image: "@assets/images/25/01/fix-docker-bypass-firewall.jpg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "ufw", "iptables"]
+canonical: "https://www.bitdoze.com/es/docker-evita-firewall/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+
+Si [gestionas tus propios servidores](https://www.bitdoze.com/secure-ssh-server-linux/) y ejecutas contenedores Docker, hay un problema de seguridad que debes conocer: Docker se salta el firewall de tu sistema por defecto. No es un bug, es así como funciona la red de Docker. Pero significa que las reglas de UFW o iptables que configuraste no protegen tus contenedores como esperabas.
+
+Esta guía cubre todas las soluciones prácticas, desde la vinculación a localhost que lleva dos minutos hasta cambios de arquitectura como Docker rootless. Todo lo que hay aquí está probado con Docker 28.x y 29.x.
+
+<Notice type="warning" title="Probado con Docker 28.x y 29.x">
+La red de Docker cambió sustancialmente en 28.0.0 (feb 2025) y 29.0.0 (nov 2025). La estructura de cadenas de iptables fue rediseñada, y llegó el soporte de nftables como experimental. Si estás en 27.x o anterior, los comandos iptables de abajo seguirán funcionando, pero la disposición interna de las cadenas difiere.
+</Notice>
+
+## El problema: por qué Docker se salta el firewall
+
+Docker crea su propia red puente (normalmente `docker0`) y gestiona la red de los contenedores a través de iptables (o nftables en instalaciones más recientes). Cuando ejecutas un contenedor con un mapeo de puertos como este:
+
+```yaml
+services:
+  myapp:
+    image: nginx
+    ports:
+      - "8080:80"
+```
+
+Podrías pensar que solo estás abriendo el puerto 8080 en localhost. Lo que ocurre en realidad: Docker se vincula a `0.0.0.0:8080` e inserta reglas DNAT en tus iptables, por delante de tus reglas de firewall habituales. Así que tus reglas UFW de «bloquea todo excepto 22, 80, 443» no se aplican al tráfico reenviado por Docker.
+
+Si estás [configurando contenedores para tu servidor casero](https://www.bitdoze.com/es/contenedores-docker-servidor-casa/) o un VPS, esto puede exponer servicios que creías internos.
+
+Puedes ver las reglas de Docker en acción:
+
+```bash
+sudo iptables -L -n -v | grep DOCKER
+```
+
+Verás las reglas que Docker añadió automáticamente. Son las que se saltan tu firewall.
+
+Esto es intencionado. Docker necesita control sobre la red para la comunicación entre contenedores y los puertos publicados. Pero «intencionado» no significa «aceptable para tu configuración». Así se soluciona.
+
+<Notice type="error" title="CVE-2025-54388 (corregido en Docker 28.3.3)">
+Tras una recarga de firewalld, los puertos publicados de los contenedores podían ser accedidos directamente desde la red local, incluso estando vinculados a loopback. Si estás ejecutando Docker 28.0 a 28.3.2, actualiza inmediatamente. Se corrigió en 28.3.3.
+</Notice>
+
+> Si te interesa ver algunas apps autoalojadas open source gratuitas e interesantes, puedes consultar la [sección self hosted de toolhunt.net](https://toolhunt.net/sh/).
+
+## Soluciones: configurar el firewall para controlar el tráfico de Docker
+
+Estas soluciones van desde arreglos rápidos hasta cambios de arquitectura. Empieza por la primera y ve bajando según lo necesites.
+
+### 1. Vincular a localhost (la solución más simple)
+
+La mitigación más rápida: vincula los contenedores a `127.0.0.1` para que solo sean accesibles desde el propio host.
+
+```yaml
+services:
+  myapp:
+    image: nginx
+    ports:
+      - "127.0.0.1:8080:80"
+```
+
+Esto funciona porque Docker omite su cadena DNAT para los puertos vinculados a loopback. El contenedor es alcanzable desde localhost pero invisible para el mundo exterior.
+
+**Limitaciones**: otros hosts en la misma red no pueden alcanzar el contenedor directamente. Para el acceso externo necesitas un reverse proxy (Traefik, Caddy, Nginx) delante. Que además es el patrón recomendado.
+
+### 2. Usar un firewall en la nube
+
+Los firewalls a nivel de nube operan en la capa de red, antes de que el tráfico llegue siquiera a tu VPS. Docker no puede tocarlos porque se ejecutan fuera del host.
+
+Proveedores con firewalls a nivel de red:
+
+- **AWS Security Groups**: reglas de entrada/salida a nivel de instancia
+- **[Hetzner Cloud Firewalls](https://go.bitdoze.com/hetzner)**: filtrado a nivel de red, gratuito y fácil de configurar
+- **[DigitalOcean Cloud Firewalls](https://go.bitdoze.com/do)**: similar a los security groups
+- **Google Cloud Firewall Rules**: filtrado de red basado en etiquetas
+
+_Los precios de los VPS subieron en general en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+Docker no puede saltarse estos con su manipulación de iptables. Mi configuración habitual:
+
+1. Permitir los puertos 80, 443 (tráfico web) y 22 (SSH)
+2. Bloquear todo el resto del tráfico entrante
+3. Añadir reglas específicas para cualquier servicio adicional
+
+Es tu capa de defensa más externa. No sustituye a corregir el comportamiento de Docker en el host, pero captura cualquier cosa que se cuele.
+
+### 3. Usar Traefik como reverse proxy
+
+Usar [Traefik como reverse proxy](/es/traefik-proxy-docker/) es una de las mejores soluciones a largo plazo. Solo los puertos de Traefik quedan expuestos. Todo lo demás permanece oculto.
+
+<Notice type="info" title="¿Por qué Traefik en lugar de exponer puertos directamente?">
+Solo los puertos de Traefik quedan expuestos. Todos los demás contenedores permanecen ocultos detrás. Let's Encrypt integrado, rate limiting y middleware. Sin necesidad de gestionar certificados TLS por contenedor.
+</Notice>
+
+Aquí va una configuración funcional:
+
+```yaml
+services:
+  traefik:
+    image: traefik:v3
+    command:
+      - "--providers.docker=true"
+      - "--api.dashboard=true"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=your@email.com"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    labels:
+      - "traefik.enable=true"
+
+  myapp:
+    image: nginx
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.myapp.rule=Host(`your-domain.com`)"
+      - "traefik.http.routers.myapp.entrypoints=websecure"
+      - "traefik.http.routers.myapp.tls.certresolver=letsencrypt"
+    # Notice: no ports exposed directly
+volumes:
+  letsencrypt:
+```
+
+Para el dashboard de Traefik, protégelo con autenticación básica. El hash de ejemplo `$$apr1$$xyz123$$` no funcionará. Genera uno real:
+
+```bash
+echo $(htpasswd -nbB admin 'your-password') | sed -e 's/\$/\$\$/g'
+```
+
+Añade el resultado a tus labels de Traefik o a un file provider. Para un recorrido completo sobre [cómo proteger el propio proxy con autenticación básica](/es/traefik-autenticacion-basica/), consulta esa guía dedicada.
+
+### 4. Usar Caddy + caddy-docker-proxy (alternativa ligera)
+
+Si Traefik te parece excesivo, [Caddy](https://caddyserver.com/) con el plugin `lucaslorentz/caddy-docker-proxy` te da HTTPS automático con una configuración más simple:
+
+```yaml
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:ci-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - caddy_data:/data
+    environment:
+      - CADDY_INGRESS_NETWORK=caddy
+
+  myapp:
+    image: nginx
+    labels:
+      caddy: your-domain.com
+      caddy.reverse_proxy: "{{upstreams 80}}"
+    # No ports exposed directly
+
+networks:
+  default:
+    name: caddy
+    external: true
+
+volumes:
+  caddy_data:
+```
+
+Crea primero la red externa: `docker network create caddy`.
+
+**Caddy vs Traefik**: Caddy tiene un modelo de configuración más simple y HTTPS automático por defecto (sin configuración explícita de certresolver). Traefik tiene más opciones de middleware, un dashboard más completo y mejor soporte para enrutado complejo. Para operadores en solitario que ejecutan un puñado de servicios, Caddy suele ser la mejor opción.
+
+### 5. Usar ufw-docker: la solución más simple para UFW + Docker
+
+Si usas UFW, esta es la herramienta que probablemente no sabías que existía. [chaifeng/ufw-docker](https://github.com/chaifeng/ufw-docker) (más de 6.6k estrellas en GitHub) automatiza el arreglo para que Docker no se salte UFW.
+
+<Notice type="success" title="Recomendado para usuarios de UFW">
+ufw-docker es la solución comunitaria de facto para UFW + Docker. Sustituye la edición manual de after.rules por comandos simples por contenedor.
+</Notice>
+
+**Instalación:**
+
+```bash
+sudo wget -O /usr/local/bin/ufw-docker \
+  https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker
+sudo chmod +x /usr/local/bin/ufw-docker
+sudo ufw-docker install
+```
+
+El comando `install` modifica `/etc/ufw/after.rules` (y `after6.rules` para IPv6) para añadir reglas de filtrado compatibles con Docker. Primero hace una copia de seguridad del archivo existente.
+
+**Permitir el puerto de un contenedor a través del firewall:**
+
+```bash
+sudo ufw-docker allow myapp 80
+sudo ufw-docker allow myapp 443/tcp
+```
+
+**Listar las reglas de un contenedor:**
+
+```bash
+sudo ufw-docker list myapp
+```
+
+**Eliminar una regla:**
+
+```bash
+sudo ufw-docker delete allow myapp 80
+```
+
+**Ventaja clave sobre las reglas manuales**: `ufw-docker` mantiene `DEFAULT_FORWARD_POLICY="DROP"` (el valor seguro por defecto) y solo abre lo que permites explícitamente. El enfoque manual de ponerlo en `ACCEPT` abre todo el tráfico reenviado. Es una medida demasiado burda.
+
+Documenté mi experiencia completa [protegiendo un servidor Docker tras un informe de seguridad del BSI](https://www.bitdoze.com/es/informe-seguridad-bsi-docker-ufw/) por si quieres la historia completa.
+
+## Configuraciones avanzadas del firewall: trabajar con iptables y UFW
+
+Si necesitas un control más fino o no usas UFW, estos enfoques funcionan a nivel de iptables.
+
+### Trabajar con iptables y la cadena DOCKER-USER
+
+La cadena `DOCKER-USER` es especial: Docker intencionadamente no modifica las reglas que pones ahí. Se procesa antes que las reglas de reenvío propias de Docker, así que es el lugar correcto para el filtrado definido por el administrador.
+
+<Notice type="warning" title="Docker 28.2.2 cambió el comportamiento de DOCKER-USER">
+En Docker 28.2.2 (mayo 2025), Docker dejó de añadir una regla RETURN explícita a DOCKER-USER. Esto significa que ahora puedes tanto añadir (-A) como insertar (-I) reglas. Si antes dependías del RETURN implícito, verifica que el orden de tus reglas sigue funcionando tras actualizar.
+</Notice>
+
+Aquí está el patrón estándar:
+
+```bash
+# Allow established connections (don't break existing traffic)
+sudo iptables -A DOCKER-USER -i eth0 -j ACCEPT -m conntrack --ctstate ESTABLISHED,RELATED
+
+# Allow traffic from a specific IP
+sudo iptables -A DOCKER-USER -i eth0 -s 203.0.113.1 -j ACCEPT
+
+# Allow traffic from a trusted subnet
+sudo iptables -A DOCKER-USER -i eth0 -s 10.0.0.0/8 -j ACCEPT
+
+# Drop everything else coming from eth0 to containers
+sudo iptables -A DOCKER-USER -i eth0 -j DROP
+```
+
+Sustituye `eth0` por tu interfaz pública real (compruébalo con `ip a`).
+
+**Hacer las reglas persistentes entre reinicios:**
+
+```bash
+sudo apt install iptables-persistent
+sudo netfilter-persistent save
+sudo netfilter-persistent reload
+```
+
+Sin `iptables-persistent`, tus reglas desaparecen al reiniciar.
+
+**Verifica tus reglas:**
+
+```bash
+sudo iptables -L DOCKER-USER -n -v --line-numbers
+```
+
+Deberías ver tus reglas listadas con contadores de paquetes. Si los contadores se quedan en cero, las reglas no están coincidiendo. Comprueba el nombre de la interfaz.
+
+### Trabajar con firewalld
+
+firewalld usa zonas para representar distintos entornos de red. Puedes crear una zona dedicada para las interfaces de Docker:
+
+**1. Crea una zona para Docker:**
+
+```bash
+sudo firewall-cmd --permanent --new-zone=docker
+```
+
+**2. Vincula las interfaces de Docker a la zona:**
+
+```bash
+# Default docker0 bridge
+sudo firewall-cmd --permanent --zone=docker --add-interface=docker0
+
+# User-defined networks (replace br-xxx with actual interface)
+# Find the interface name:
+docker network ls
+docker network inspect <network_name> | grep "Interface"
+
+sudo firewall-cmd --permanent --zone=docker --add-interface=br-xxxxx
+```
+
+**3. Define reglas en la zona de Docker:**
+
+```bash
+sudo firewall-cmd --permanent --zone=docker --add-port=8080/tcp
+sudo firewall-cmd --permanent --zone=docker --add-service=http
+```
+
+**4. Aplica y verifica:**
+
+```bash
+sudo firewall-cmd --reload
+sudo firewall-cmd --zone=docker --list-all
+```
+
+### Usar UFW (Uncomplicated Firewall): enfoque manual
+
+Si prefieres el control manual en lugar de `ufw-docker`, aquí está el enfoque tradicional.
+
+**1. Establece la política de reenvío** en `/etc/default/ufw`:
+
+```bash
+DEFAULT_FORWARD_POLICY="ACCEPT"
+```
+
+<Notice type="info" title="Es un ajuste amplio">
+Poner DEFAULT_FORWARD_POLICY en ACCEPT abre todo el tráfico reenviado. La herramienta ufw-docker (vista arriba) lo mantiene en DROP y solo abre lo que permites explícitamente. Usa ufw-docker salvo que tengas una razón concreta para gestionar las reglas manualmente.
+</Notice>
+
+**2. Añade reglas específicas de Docker** a `/etc/ufw/after.rules` (añade antes del `COMMIT` final):
+
+```bash
+# NAT table rules
+*nat
+:POSTROUTING ACCEPT [0:0]
+
+# Forward traffic through eth0
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+
+COMMIT
+
+# Don't delete these required lines
+*filter
+:ufw-user-forward - [0:0]
+:ufw-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+
+# Allow Docker internal traffic
+-A DOCKER-USER -j RETURN -s 10.0.0.0/8
+-A DOCKER-USER -j RETURN -s 172.16.0.0/12
+-A DOCKER-USER -j RETURN -s 192.168.0.0/16
+
+-A DOCKER-USER -j ufw-user-forward
+
+-A DOCKER-USER -j DROP
+
+COMMIT
+```
+
+**3. Aplica:**
+
+```bash
+sudo ufw reload
+```
+
+### Docker rootless: la opción agresiva
+
+Docker rootless ejecuta el demonio como un usuario sin root. Como no puede manipular iptables directamente, los puertos publicados se reenvían a través de la red en espacio de usuario (`slirp4netns` o `gvisor-tap-vsock`), y las reglas del firewall del host se respetan.
+
+Esto elimina de forma efectiva el problema del bypass. Compromisos:
+
+- Sin modo `--net=host`
+- Algunas funciones no disponibles (AppArmor, ciertos drivers de almacenamiento)
+- Comportamiento de red ligeramente diferente
+- Requiere configuración por usuario con `dockerd-rootless-setuptool.sh`
+
+<Notice type="warning" title="Compromisos de Docker rootless">
+Docker rootless resuelve el bypass del firewall pero introduce complejidad operativa. No todas las imágenes funcionan limpiamente en modo rootless, y depurar problemas de red es más difícil. Considéralo para VPS de un solo usuario, no para servidores compartidos.
+</Notice>
+
+Si estás evaluando runtimes de contenedores, [Podman gestiona las reglas de firewall de forma diferente](/es/podman-vs-docker/) y puede valer la pena considerarlo como alternativa.
+
+## Aislamiento de redes Docker y buenas prácticas
+
+Las reglas de firewall son una capa. El aislamiento de red es otra. Usa ambas.
+
+### Usar redes de Docker Compose
+
+Las redes personalizadas te permiten controlar qué contenedores pueden hablar entre sí:
+
+- **Redes internas** (`internal: true`): completamente aisladas. Los contenedores no pueden alcanzar internet ni servicios externos. Perfectas para bases de datos.
+- **Redes externas** (`internal: false`): los contenedores pueden alcanzar internet y ser alcanzados desde fuera. Necesitan reglas de firewall.
+
+Así organizo yo los contenedores con aislamiento de red:
+
+```yaml
+networks:
+  frontend:
+    internal: false  # Allows external access
+  backend:
+    internal: true   # Completely isolated from external access
+
+services:
+  web:
+    image: nginx
+    networks:
+      - frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    image: node
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      - database
+
+  database:
+    image: mysql
+    networks:
+      - backend    # Only connected to internal network
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets:
+      - db_root_password
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_password.txt
+```
+
+Esto garantiza que la base de datos esté completamente aislada del acceso externo, que la API haga de puente entre ambas redes, y que toda entrada externa pase por localhost. Para más sobre [secrets de Docker Compose](/es/secretos-docker-compose/) y qué funciona realmente para la gestión de secretos, consulta esa guía dedicada.
+
+También puedes definir subredes explícitas para un control más fino:
+
+```yaml
+networks:
+  frontend:
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+```
+
+**Audita tus redes regularmente:**
+
+```bash
+docker network ls
+docker network inspect frontend
+docker stats --format "table {{.Name}}\t{{.NetIO}}"
+docker network prune   # Remove unused networks
+```
+
+### Límites de recursos de los contenedores
+
+<Notice type="warning" title="deploy.resources es solo para Swarm">
+La sintaxis `deploy.resources.limits` en docker-compose.yml solo la respeta Docker Swarm (docker stack deploy). Para `docker compose` standalone, usa las claves de nivel de servicio mostradas abajo.
+</Notice>
+
+**Para `docker compose` standalone:**
+
+```yaml
+services:
+  web:
+    image: nginx
+    cpu_count: 1
+    cpu_percent: 50
+    mem_limit: 512m
+    memswap_limit: 512m  # Prevent swap abuse
+```
+
+**Para Docker Swarm (`docker stack deploy`):**
+
+```yaml
+services:
+  web:
+    image: nginx
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+```
+
+### Modos de gateway en Docker 28+
+
+Docker 28.0.0 introdujo modos de gateway para las redes puente, con un control más fino sobre cómo se exponen los puertos de los contenedores en el host:
+
+- `nat-unprotected`: se aplica NAT pero no se crean reglas iptables por puerto. Útil cuando quieres NAT pero gestionas el acceso a los puertos mediante DOCKER-USER.
+- `isolated`: sin IP de puente en el host. El host no puede alcanzar los contenedores directamente.
+- `routed`: los contenedores son accesibles desde otras redes puente mediante enrutado.
+
+Crea una red con un modo específico:
+
+```bash
+docker network create --opt com.docker.network.bridge.gateway_mode=nat-unprotected mynet
+```
+
+Esto es para operadores avanzados. Si el comportamiento por defecto más un reverse proxy resuelve tu problema, no necesitas tocar los modos de gateway.
+
+### Backend nftables: el futuro (Docker 29+)
+
+<Notice type="info" title="Experimental en Docker 29+">
+El soporte de nftables es experimental. Úsalo para pruebas y evaluación. El backend iptables sigue siendo el predeterminado y tiene soporte completo. Todavía no hay equivalente a la cadena DOCKER-USER con nftables. El filtrado se hace mediante sets y reglas de nftables.
+</Notice>
+
+Docker 29.0.0 (nov 2025) introdujo soporte experimental de nftables. En lugar de iptables, Docker gestiona las reglas de firewall a través de nftables:
+
+```json
+// /etc/docker/daemon.json
+{
+  "firewall-backend": "nftables"
+}
+```
+
+Con el backend nftables, debes activar el IP forwarding manualmente (Docker no lo hace automáticamente como con iptables):
+
+```bash
+echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-docker.conf
+sudo sysctl --system
+sudo systemctl restart docker
+```
+
+Diferencias clave respecto al backend iptables:
+- Sin cadena DOCKER-USER. Usa reglas nftables directamente.
+- Aún no soportado en modo Swarm.
+- Requiere un kernel con soporte nftables (todas las distros modernas lo tienen).
+
+Con el tiempo se convertirá en el predeterminado. Por ahora, quédate con iptables salvo que estés probando.
+
+## Verificar la configuración del firewall
+
+Después de aplicar cualquiera de las soluciones anteriores, verifica que funciona de verdad. No lo des por hecho.
+
+<ListCheck>
+<ul>
+<li>Comprueba qué está realmente expuesto: <code>docker ps --format "table {'{'}{'{'} .Names {'}'}{'}'}\t{'{'}{'{'} .Ports {'}'}{'}'}"</code>, verifica que no haya vinculaciones <code>0.0.0.0</code> inesperadas</li>
+<li>Prueba desde fuera: <code>nc -zv &lt;public-ip&gt; &lt;port&gt;</code> desde un host diferente. Confirma que un puerto está bloqueado cuando debería estarlo</li>
+<li>Inspecciona las reglas iptables: <code>iptables -L DOCKER-USER -n -v --line-numbers</code>. Verifica que tus reglas están en el orden correcto</li>
+<li>Traza las reglas NAT: <code>iptables -t nat -L -n -v</code>. Mira las reglas DNAT de Docker y dónde se sitúan respecto a tu firewall</li>
+<li>Comprueba el estado de UFW: <code>ufw status verbose</code>. Confirma que las reglas están activas y correctas</li>
+<li>Audita todas las redes: <code>docker network ls</code> y <code>docker network inspect &lt;name&gt;</code></li>
+</ul>
+</ListCheck>
+
+Aquí están los comandos concretos:
+
+```bash
+# 1. See exactly what ports are exposed and where
+docker ps --format "table {{.Names}}\t{{.Ports}}"
+
+# 2. Test a port from an external host (run on a different machine)
+nc -zv YOUR_PUBLIC_IP 8080
+
+# 3. Check DOCKER-USER chain rules and packet counts
+sudo iptables -L DOCKER-USER -n -v --line-numbers
+
+# 4. Inspect all NAT rules (look for DNAT entries from Docker)
+sudo iptables -t nat -L -n -v
+
+# 5. UFW status
+sudo ufw status verbose
+
+# 6. List and inspect networks
+docker network ls
+docker network inspect bridge
+```
+
+Si `nc` tiene éxito en un puerto que esperabas bloqueado, tu arreglo no se aplicó. Revisa el nombre de la interfaz en tus reglas iptables (`eth0` vs `ens3` vs `enp0s3`, varía según la distro y el proveedor de cloud).
+
+## Conclusión: mantener seguros tus contenedores Docker
+
+Docker se salta los firewalls del host por defecto. Esa es la realidad. Pero es manejable con un enfoque por capas:
+
+1. **Vinculación a localhost + reverse proxy** como base. Vincula los contenedores a `127.0.0.1`, expón solo Traefik o Caddy al público. Este único patrón elimina la mayor parte del riesgo.
+2. **Firewall del host** con `ufw-docker` (para usuarios de UFW) o reglas iptables en DOCKER-USER (para usuarios de iptables). Controla exactamente qué puertos de contenedor son alcanzables y desde dónde.
+3. **Firewall en la nube** como capa externa. Filtrado a nivel de red que Docker no puede tocar.
+4. **Aislamiento de redes Docker** para defensa en profundidad. Redes internas para bases de datos y servicios de backend.
+
+Mantén Docker actualizado. CVE-2025-54388 demostró que incluso los puertos vinculados a loopback podían quedar expuestos tras una recarga de firewalld en las versiones afectadas. Si ejecutas contenedores críticos para la seguridad, estar al día no es opcional.
+
+Para añadir capas de seguridad más allá del propio Docker, considera [CrowdSec](/es/crowdsec-servidor-seguro/) para detección y respuesta automatizada ante intrusiones.
+
+<ListCheck>
+<ul>
+<li>Vincula todos los contenedores a <code>127.0.0.1</code> salvo que deban ser accesibles públicamente</li>
+<li>Despliega un reverse proxy (Traefik o Caddy) para todos los servicios públicos</li>
+<li>Instala <code>ufw-docker</code> o configura reglas iptables en DOCKER-USER</li>
+<li>Configura un firewall en la nube que solo permita los puertos 22, 80, 443</li>
+<li>Usa redes internas para bases de datos y servicios de backend</li>
+<li>Verifica con <code>nc -zv</code> desde un host externo después de cada cambio</li>
+<li>Mantén Docker actualizado. Revisa las notas de versión antes de actualizar</li>
+<li>[Limpia regularmente los recursos Docker sin usar](https://www.bitdoze.com/es/limpiar-docker-overlay2/) para reducir la superficie de ataque</li>
+</ul>
+</ListCheck>
+
+La seguridad no consiste en implementar todas las medidas posibles. Consiste en la combinación adecuada para tu situación. Para la mayoría de operadores en solitario que ejecutan Docker en un VPS: vinculación a localhost + reverse proxy + `ufw-docker` + firewall en la nube cubre la inmensa mayoría de la exposición. El resto es aislamiento de red y mantener todo actualizado.
+
+Si estás empezando con Docker, echa un vistazo a los [comandos esenciales de Docker](https://www.bitdoze.com/docker-commands/) y a cómo [copiar varios archivos eficientemente en Dockerfiles](https://www.bitdoze.com/es/copiar-varios-archivos-una-capa-dockerfile/).

@@ -1,0 +1,603 @@
+---
+date: 2025-04-14
+lastmod: 2026-08-20T00:00:00Z
+translationKey: "google-adk-multi-agent-search"
+title: "Equipo de Investigación Multi-Agente con Google ADK, Tavily y Crawl4AI"
+meta_title: "Equipo de Investigación Multi-Agente con Google ADK, Tavily y Crawl4AI"
+description: "Construye un equipo de investigación multi-agente con Google ADK. Combina la búsqueda web de Tavily, la extracción de contenido de Crawl4AI y la síntesis con IA en un solo flujo de trabajo de agentes."
+image: "@assets/images/25/04/google-adk-multi-agent-search.jpeg"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["ai-agents", "google-adk", "multi-agent"]
+series: ["Google ADK Tutorials", "3"]
+canonical: "https://www.bitdoze.com/es/google-adk-busqueda-multi-agente/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+
+Construir un equipo de investigación multi-agente con Google ADK es el siguiente paso natural después de poner en marcha tu [primer agente de Google ADK](/es/empezar-google-adk/). La arquitectura de ADK facilita conectar agentes especializados (uno para búsqueda web, uno para extracción de contenido y uno para síntesis) y que un agente coordinador los orqueste en un único flujo de trabajo.
+
+Este tutorial se ha reescrito por completo para **Google ADK 2.x** (probado con la 2.7.1, ago 2026). La versión original estaba dirigida a ADK 0.x/1.x, y varias API han cambiado desde entonces: el nombre del modelo, la integración de Tavily con LangChain, la API de resultados de Crawl4AI y el patrón de delegación multi-agente. Todo lo que sigue funciona con las versiones actuales.
+
+<Notice type="info" title="Probado con google-adk 2.7.1">
+Este tutorial se escribió y probó con Google ADK 2.7.1 (ago 2026), Crawl4AI 0.9.x y langchain-tavily. Si usas una versión anterior de ADK, consulta la sección de resolución de problemas para ver las notas de migración.
+</Notice>
+
+## Lo que vas a construir: un equipo de investigación multi-agente
+
+Vamos a crear un sistema con cuatro agentes trabajando juntos:
+
+| Agente | Rol | Herramientas | Cómo funciona |
+|-------|------|-------|--------------|
+| **Coordinador** | Dirige las peticiones del usuario al especialista adecuado | Delegación con `sub_agents` | El LLM decide qué especialista invocar según la consulta |
+| **Agente de Búsqueda** | Búsqueda web para encontrar información | Tavily Search (vía LangChain) | Devuelve resultados estructurados con enlaces y fragmentos |
+| **Extractor de Contenido** | Análisis profundo de páginas web | Crawl4AI (FunctionTool personalizado) | Extrae, analiza y estructura el contenido de la página |
+| **Resumidor** | Condensa la información en resúmenes claros | Ninguna (razonamiento puro del LLM) | Crea resúmenes con distintos niveles de detalle |
+
+El coordinador usa el patrón `sub_agents` de ADK 2.x. El LLM del coordinador ve la descripción de cada especialista y decide a cuál delegar. Este es el enfoque moderno de ADK para coordinador-sobre-especialistas, que sustituye al antiguo patrón del envoltorio `AgentTool`.
+
+Así fluyen los datos por el sistema:
+
+```
+User Query
+    │
+    ▼
+┌─────────────────────┐
+│  Coordinator Agent   │  ← LLM decides routing
+│  (gemini-flash-latest)│
+└──────┬──┬──┬────────┘
+       │  │  │
+       ▼  ▼  ▼
+   ┌───────┐ ┌──────────┐ ┌───────────┐
+   │Search │ │Extractor │ │Summarizer │
+   │Agent  │ │Agent     │ │Agent      │
+   └───┬───┘ └────┬─────┘ └─────┬─────┘
+       │          │              │
+       ▼          ▼              ▼
+   Tavily API  Crawl4AI     LLM reasoning
+       │          │              │
+       └──────────┴──────────────┘
+                   │
+            Session State
+            (shared memory)
+                   │
+                   ▼
+            Final Response
+```
+
+## Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Python 3.10+ instalado (ADK 2.x lo requiere)</li>
+<li>Una clave API de Google AI Studio de <a href="https://aistudio.google.com" target="_blank" rel="noopener">aistudio.google.com</a></li>
+<li>Una clave API de Tavily de <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> (nivel gratuito: 1.000 créditos/mes, sin tarjeta)</li>
+<li><code>uv</code> instalado (<a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">guía de instalación</a>)</li>
+<li>Familiaridad con los conceptos básicos de ADK del <a href="/es/empezar-google-adk/">primer tutorial</a></li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="Nota sobre costes">
+El nivel gratuito de Tavily ofrece 1.000 créditos de API al mes, suficiente para prototipar. La API de Gemini tiene un nivel gratuito en AI Studio. Crawl4AI es open-source pero ejecuta un navegador headless (necesita ~500 MB de RAM). Puedes construir y probar todo este sistema por 0 $.
+</Notice>
+
+## Configuración del proyecto
+
+Crea el proyecto e instala las dependencias:
+
+```bash
+# Create project directory
+mkdir adk-research-team
+cd adk-research-team
+
+# Initialize with uv
+uv init
+uv venv
+
+# Install required packages
+uv add google-adk langchain-tavily python-dotenv crawl4ai
+```
+
+<Notice type="warning" title="Cambio incompatible respecto a tutoriales anteriores">
+Si seguiste una versión anterior de este tutorial, sustituye `langchain-community` por `langchain-tavily` en tus dependencias. La clase `TavilySearchResults` de `langchain_community` está obsoleta y no funcionará con las API actuales de Tavily.
+</Notice>
+
+Crea un archivo `.env` en la raíz del proyecto:
+
+```ini
+# .env file
+GOOGLE_API_KEY=your_google_ai_studio_api_key
+TAVILY_API_KEY=your_tavily_api_key
+# Optional: force the non-enterprise Gemini API path
+GOOGLE_GENAI_USE_ENTERPRISE=False
+```
+
+La variable `GOOGLE_GENAI_USE_ENTERPRISE` sustituye a la obsoleta `GOOGLE_GENAI_USE_VERTEXAI`. Si usas una clave normal de AI Studio (no Vertex AI), puedes omitirla por completo. ADK usa por defecto la ruta de la API de Gemini.
+
+La CLI de ADK carga automáticamente el `.env` desde la raíz del proyecto, así que las llamadas manuales a `load_dotenv()` son opcionales aunque inofensivas.
+
+<Notice type="info" title="¿Usas un proveedor de modelos distinto?">
+Si quieres usar modelos de OpenRouter u otros proveedores en lugar de Gemini de Google, mira cómo <a href="/es/google-adk-openrouter-modelos/">usar cualquier modelo de OpenRouter con Google ADK</a>.
+</Notice>
+
+## Estructura del proyecto
+
+ADK espera una estructura concreta para que `adk web` descubra tus agentes:
+
+```
+adk-research-team/
+├── .env                       # API keys
+└── agent_module/              # Agent package
+    ├── __init__.py            # Makes it a Python package
+    ├── agent.py               # Main file with root_agent
+    ├── search_agent.py        # Search specialist
+    ├── content_extractor.py   # Content analysis specialist
+    └── summarizer.py          # Summarization specialist
+```
+
+Crea la estructura de directorios:
+
+```bash
+mkdir -p agent_module
+touch agent_module/__init__.py
+```
+
+Añade lo siguiente a `agent_module/__init__.py`:
+
+```python agent_module/__init__.py
+# This file makes agent_module a proper Python package
+# The import below ensures that agent.py is accessible
+from . import agent
+```
+
+<Notice type="warning">
+Los nombres de agentes y carpetas deben ser identificadores válidos de Python (solo letras, dígitos y guiones bajos). Los nombres con guiones como `my-agent` harán que ADK omita silenciosamente la carga del agente.
+</Notice>
+
+## Creación de los agentes especializados
+
+Vamos a implementar cada especialista uno a uno, empezando por los agentes hoja y terminando en el coordinador.
+
+### 1. El agente de búsqueda con Tavily Search
+
+```bash
+touch agent_module/search_agent.py
+```
+
+```python agent_module/search_agent.py
+from dotenv import load_dotenv
+import os
+from google.adk.agents import LlmAgent
+from google.adk.integrations.langchain import LangchainTool
+from langchain_tavily import TavilySearch
+
+load_dotenv()
+
+
+def create_search_agent():
+    """
+    Creates an agent specialized in web searching using Tavily Search.
+    """
+    if not os.getenv("TAVILY_API_KEY"):
+        raise ValueError("TAVILY_API_KEY not found in environment variables")
+
+    # Create Tavily Search tool (langchain-tavily package)
+    tavily_tool = TavilySearch(
+        max_results=5,
+        topic="general",
+        search_depth="advanced",
+        include_answer=True,
+        include_raw_content=True,
+        include_images=False,
+    )
+
+    # Wrap for ADK
+    adk_tavily_tool = LangchainTool(tool=tavily_tool)
+
+    return LlmAgent(
+        name="search_agent",
+        model="gemini-flash-latest",
+        description="A specialized agent that searches the web for information using Tavily Search API.",
+        instruction="""You are a web research specialist.
+
+        When asked to find information about a topic, craft an effective search query and use the TavilySearch tool.
+
+        After receiving search results:
+        1. Parse the response which may contain a direct answer and multiple search results.
+        2. Format the results in a clear, structured way, with each result showing the title, link, and a brief preview of the content.
+        3. Highlight the most relevant results based on the original query.
+        4. If Tavily provided a direct answer, present that first as the most likely answer.
+
+        If the search doesn't return useful results, suggest refined search terms for a follow-up search.
+
+        Avoid making up information - only report what is found in the search results.
+        """,
+        tools=[adk_tavily_tool],
+    )
+```
+
+Cambios clave respecto a la versión anterior:
+- `from google.adk.agents import LlmAgent` en lugar de `from google.adk import Agent`
+- `from google.adk.integrations.langchain import LangchainTool` (movido desde `google.adk.tools.langchain_tool`)
+- `from langchain_tavily import TavilySearch` en lugar de `TavilySearchResults` de `langchain_community`
+- Modelo: `gemini-flash-latest` (el antiguo `gemini-2.0-flash` se retiró en junio de 2026)
+
+<Notice type="info" title="Nivel gratuito de Tavily">
+Tavily ofrece 1.000 créditos de API gratuitos al mes sin tarjeta de crédito. Una búsqueda suele costar 1 crédito. La búsqueda avanzada con `include_raw_content` puede costar más por consulta.
+</Notice>
+
+Si necesitas una opción de búsqueda que no requiera clave API, puedes ver la [búsqueda web gratuita sin claves API](/es/busqueda-duckduckgo-openclaw/) con DuckDuckGo. Para una API de búsqueda web gestionada pensada para agentes de IA, la [API de búsqueda web de TinyFish](https://go.bitdoze.com/tinyfish) es otra opción que merece la pena evaluar.
+
+### 2. El extractor de contenido con Crawl4AI
+
+```bash
+touch agent_module/content_extractor.py
+```
+
+```python agent_module/content_extractor.py
+from dotenv import load_dotenv
+import asyncio
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
+from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
+from google.adk.tools.tool_context import ToolContext
+
+load_dotenv()
+
+
+async def extract_content_from_url(url: str, tool_context: ToolContext = None) -> dict:
+    """
+    Extracts content from a URL using Crawl4AI.
+
+    Args:
+        url (str): The URL to extract content from.
+        tool_context (ToolContext, optional): Tool context for ADK session state.
+
+    Returns:
+        dict: Extracted content, metadata, and status.
+    """
+    async with AsyncWebCrawler() as crawler:
+        result = await crawler.arun(url=url, config=CrawlerRunConfig())
+
+    # Crawl4AI 0.9.x: result.markdown is a MarkdownGenerationResult object
+    md = result.markdown.raw_markdown if result.markdown else ""
+
+    # Title: try metadata first, fall back to first markdown heading
+    title = (result.metadata or {}).get("title")
+    if not title and md:
+        for line in md.split("\n"):
+            if line.startswith("# "):
+                title = line[2:]
+                break
+
+    response = {
+        "status": "success" if result.success else "error",
+        "title": title,
+        "url": result.url or url,
+        "markdown_content": md[:10000],  # Limit to 10k chars for context window
+        "content_length": len(md),
+        "word_count": len(md.split()),
+        "has_truncated_content": len(md) > 10000,
+        "error_message": result.error_message if not result.success else None,
+    }
+
+    # Store full content in session state for the summarizer
+    if tool_context and md:
+        tool_context.state["temp:extracted_content"] = md
+
+    return response
+
+
+def create_content_extractor_agent():
+    """
+    Creates an agent specialized in extracting and analyzing content from URLs.
+    """
+    extract_tool = FunctionTool(func=extract_content_from_url)
+
+    return LlmAgent(
+        name="content_extractor",
+        model="gemini-flash-latest",
+        description="A specialized agent that extracts and analyzes content from web pages using Crawl4AI.",
+        instruction="""You are a web content analysis specialist.
+
+        When given a URL, use the extract_content_from_url tool to fetch and analyze its content.
+
+        After extracting content:
+        1. Report the page title and basic metadata (word count, if content was truncated).
+        2. Highlight key information found in the content that's most relevant to the user's request.
+        3. Note if there were any errors during extraction.
+
+        When extracting content from multiple URLs, organize the information clearly by URL.
+
+        If the extraction fails, explain the error and suggest possible solutions.
+        """,
+        tools=[extract_tool],
+    )
+```
+
+<Notice type="warning" title="Cambios incompatibles de Crawl4AI">
+Crawl4AI 0.9.x cambió `result.markdown` de un string a un objeto `MarkdownGenerationResult`. Usa `.raw_markdown` para obtener el texto. Los atributos `result.title` y `result.headers` ya no existen. Usa `result.metadata.get("title")` en su lugar. El parámetro `include_headers` se eliminó de `arun()`.
+</Notice>
+
+Algunas cosas a tener en cuenta sobre este código:
+- Usamos `CrawlerRunConfig()` para configurar el rastreo (sustituye al antiguo kwarg `include_headers=True`)
+- `result.markdown.raw_markdown` nos da el texto real (el antiguo acceso a `result.markdown` como string fallaría)
+- Las claves de estado usan el prefijo `temp:`. ADK las descarta automáticamente tras la invocación, que es el comportamiento correcto para las entregas intermedias
+- Las excepciones se dejan propagar en lugar de quedar atrapadas en un `except Exception` amplio. ADK 2.0 usa las excepciones para reintentos automáticos y pausas de Human-in-the-Loop.
+
+Para extracción de datos web a escala empresarial, la [plataforma de web scraping de Bright Data](https://go.bitdoze.com/brightdata) gestiona la rotación de proxies y evita los bloqueos anti-bot. Para una alternativa más ligera a Crawl4AI, consulta la [alternativa gratuita a Firecrawl para agentes de IA](/es/tinyfish-alternativa-gratuita-firecrawl/). Y si estás construyendo tu propio sitio y quieres controlar a qué pueden acceder los crawlers de IA, aquí tienes cómo [bloquear crawlers de IA en tu propio sitio](/block-ai-crawlers/).
+
+### 3. El agente resumidor
+
+```bash
+touch agent_module/summarizer.py
+```
+
+```python agent_module/summarizer.py
+from google.adk.agents import LlmAgent
+
+
+def create_summarizer_agent():
+    """
+    Creates an agent specialized in summarizing content.
+    Uses output_key to automatically save the summary to session state.
+    """
+    return LlmAgent(
+        name="summarizer",
+        model="gemini-flash-latest",
+        description="A specialized agent that summarizes content at various detail levels.",
+        instruction="""You are a professional content summarizer.
+
+        Summarize the content provided to you according to the requested length:
+
+        - "short": A concise summary in 1-3 sentences, capturing only the essential point.
+        - "medium": A balanced summary in 1-3 paragraphs, covering key points and some supporting details.
+        - "long": A comprehensive summary in multiple paragraphs, preserving nuances and important contexts.
+
+        If no length is specified, default to "medium".
+
+        Always structure summaries with clear headings and bullet points when appropriate.
+
+        Prioritize accuracy over brevity - never include information not found in the original text.
+
+        For technical or complex content, preserve the key terminology used in the original text.
+        """,
+        output_key="summary",
+    )
+```
+
+<Notice type="info" title="Más simple con output_key">
+ADK 2.x permite poner `output_key="summary"` en un LlmAgent para guardar automáticamente su respuesta final en el estado de sesión. No hace falta ninguna herramienta personalizada. La versión anterior usaba una función `summarize_content` hecha a mano para escribir en el estado; `output_key` hace lo mismo en una línea.
+</Notice>
+
+### 4. El coordinador: conectar el root_agent
+
+Por último, el archivo principal del agente que ADK descubre:
+
+```bash
+touch agent_module/agent.py
+```
+
+```python agent_module/agent.py
+from google.adk.agents import LlmAgent
+
+# Import our specialized agents
+from agent_module.search_agent import create_search_agent
+from agent_module.content_extractor import create_content_extractor_agent
+from agent_module.summarizer import create_summarizer_agent
+
+# Define the root agent that ADK web will use
+root_agent = LlmAgent(
+    name="research_coordinator",
+    model="gemini-flash-latest",
+    description="A coordinator agent that manages a team of specialized research agents.",
+    instruction="""You are the coordinator of a research assistant team with specialized agents.
+
+    Your team includes:
+    - search_agent: Finds information on the web using Tavily Search.
+    - content_extractor: Analyzes and extracts content from specific URLs.
+    - summarizer: Creates concise summaries of content at different levels of detail.
+
+    Based on user requests, delegate tasks to the appropriate specialist:
+
+    1. If the user needs to find information on a topic, delegate to search_agent.
+    2. If the user provides a specific URL or wants to analyze a web page, delegate to content_extractor.
+    3. If the user needs a summary of content, delegate to summarizer.
+    4. For complex research tasks, coordinate multiple agents in sequence:
+       - First search for relevant information
+       - Then extract detailed content from the most promising URLs
+       - Finally summarize the findings
+
+    Always present the results from your specialists in a clear, organized manner.
+    When coordinating multi-step research, explain the research process to the user.
+
+    Remember: You are responsible for the final response to the user, so ensure it fully addresses their request.
+    """,
+    sub_agents=[
+        create_search_agent(),
+        create_content_extractor_agent(),
+        create_summarizer_agent(),
+    ],
+)
+```
+
+El cambio clave aquí es `sub_agents=[...]` en lugar de `tools=[AgentTool(...)]`. Con `sub_agents`, el LLM del coordinador ve el nombre y la descripción de cada especialista y decide cuál invocar según la petición del usuario. Este es el patrón idiomático de ADK 2.x para coordinador-sobre-especialistas.
+
+El antiguo patrón `AgentTool` sigue funcionando, pero ahora encaja mejor para sub-agentes de un solo turno muy controlados (`mode="single_turn"`). Para un coordinador que debe enrutar libremente entre especialistas, `sub_agents` es la elección correcta.
+
+## Ejecutar el equipo multi-agente
+
+Hay tres formas de ejecutar y probar tus agentes.
+
+### Opción 1: `adk web` (interfaz interactiva)
+
+```bash
+# From the project root (where .env is located)
+adk web
+```
+
+Esto inicia un servidor web local en `http://127.0.0.1:8000`. Ábrelo en tu navegador, selecciona «research_coordinator» en la lista de agentes y empieza a chatear.
+
+<Notice type="warning" title="Solo local">
+`adk web` no tiene autenticación y se vincula a 127.0.0.1 por defecto. No lo expongas a internet público sin añadir autenticación y TLS.
+</Notice>
+
+**Verifica que funciona:** la lista de agentes debería mostrar `research_coordinator`. Prueba primero una consulta de búsqueda sencilla:
+
+> «¿Cuáles son los últimos avances en computación cuántica?»
+
+Luego prueba una consulta de varios pasos:
+
+> «Investiga el impacto ambiental de los vehículos eléctricos, analiza el primer resultado en detalle y dame un resumen corto de las conclusiones clave.»
+
+### Opción 2: `adk run` (REPL de CLI)
+
+Útil para probar rápidamente un solo agente sin la interfaz web:
+
+```bash
+# Test the search agent standalone
+adk run agent_module/search_agent.py
+```
+
+Esto te lleva a un REPL interactivo. Escribe una consulta y comprueba si el agente responde correctamente. Úsalo para verificar que cada especialista funciona antes de conectar el coordinador.
+
+### Opción 3: `adk api_server` (endpoints HTTP)
+
+Para scripting y verificación con curl:
+
+```bash
+adk api_server
+```
+
+Luego verifica con curl:
+
+```bash
+# Health check
+curl http://127.0.0.1:8000/health
+
+# List available agents
+curl http://127.0.0.1:8000/list-apps
+```
+
+Es útil para integrar el equipo de agentes en otras aplicaciones o para probar desde CI.
+
+## Cómo funciona el sistema multi-agente
+
+Vamos a desglosar la arquitectura:
+
+1. **El coordinador como orquestador**: todas las peticiones del usuario van al coordinador. Su LLM analiza la petición y decide a qué especialista delegar según la descripción de cada sub_agent.
+
+2. **Delegación con sub-agents**: el patrón `sub_agents` de ADK 2.x permite al LLM del coordinador ver los nombres y las descripciones de los especialistas. Decide el enrutado mediante razonamiento del LLM, sin lógica if/else programada.
+
+3. **Comunicación vía estado de sesión**: los agentes comparten datos a través de `tool_context.state`. El extractor de contenido guarda el texto extraído en `temp:extracted_content`, y el resumidor (o el coordinador) puede leerlo. El prefijo `temp:` significa que ADK descarta automáticamente los datos tras la invocación.
+
+4. **Integración con LangChain**: el envoltorio `LangchainTool` de `google.adk.integrations.langchain` conecta las herramientas de LangChain (como Tavily) con ADK. Esto significa que cualquier herramienta de LangChain puede usarse en tus agentes ADK.
+
+5. **Herramientas personalizadas con FunctionTool**: la integración de Crawl4AI muestra cómo envolver cualquier función async de Python como herramienta de ADK usando `FunctionTool`.
+
+Ten en cuenta que `InMemorySessionService` (el predeterminado) no es persistente. El estado de sesión se reinicia cuando el servidor se reinicia. Eso está bien para desarrollo y pruebas. Para producción, cambiarías a un `SessionService` persistente.
+
+## Ampliar el sistema
+
+El diseño modular facilita añadir capacidades:
+
+| Mejora | Enfoque de implementación |
+|-------------|------------------------|
+| Análisis de documentos PDF | Añade un agente especialista con una herramienta de parseo de PDF |
+| Servicios de traducción | Crea un agente de traducción con una API de idiomas |
+| Visualización de datos | Añade un agente que genere gráficos a partir de los datos extraídos |
+| Análisis de sentimiento | Implementa un agente especializado en análisis de sentimiento |
+| Gestión de citas | Añade una herramienta para extraer y formatear citas de fuentes académicas |
+| Tavily Extract para URL simples | Usa `TavilyExtract` de `langchain-tavily` en lugar de Crawl4AI para la extracción básica de contenido de URL (menos piezas móviles) |
+
+<Accordion label="Usar el servidor MCP de Tavily en lugar de LangChain" group="extending">
+Tavily ofrece un servidor MCP oficial (`mcp-tavily` en PyPI, u hospedado en `mcp.tavily.com`). En lugar de envolver Tavily a través de LangChain, puedes conectarlo directamente vía el `McpToolset` de ADK. Esto elimina por completo la dependencia de LangChain y sigue el estándar [Model Context Protocol](/es/introduccion-mcp-principiantes/).
+
+La contrapartida: la integración MCP es más nueva y está menos documentada que la vía LangChain. Si ya usas LangChain para otras herramientas, el envoltorio `LangchainTool` es más simple. Si estás construyendo un stack puro de ADK, MCP es más limpio.
+
+Para otro ejemplo de herramientas MCP, consulta [Agno con Context7 MCP](/es/agno-herramientas-mcp-context7/).
+</Accordion>
+
+<Accordion label="Actualizar al Workflow Runtime de ADK 2.0" group="extending">
+ADK 2.0 introdujo un Workflow Runtime basado en grafos para la orquestación determinista de agentes. Si tu pipeline de investigación es siempre «buscar → extraer → resumir» (sin ramificaciones), un grafo `Workflow` es más predecible que el enrutado `sub_agents` dirigido por el LLM.
+
+El patrón `sub_agents` mostrado en este tutorial es mejor cuando quieres que el coordinador decida *a qué* especialistas llamar según la consulta. Un Workflow es mejor cuando la secuencia es fija y quieres un orden de ejecución garantizado.
+
+Consulta la [documentación de ADK 2.0](https://adk.dev/2.0/) para ejemplos de Workflow.
+</Accordion>
+
+Si estás explorando otros frameworks para sistemas multi-agente, también puedes [construir un equipo de investigación de IA con Agno](/es/agno-squad/) o [construir un agente de IA con Mastra](/es/crear-agente-ia-mastra/). Ambos adoptan enfoques distintos para la orquestación de agentes.
+
+## Resolución de problemas comunes
+
+| Problema | Causa | Solución |
+|---------|-------|-----|
+| **429 RESOURCE_EXHAUSTED** en el nivel gratuito de Gemini | El nivel gratuito tiene límites de tasa | Configura `http_options.retry_options` en el modelo o solicita una cuota mayor. Mira el acordeón de abajo. |
+| **El agente no aparece en adk web** | El nombre de la carpeta/agente tiene guiones o `__init__.py` no importa el agente | Usa solo letras, dígitos y guiones bajos en los nombres. Asegúrate de que `__init__.py` tenga `from . import agent`. |
+| **`ModuleNotFoundError: langchain_tavily`** | Instalaste `langchain-community` en lugar de `langchain-tavily` | Ejecuta `uv add langchain-tavily`. La herramienta Tavily del paquete antiguo está obsoleta. |
+| **`AttributeError: 'MarkdownGenerationResult' has no attribute 'split'`** | Código antiguo de Crawl4AI que trata `result.markdown` como un string | Usa `result.markdown.raw_markdown`. Ahora es un objeto `MarkdownGenerationResult`. |
+| **Navegador de Crawl4AI no encontrado / timeouts** | Chromium headless no instalado | Ejecuta `crawl4ai-setup` para instalar Chromium. Aumenta `page_timeout` en `CrawlerRunConfig(page_timeout=60000)`. |
+| **Un `except Exception` amplio enmascara los reintentos** | ADK 2.0 usa excepciones para reintentos automáticos y pausas HITL | Deja que las excepciones se propaguen desde las herramientas en lugar de capturarlo todo. |
+| **El estado se «pierde» entre sesiones** | `InMemorySessionService` se reinicia al reiniciar | Esperado en desarrollo. Usa un `SessionService` persistente en producción. |
+| **El `.env` no se carga** | El archivo está dentro de `agent_module/` en lugar de en la raíz del proyecto | Mueve `.env` a la raíz del proyecto (junto a `agent_module/`). La CLI de ADK lo carga automáticamente. |
+
+<Accordion label="Corregir errores 429 en el nivel gratuito de Gemini" group="troubleshooting">
+El nivel gratuito de la API de Gemini tiene límites de tasa que pueden devolver errores 429 `RESOURCE_EXHAUSTED`. Puedes configurar el comportamiento de reintento en el modelo:
+
+```python
+from google.adk.agents import LlmAgent
+from google.genai import types
+
+root_agent = LlmAgent(
+    name="research_coordinator",
+    model="gemini-flash-latest",
+    generate_content_config=types.GenerateContentConfig(
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(
+                attempts=5,
+                initial_delay=1.0,
+                max_delay=10.0,
+            )
+        )
+    ),
+    # ... rest of config
+)
+```
+
+Si te encuentras 429 de forma constante, considera solicitar un aumento de cuota en AI Studio o pasar a un nivel de pago de la API de Gemini.
+</Accordion>
+
+## Resumen de costes y niveles gratuitos
+
+| Componente | Nivel gratuito | Precio de pago | Notas |
+|-----------|-----------|-------------|-------|
+| **Google ADK** | Gratis / open-source | N/A | Paquete de Python, sin coste de API |
+| **Gemini API (AI Studio)** | Nivel gratuito disponible | Varía según el modelo | Errores 429 frecuentes en el nivel gratuito |
+| **Tavily Search** | 1.000 créditos/mes | 0,008 $/crédito PAYG | Una búsqueda ≈ 1 crédito. No se requiere tarjeta para el nivel gratuito. |
+| **Crawl4AI** | Gratis / open-source | N/A | Ejecuta Chromium headless (~500 MB de RAM). Opción con Docker disponible. |
+
+<Notice type="success" title="Coste cero para prototipar">
+Los cuatro componentes tienen niveles gratuitos. Puedes construir y probar todo este equipo de investigación multi-agente sin gastar un céntimo.
+</Notice>
+
+Algo a vigilar: `include_raw_content=True` en Tavily y guardar markdown de 10.000 caracteres por URL puede agotar tu ventana de contexto rápido. El truncado en el extractor de contenido lo gestiona, pero si procesas muchas URL, considera `include_raw_content=False` para ahorrar tokens.
+
+## Conclusión
+
+Ya tienes un equipo de investigación multi-agente funcional construido sobre Google ADK 2.x. El sistema demuestra varios patrones clave de ADK:
+
+- **Delegación con `sub_agents`** para el enrutado coordinador-sobre-especialistas
+- **Integración con LangChain** vía `LangchainTool` para usar Tavily Search
+- **Herramientas personalizadas** con `FunctionTool` para el extractor de contenido con Crawl4AI
+- **`output_key`** para escrituras automáticas en el estado (el resumidor)
+- **Estado de sesión** con prefijo `temp:` para compartir datos entre agentes
+- **`adk web`** para pruebas interactivas rápidas sin construir un frontend
+
+Desde aquí, puedes ampliar el equipo con nuevos especialistas, cambiar a otros modelos o actualizar al Workflow Runtime de ADK para pipelines deterministas.
+
+<Button text="Empieza con la Parte 1: Tu Primer Agente de Google ADK" link="/es/empezar-google-adk/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+Para usar modelos más allá de Gemini (como Claude o GPT vía OpenRouter), mira cómo [usar cualquier modelo de OpenRouter con Google ADK](/es/google-adk-openrouter-modelos/).

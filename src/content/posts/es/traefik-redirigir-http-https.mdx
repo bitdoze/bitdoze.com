@@ -1,0 +1,378 @@
+---
+date: 2024-08-02
+lastmod: 2026-08-03T00:00:00Z
+translationKey: "traefik-redirect-http-https"
+title: "Redirigir HTTP a HTTPS en Traefik: Guía completa de configuración v3"
+meta_title: "Redirigir HTTP a HTTPS en Traefik: Guía v3 (2026)"
+description: "Configura la redirección de HTTP a HTTPS en Traefik usando entrypoints o middleware. Guía paso a paso de Traefik v3 con Docker Compose y opciones de redirección global y por servicio."
+image: "@assets/images/24/08/traefik-redirect-http-https.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["traefik", "https", "reverse-proxy"]
+canonical: "https://www.bitdoze.com/es/traefik-redirigir-http-https/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Toda configuración de Traefik debería redirigir HTTP a HTTPS. Esta guía cubre las dos formas de hacerlo: la redirección global a nivel de entrypoint (recomendada para la mayoría de las configuraciones) y la redirección por servicio mediante middleware (para cuando necesitas un control más granular). Todos los fragmentos de configuración están pensados para Traefik v3.x y usan la convención de nombres `web`/`websecure` para los entrypoints.
+
+<Notice type="success" title="Probado con Traefik v3.7">
+Esta guía está dirigida a Traefik v3.x. Todos los fragmentos de configuración usan la convención de nombres <code>web</code>/<code>websecure</code> para los entrypoints. Traefik v2.11 llegó al final de su vida útil en febrero de 2026: actualiza si aún no lo has hecho.
+</Notice>
+
+## Beneficios de redirigir HTTP a HTTPS
+
+### Seguridad e integridad de los datos
+
+HTTPS cifra todo lo que viaja entre el navegador y tu servidor. Credenciales de inicio de sesión, tokens de API, datos de formularios: nada viaja en texto plano. Sin HTTPS, cualquiera en la ruta de la red (ISP, el Wi-Fi de una cafetería, un router comprometido) puede leer y modificar el tráfico. HTTPS también garantiza que los datos transferidos lleguen sin alteraciones.
+
+### SEO y confianza del navegador
+
+HTTPS es un factor de posicionamiento confirmado por Google desde 2014. Los sitios que solo usan HTTP salen penalizados. Chrome, Firefox y Safari marcan los sitios HTTP como «No seguro», y los usuarios abandonan cuando ven eso. Una vez que todo tu sitio usa HTTPS, dejas de luchar con las advertencias de contenido mixto que rompen diseños y scripts.
+
+### Rendimiento
+
+Ningún navegador admite HTTP/2 sobre texto plano. Si quieres conexiones multiplexadas y compresión de cabeceras, necesitas TLS. Traefik v3 también tiene soporte estable de HTTP/3 (QUIC). QUIC funciona sobre UDP y mejora el rendimiento en conexiones de alta latencia. Lo veremos más adelante en este artículo.
+
+## Requisitos previos
+
+Si necesitas un VPS para ejecutar Traefik, [Hetzner Cloud](https://go.bitdoze.com/hetzner) ofrece instancias VPS asequibles desde 4,50 €/mes con un rendimiento de red sólido.
+
+_Los precios de los VPS subieron en general en 2026: si estás replanteándote un servidor alquilado, consulta [qué cambió y cuándo un mini PC es mejor opción](/es/subidas-precios-vps/)._
+
+<ListCheck>
+<ul>
+<li>Traefik v3.x ejecutándose en Docker: usa la etiqueta de imagen <code>traefik:v3.7</code> (o <code>traefik:v3</code> para actualizaciones menores automáticas). Evita <code>:latest</code></li>
+<li>Docker y Docker Compose instalados. Si eres nuevo en Docker, repasa primero los <a href="https://www.bitdoze.com/docker-commands/">comandos esenciales de Docker</a>.</li>
+<li>Un nombre de dominio con un registro DNS A (y/o AAAA para IPv6) apuntando a tu servidor</li>
+<li>Puertos 80 (TCP) y 443 (TCP) abiertos en el firewall del servidor. Si planeas activar HTTP/3 más adelante, abre también 443/UDP.</li>
+<li>Certificado TLS aprovisionado o a punto de aprovisionarse (Let's Encrypt / ACME)</li>
+</ul>
+</ListCheck>
+
+Si aún no has configurado Traefik, sigue primero nuestra guía de [Traefik como reverse proxy en Docker](/es/traefik-proxy-docker/). Para certificados wildcard, consulta nuestra guía de [certificado wildcard gratuito de Let's Encrypt con Traefik](/es/traefik-certificado-wildcard/).
+
+## Paso a paso: redirección de HTTP a HTTPS en Traefik
+
+### Configuración de los entrypoints de Traefik
+
+Traefik usa entrypoints para definir los puertos en los que escucha. Necesitas al menos dos: uno para HTTP (puerto 80) y otro para HTTPS (puerto 443).
+
+La convención de nombres estándar en Traefik v3 (y los valores por defecto del chart de Helm) es `web` para HTTP y `websecure` para HTTPS. Los nombres antiguos `http`/`https` siguen funcionando, pero `web`/`websecure` es lo que usa ahora la documentación oficial.
+
+En tu archivo de configuración estática `traefik.yml`:
+
+```yaml
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+```
+
+O como comandos CLI en tu archivo Docker Compose:
+
+```yml
+command:
+  - "--entrypoints.web.address=:80"
+  - "--entrypoints.websecure.address=:443"
+```
+
+Estos entrypoints son la base. La configuración de redirección de las siguientes secciones le indica a Traefik qué hacer con el tráfico que llega a cada uno.
+
+### Redirección global de HTTP a HTTPS
+
+Este es el enfoque recomendado para la mayoría de las configuraciones. Todo el tráfico HTTP se redirige a HTTPS a nivel de entrypoint: no hace falta configuración por servicio.
+
+#### Usando un archivo de configuración estática traefik.yml
+
+Añade un bloque `redirections` bajo el entrypoint `web`. El entrypoint `websecure` lleva TLS activado. También desactivo los access logs en el entrypoint HTTP, ya que solo sirve redirecciones, lo que reduce el ruido.
+
+```yaml
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+    observability:
+      accessLogs: false   # reduce noise : this entrypoint only serves redirects
+
+  websecure:
+    address: ":443"
+    http:
+      tls: {}
+    observability:
+      accessLogs: true
+```
+
+#### Usando comandos CLI en Docker Compose
+
+La misma configuración en forma de flags CLI. Incluyo el flag `permanent` explícitamente aunque en v3 ya vale `true` por defecto: ser explícito es mejor cuando otra persona lea tu archivo compose dentro de seis meses.
+
+```yml
+command:
+  - "--entrypoints.web.address=:80"
+  - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+  - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+  - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+  - "--entrypoints.websecure.address=:443"
+```
+
+<Notice type="info" title="308 vs 301: por qué importa">
+Las redirecciones a nivel de entrypoint devuelven <strong>308 Permanent Redirect</strong>, que preserva el método HTTP (POST sigue siendo POST). El middleware por servicio con <code>permanent: true</code> devuelve <strong>301 Moved Permanently</strong> para las peticiones GET/HEAD, lo que puede hacer que los navegadores cambien POST a GET (perdiendo el cuerpo de la petición). Para APIs o formularios, el enfoque de entrypoint es más seguro.
+</Notice>
+
+<Notice type="info" title="Compatibilidad con el reto ACME HTTP">
+Las redirecciones a nivel de entrypoint dejan pasar automáticamente las rutas <code>/.well-known/acme-challenge/</code> de los retos HTTP-01 de Let's Encrypt. El enfoque con middleware por servicio NO lo hace: redirigirá la petición del reto y romperá la renovación del certificado. Si usas retos HTTP-01, prefiere el método del entrypoint.
+</Notice>
+
+### Redirección a HTTPS por servicio con labels
+
+Si necesitas que algunos servicios sigan en HTTP (servicios solo internos, configuraciones ACME específicas), puedes configurar la redirección servicio a servicio usando labels de Docker.
+
+Aquí tienes un ejemplo completo con el router HTTP de redirección y el router HTTPS:
+
+```yaml
+labels:
+  # HTTP router - redirects to HTTPS
+  - "traefik.http.routers.myapp-http.entrypoints=web"
+  - "traefik.http.routers.myapp-http.rule=Host(`your-domain.com`)"
+  - "traefik.http.routers.myapp-http.middlewares=https-redirect@docker"
+  - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+  - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
+  # HTTPS router - serves the actual content
+  - "traefik.http.routers.myapp.entrypoints=websecure"
+  - "traefik.http.routers.myapp.rule=Host(`your-domain.com`)"
+  - "traefik.http.routers.myapp.tls=true"
+```
+
+Qué hace cada label:
+
+1. `myapp-http.entrypoints=web` indica al router HTTP que escuche en el entrypoint `web` (puerto 80).
+2. `myapp-http.rule=Host(...)` coincide con las peticiones de tu dominio.
+3. `myapp-http.middlewares=https-redirect@docker` aplica el middleware de redirección. El sufijo `@docker` es el nombre del provider, lo que evita ambigüedades en configuraciones con varios providers.
+4. `https-redirect.redirectscheme.scheme=https` establece el esquema de destino de la redirección.
+5. `https-redirect.redirectscheme.permanent=true` la convierte en una redirección permanente (301 para GET/HEAD).
+6-8. El router HTTPS escucha en `websecure`, coincide con el mismo dominio y activa TLS.
+
+Una vez que HTTPS es obligatorio, puede que también quieras añadir [autenticación básica en Traefik](/es/traefik-autenticacion-basica/) para proteger tus servicios.
+
+### Global vs por servicio: ¿cuál deberías usar?
+
+<Tabs>
+<Tab name="Global (Recomendado)">
+Usa la redirección global a nivel de entrypoint cuando todos tus servicios necesiten HTTPS. Es más simple (un solo lugar donde configurarla), gestiona automáticamente el paso del reto ACME y devuelve 308 (preservando el método POST). Es la opción por defecto correcta para la mayoría de las configuraciones.
+</Tab>
+<Tab name="Por servicio">
+Usa labels de middleware por servicio solo cuando algunos servicios deban seguir en HTTP: por ejemplo, servicios solo internos que no necesitan TLS, o gestores específicos del reto ACME HTTP. Implica más trabajo de configuración y tendrás que gestionar el paso de ACME tú mismo.
+</Tab>
+</Tabs>
+
+| Escenario | Método |
+|---|---|
+| Todos los servicios necesitan HTTPS | Redirección global en el entrypoint (recomendado) |
+| Algunos servicios deben seguir en HTTP | Middleware por servicio |
+| Usas retos ACME HTTP-01 | Entrypoint global (gestiona el paso de ACME automáticamente) |
+| API con peticiones POST | Entrypoint global (devuelve 308, preserva el método) |
+
+## Verificar la redirección
+
+Después de aplicar tu configuración, haz la prueba desde la línea de comandos. No hace falta navegador: esto funciona por SSH.
+
+```bash
+# Test the redirect
+curl -I http://your-domain.com
+
+# Expected output:
+# HTTP/1.1 308 Permanent Redirect
+# Location: https://your-domain.com/
+```
+
+```bash
+# Verify the HTTPS endpoint is alive
+curl -I https://your-domain.com
+
+# Expected: HTTP/2 200 (or your app's response code)
+```
+
+Si `curl` devuelve `000` o connection refused, el puerto 80 está bloqueado o Traefik no está escuchando. Salta a la sección de solución de problemas de más abajo.
+
+También puedes comprobar el dashboard de Traefik (`http://localhost:8080/dashboard/` o la URL de dashboard que tengas configurada) para confirmar que los routers y middlewares se han registrado correctamente. El entrypoint `web` debería mostrar el middleware de redirección, y `websecure` debería mostrar tus routers TLS.
+
+## Solución de problemas habituales
+
+### La redirección no funciona (no hay respuesta 308)
+
+- Revisa los logs de Traefik: `docker logs traefik --tail 50`
+- Verifica que los nombres de los entrypoints coinciden entre tu configuración y tus labels (`web` vs `http`: un error tipográfico habitual)
+- Confirma que Traefik está escuchando en el puerto 80: `ss -tlnp | grep :80`
+
+### ERR_CONNECTION_REFUSED o timeout
+
+- Verifica que los puertos 80 y 443 están abiertos en el firewall del servidor (`ufw`, `iptables`, `nftables`)
+- Revisa el firewall de tu proveedor cloud: Hetzner Cloud Firewall, las security lists de OCI y similares tienen reglas separadas
+- Docker puede saltarse las reglas de tu firewall: consulta nuestra guía sobre [cómo Docker se salta las reglas del firewall](/es/docker-evita-firewall/) si el tráfico parece bloqueado a pesar de tener las reglas del firewall abiertas
+
+### Errores de certificado tras la redirección
+
+- Verifica tu configuración ACME/TLS en Traefik
+- Si usas el reto HTTP-01: confirma que la redirección no está interceptando `/.well-known/acme-challenge/` (el enfoque con middleware puede romperlo: usa el método del entrypoint en su lugar)
+- Revisa los logs del certificate resolver: `docker logs traefik 2>&1 | grep -i acme`
+
+### Cabecera Location incorrecta (http:// en lugar de https://)
+
+- Si Traefik está detrás de otro proxy (Cloudflare, HAProxy), configura `forwardedHeaders.trustedIPs` en el entrypoint para que Traefik lea el protocolo correcto de las cabeceras `X-Forwarded-Proto`
+- Consulta la sección de Cloudflare más abajo para ver la configuración exacta
+
+### Errores tipográficos y de sintaxis
+
+- Revisa la indentación del YAML: un espacio mal puesto rompe toda la configuración
+- En Traefik v3, la sintaxis de reglas es `v3` por defecto. Asegúrate de que los matchers `Host()` usan backticks: `` Host(`example.com`) ``
+- Los flags CLI usan `=` para los valores, no `:`. Incorrecto: `--entrypoints.web.address: :80`. Correcto: `--entrypoints.web.address=:80`
+
+## Consideraciones sobre Cloudflare y reverse proxies
+
+Si usas el proxy de Cloudflare (la nube naranja), la redirección de HTTP a HTTPS puede ocurrir en el edge de Cloudflare antes de que el tráfico llegue siquiera a tu instancia de Traefik. Tu configuración de redirección en Traefik sigue funcionando como red de seguridad: consérvala.
+
+Si usas Cloudflare Tunnels, puede que el puerto 80 ni siquiera esté expuesto. La configuración de redirección no se activará, pero tampoco romperá nada.
+
+Cuando Traefik está detrás de cualquier reverse proxy o CDN, necesitas `forwardedHeaders.trustedIPs` para que Traefik lea correctamente `X-Forwarded-Proto`:
+
+```yaml
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+    forwardedHeaders:
+      trustedIPs:
+        - "173.245.48.0/20"
+        - "103.21.244.0/22"
+        - "103.22.200.0/22"
+        - "103.31.4.0/22"
+        - "141.101.64.0/18"
+        - "108.162.192.0/18"
+        - "190.93.240.0/20"
+        - "188.114.96.0/20"
+        - "197.234.240.0/22"
+        - "198.41.128.0/17"
+        - "162.158.0.0/15"
+        - "104.16.0.0/13"
+        - "104.24.0.0/14"
+        - "172.64.0.0/13"
+        - "131.0.72.0/22"
+```
+
+Obtén la lista actualizada en la [página de rangos IP de Cloudflare](https://www.cloudflare.com/ips/). Actualízala periódicamente: Cloudflare añade nuevos rangos.
+
+<Notice type="warning" title="Usuarios de Cloudflare">
+Si usas el proxy de Cloudflare (la nube naranja), la redirección de HTTP a HTTPS puede ocurrir en el edge de Cloudflare antes de llegar a Traefik. Tu configuración de Traefik sigue funcionando como red de seguridad, pero asegúrate de que <code>forwardedHeaders.trustedIPs</code> incluye los <a href="https://www.cloudflare.com/ips/">rangos IP de Cloudflare</a> para que Traefik lea el protocolo correcto de las cabeceras.
+</Notice>
+
+## Usuarios de Dokploy: las redirecciones vienen preconfiguradas
+
+Si usas [Dokploy](https://www.bitdoze.com/dokploy-install/), la redirección HTTPS de Traefik ya viene configurada. Dokploy gestiona internamente la configuración estática de Traefik y crea un middleware `redirect-to-https@file`. Normalmente no necesitas configurar las redirecciones manualmente.
+
+La configuración de redirección personalizada debe ser aditiva: no crees reglas que entren en conflicto. Consulta primero la [documentación de dominios de Dokploy](https://docs.dokploy.com/docs/core/troubleshooting/domains).
+
+Para alternativas a Dokploy, consulta nuestra comparativa de [paneles de servidor autoalojados](https://www.bitdoze.com/best-self-hosted-panels/).
+
+<Notice type="info" title="Usuarios de Dokploy">
+Dokploy gestiona internamente la configuración de Traefik y ya configura las redirecciones HTTPS. Si usas Dokploy, normalmente no necesitas configurar las redirecciones manualmente. Consulta primero la <a href="https://docs.dokploy.com/docs/core/troubleshooting/domains">documentación de dominios de Dokploy</a>.
+</Notice>
+
+## Extra: activa HTTP/3 (QUIC) para un HTTPS más rápido
+
+HTTP/3 es estable en Traefik v3: ya no es experimental. Si tus usuarios están en conexiones de alta latencia (móvil, ubicaciones remotas), HTTP/3 puede mejorar notablemente los tiempos de carga gracias al establecimiento de conexión 0-RTT de QUIC.
+
+Para activarlo, añade `http3: {}` a tu entrypoint `websecure`:
+
+```yaml
+entryPoints:
+  websecure:
+    address: ":443"
+    http:
+      tls: {}
+    http3: {}
+```
+
+O mediante un flag CLI:
+
+```
+--entrypoints.websecure.http3
+```
+
+HTTP/3 requiere el puerto UDP 443. Actualiza los puertos de tu Docker Compose:
+
+```yaml
+ports:
+  - "80:80"
+  - "443:443/tcp"
+  - "443:443/udp"
+```
+
+Asegúrate de que el firewall de tu proveedor cloud y cualquier firewall a nivel de host permiten UDP 443.
+
+Para verificar que HTTP/3 funciona, abre tu sitio en Chrome o Firefox y comprueba DevTools → pestaña Network → columna Protocol. Deberías ver `h3` en las peticiones servidas por HTTP/3.
+
+## Avanzado: entrypoint `asDefault` y observabilidad
+
+Dos funciones de Traefik v3 que conviene conocer para usuarios avanzados.
+
+**`asDefault: true`** en `websecure` hace que todos los routers se asocien automáticamente al entrypoint HTTPS a menos que especifiquen explícitamente lo contrario. Práctico cuando todos los servicios son solo HTTPS:
+
+```yaml
+entryPoints:
+  websecure:
+    address: ":443"
+    asDefault: true
+```
+
+**La observabilidad por entrypoint** te permite controlar access logs, métricas y tracing por entrypoint. La configuración de ejemplo anterior ya la usa: desactivar los access logs en el entrypoint `web` (que solo sirve redirecciones) mantiene tus logs centrados en el tráfico real:
+
+```yaml
+entryPoints:
+  web:
+    address: ":80"
+    observability:
+      accessLogs: false
+      metrics: false
+      tracing: false
+  websecure:
+    address: ":443"
+    observability:
+      accessLogs: true
+      metrics: true
+      tracing: false
+```
+
+## Mantén Traefik actualizado
+
+Fija Traefik a una etiqueta de versión menor específica (p. ej., `traefik:v3.7`). Evita `:latest`: querrás saber exactamente qué versión se está ejecutando cuando algo falle.
+
+CVEs recientes como [CVE-2025-32431](https://nvd.nist.gov/vuln/detail/CVE-2025-32431) (una vulnerabilidad de path traversal en los matchers PathPrefix/Path/PathRegex, corregida en v3.3.6+) muestran por qué importa fijar la versión. No puedes parchear lo que no puedes identificar.
+
+Consulta la [página de releases de Traefik](https://github.com/traefik/traefik/releases) periódicamente y actualiza cuando lleguen parches de seguridad. Prueba primero en una instancia de staging si tienes una.
+
+Para seguridad adicional del servidor, considera CrowdSec para [securizar tu VPS con CrowdSec](/es/crowdsec-servidor-seguro/) frente a ataques de fuerza bruta.
+
+<Notice type="warning" title="Seguridad: fija tu versión de Traefik">
+Fija siempre Traefik a una etiqueta de versión menor específica (p. ej., <code>traefik:v3.7</code>). Evita <code>:latest</code>. CVEs recientes como <a href="https://nvd.nist.gov/vuln/detail/CVE-2025-32431">CVE-2025-32431</a> (path traversal) se corrigieron en versiones concretas. Necesitas saber qué versión estás ejecutando.
+</Notice>
+
+## Conclusión
+
+Usa la redirección global a nivel de entrypoint como opción por defecto. Es un solo bloque de configuración, gestiona automáticamente el paso del reto ACME y devuelve 308 (preservando los métodos HTTP). Recurre a las labels de middleware por servicio solo cuando de verdad necesites que algunos servicios sigan en HTTP.
+
+Tras configurar la redirección, verifícala con `curl -I http://your-domain.com`: deberías ver una respuesta 308 apuntando a HTTPS. Mantén Traefik fijado a una versión conocida y haz pruebas después de cada actualización.

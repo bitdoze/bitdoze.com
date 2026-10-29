@@ -1,0 +1,516 @@
+---
+date: 2024-09-18
+lastmod: 2026-08-06T00:00:00Z
+translationKey: "postfix-external-smtp"
+title: "Configura Postfix para enviar correo usando servidores SMTP externos"
+meta_title: "Relay SMTP externo con Postfix: guía completa de configuración"
+description: "Configura Postfix para reenviar correos a través de servidores SMTP externos como Brevo, Mailgun o Amazon SES. Guía paso a paso con un script automatizado."
+image: "@assets/images/24/09/postfix-external-smtp.jpeg"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["postfix", "smtp", "email"]
+canonical: "https://www.bitdoze.com/es/postfix-smtp-externo/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Button from "@components/widgets/Button.astro";
+
+Postfix es un agente de transferencia de correo (MTA) que se encarga de enviar, enrutar y entregar correo electrónico en sistemas tipo Unix. La mayoría de las configuraciones de VPS solo necesitan un servidor SMTP de solo envío: algo que toma el correo saliente de tus aplicaciones y lo entrega a un proveedor real. Eso es exactamente lo que obtienes al configurar Postfix para enviar correo usando servidores SMTP externos: un relay local ligero que reenvía todo a través de Brevo, Mailgun, Amazon SES u otro proveedor de confianza.
+
+Esta configuración de servidor SMTP de solo envío con Postfix es útil para todo, desde notificaciones de tareas cron hasta el [envío de alertas por correo desde tu servidor Linux](/monitor-cpu-usage-and-send-email-alerts-in-linux/). A continuación encontrarás la configuración completa, un script automatizado y la resolución de problemas que me habría gustado tener la primera vez.
+
+## Por qué usar Postfix con un servicio SMTP externo
+
+Gestionar tu propio servidor de correo que entrega directamente a los destinatarios es un dolor de cabeza que no quieres. Gestión de la reputación de IP, monitorización de listas negras, rotación de claves DKIM: es un trabajo a tiempo completo. Los proveedores SMTP externos se encargan de todo eso. Por eso funciona el patrón de relay:
+
+- **Mejor entregabilidad.** Proveedores como Brevo y Mailgun mantienen relaciones con Gmail, Outlook y Yahoo. Tus correos llegan de verdad a la bandeja de entrada en lugar de a la carpeta de spam.
+- **Menos carga en el servidor.** Postfix entrega el mensaje a los servidores del proveedor. Tu VPS no mantiene conexiones SMTP salientes con decenas de dominios de destino.
+- **Mantenimiento simplificado.** Sin gestión de claves SPF/DKIM en tu servidor, sin monitorización de listas negras de IP, sin configuración de DNS inverso. El proveedor se encarga.
+- **Económico.** Los niveles gratuitos de Brevo (300/día) o SMTP2GO (1.000/mes) cubren la mayoría de las cargas de trabajo personales y de pequeñas empresas.
+- **Escalabilidad.** ¿Necesitas enviar 50.000 correos? La configuración de tu VPS no cambia; solo mejoras tu plan del proveedor.
+- **Cumplimiento.** Los proveedores externos ayudan con los requisitos de GDPR, CAN-SPAM y CASL mediante gestión de bajas y seguimiento del consentimiento integrados.
+
+## Servicios de relay SMTP que puedes usar con Postfix
+
+No todos los proveedores SMTP son iguales en precio, entregabilidad y facilidad de configuración. Aquí tienes una comparativa de los que merece la pena considerar, y después los detalles de cada uno.
+
+| Proveedor | Nivel gratuito | Precio inicial de pago | Notas |
+|-----------|----------------|------------------------|-------|
+| **Brevo** | 300/día (~9.000/mes) | 9 $/mes (Starter) | Mejor opción gratuita, nivel gratis permanente |
+| **Mailgun** | 100/día (~3.000/mes) | 15 $/mes (Basic) | Nivel gratis permanente, API potente |
+| **Amazon SES** | 3.000 mensajes/mes (12 meses) | 0,10 $/1.000 correos | El más barato a gran escala, ideal para usuarios de AWS |
+| **mail.baby** | Ninguno | 1 $/mes + 0,20 $/1.000 | Opción de pago más barata, dominios ilimitados |
+| **SMTP2GO** | 1.000/mes | 15 $/mes (Starter) | Sin tarjeta de crédito, buen sustituto de SendGrid |
+| **Resend** | 3.000/mes (100/día) | 20 $/mes (Pro) | Moderno, API-first, orientado a desarrolladores |
+| **Zeptomail** | 10.000 correos (prueba de 1 mes) | Basado en créditos | Ecosistema Zoho, pago por uso tras la prueba |
+| **SendGrid** | Solo prueba de 60 días | 19,95 $/mes (Essentials) | Ya no tiene nivel gratuito permanente |
+
+<Notice type="warning" title="Los precios cambian con frecuencia">
+Verifica los niveles actuales en el sitio web de cada proveedor antes de comprometerte. Los precios indicados aquí son correctos a julio de 2025.
+</Notice>
+
+### Relay SMTP gratuito de Brevo
+
+[Brevo](https://www.brevo.com/) (antes Sendinblue) sigue siendo el mejor relay SMTP gratuito para Postfix. El nivel gratuito permanente te da 300 correos al día (unos 9.000 al mes) sin necesidad de tarjeta de crédito.
+
+- Servidor SMTP: `smtp-relay.brevo.com:587`
+- Buenas tasas de entregabilidad con los principales proveedores
+- Seguimiento de correo y plantillas en el plan gratuito
+- Acceso a la API si necesitas más que SMTP
+
+Para la mayoría de los proyectos personales y cargas de trabajo pequeñas en VPS, el nivel gratuito de Brevo es suficiente. Es mi opción por defecto salvo que haya un motivo para no usarlo.
+
+### Relay SMTP de Mailgun
+
+[Mailgun](https://www.mailgun.com/) actualizó su nivel gratuito. Ahora son **100 correos al día** en un plan gratuito permanente (sin caducidad). Antes eran 5.000 correos durante 3 meses, que sonaba mejor pero tenía límite de tiempo.
+
+- API potente para desarrolladores que necesitan más que SMTP básico
+- Buena documentación y soporte
+- Validación de correo y autenticación de dominio incluidas
+- Precios flexibles si superas el nivel gratuito
+
+### Relay SMTP de Amazon SES
+
+Los precios de Amazon SES cambiaron significativamente. El antiguo nivel de «62.000 correos gratis desde EC2» se reemplazó en agosto de 2023. El modelo actual:
+
+- **3.000 cargos de mensajes al mes gratis durante los primeros 12 meses** después de empezar a usar SES
+- Después: 0,10 $ por cada 1.000 correos (más transferencia de datos)
+- Los nuevos clientes de AWS (a julio de 2025) pueden obtener hasta 200 $ en créditos del nivel gratuito en los servicios de AWS, válidos durante 12 meses
+
+SES es la opción más barata a gran escala, pero requiere más configuración (políticas IAM, salir del modo sandbox). Es la mejor opción si ya estás en AWS y necesitas mucho volumen.
+
+### Relay SMTP de mail.baby
+
+[mail.baby](https://www.mail.baby/) es la opción económica: 1 $/mes más 0,20 $ por cada 1.000 correos. No hay nivel gratuito, pero el precio es difícil de superar para correo de pago de bajo volumen. Dominios ilimitados en todos los planes, configuración sencilla y soporte 24/7.
+
+Para más detalles, consulta la [reseña detallada de mail.baby](/mail-baby-review/).
+
+### SMTP2GO
+
+[SMTP2GO](https://www.smtp2go.com/) es una alternativa sólida ahora que SendGrid eliminó su nivel gratuito. El plan gratis para siempre incluye 1.000 correos al mes sin tarjeta de crédito. La configuración es sencilla, la entregabilidad es buena y el panel está limpio.
+
+### Resend
+
+[Resend](https://resend.com/) es un proveedor SMTP más reciente, API-first, dirigido a desarrolladores. Nivel gratuito: 3.000 correos/mes (100/día). La experiencia de desarrollador moderna y la integración con React Email lo hacen atractivo si estás construyendo aplicaciones, aunque también funciona bien como relay SMTP normal.
+
+### Relay SMTP de Zeptomail
+
+[Zeptomail](https://www.zoho.com/zeptomail/), de Zoho, ya no tiene un nivel gratuito perpetuo. Obtienes **un crédito gratis (10.000 correos) válido durante 1 mes** como prueba. Después, el precio es por créditos (1 crédito = 10.000 correos, válidos durante 6 meses). El precio no aparece públicamente en USD: tienes que contactar con ventas.
+
+Es una buena opción si estás en el ecosistema Zoho. Para una [guía paso a paso del relay SMTP de ZeptoMail](/es/configurar-relay-smtp-zeptomail/), consulta el artículo dedicado.
+
+### SMTP de SendGrid (solo de prueba)
+
+<Notice type="warning" title="SendGrid retiró su plan gratuito en mayo de 2025">
+Las cuentas nuevas obtienen una prueba gratuita de 60 días (100 correos/día); después, los planes de pago empiezan en 19,95 $/mes (Essentials). Ya no existe un nivel gratuito permanente. Considera SMTP2GO, Brevo o Mailgun como alternativas gratuitas.
+</Notice>
+
+[SendGrid](https://sendgrid.com/) pertenece a Twilio. Sigue siendo una plataforma capaz, con alta entregabilidad y API sólidas. Pero con un mínimo de 19,95 $/mes, ya no es la opción de referencia para proyectos personales. Para necesidades de nivel gratuito, elegiría Brevo o SMTP2GO.
+
+## Requisitos previos
+
+Antes de configurar Postfix, asegúrate de tener:
+
+<ListCheck>
+<ul>
+<li>Un VPS con Linux y Debian/Ubuntu (esta guía usa comandos de apt)</li>
+<li>Un dominio con los registros DNS (SPF, DKIM, DMARC) configurados con tu proveedor SMTP</li>
+<li>Una cuenta de proveedor SMTP con las credenciales a mano</li>
+<li>Acceso root o sudo</li>
+<li>El puerto saliente 587 (STARTTLS) desbloqueado por tu proveedor de VPS</li>
+</ul>
+</ListCheck>
+
+### Instala los paquetes necesarios
+
+```sh
+sudo apt update && sudo apt install -y postfix libsasl2-modules mailutils
+```
+
+<Notice type="error" title="El fallo n.º 1: falta libsasl2-modules">
+Sin `libsasl2-modules`, Postfix no puede autenticarse con tu proveedor SMTP. Verás «SASL authentication failure: No worthy mechs found» en el registro de correo. Este paquete no se instala por defecto en las imágenes mínimas de Debian/Ubuntu. Inclúyelo siempre.
+</Notice>
+
+También asegúrate de que los certificados CA estén instalados (para la verificación TLS):
+
+```sh
+sudo apt install -y ca-certificates
+```
+
+**Verificación:** ejecuta `postconf -m | grep sasl`. Deberías ver los mecanismos SASL listados (LOGIN, PLAIN, etc.). Si el comando no devuelve nada, falta `libsasl2-modules`.
+
+### Registros DNS (SPF, DKIM, DMARC)
+
+Tus correos caerán en spam independientemente de tu configuración de Postfix si faltan los registros DNS. Tu proveedor SMTP te da los valores concretos que añadir. Como mínimo, necesitas:
+
+- **Registro TXT de SPF**: autoriza a tu proveedor a enviar en nombre de tu dominio (p. ej., `v=spf1 include:brevo.com ~all`)
+- **Clave pública DKIM**: se añade como registro TXT para que los servidores destinatarios puedan verificar las firmas de los mensajes
+- **Política DMARC**: indica a los servidores receptores qué hacer con los mensajes que fallan las comprobaciones SPF/DKIM
+
+Cada proveedor tiene su propia documentación para esto. Configúralos antes de probar; de lo contrario, tus correos de prueba irán directos al spam.
+
+### Requisitos de puertos en el VPS
+
+Muchos proveedores de VPS económicos bloquean por defecto los puertos salientes 25, 587 y 465 para evitar spam. Esto incluye a [Hetzner](https://go.bitdoze.com/hetzner), OVH, Contabo y Netcup. Tendrás que abrir un ticket de soporte pidiendo que desbloqueen el puerto 587 (STARTTLS) para tu servidor.
+
+_Los precios de los VPS subieron en general en 2026: si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+Para [comprobar si tus puertos SMTP son accesibles](/check-remote-port-in-linux-nc/), usa `nc`:
+
+```sh
+nc -zv smtp-relay.brevo.com 587
+```
+
+Una conexión correcta muestra `Connection to smtp-relay.brevo.com 587 port [tcp/submission] succeeded!`. Si se queda colgado, tu proveedor está bloqueando el puerto.
+
+## Configura Postfix como relay SMTP externo
+
+Hay dos caminos: configuración manual o script automatizado. Ambos producen el mismo resultado.
+
+<Tabs>
+<Tab name="Configuración manual">
+
+### Configuración manual del relayhost de Postfix
+
+El enfoque manual lleva de 5 a 10 minutos. Editarás unos cuantos archivos y reiniciarás Postfix. Si te manejas bien con los [comandos esenciales de Linux](/linux-commands/), es sencillo.
+
+**Paso 1:** instala los requisitos previos (consulta la sección Requisitos previos de arriba).
+
+**Paso 2:** edita el archivo principal de configuración de Postfix:
+
+```sh
+sudo nano /etc/postfix/main.cf
+```
+
+Añade o modifica estas líneas al final del archivo:
+
+```sh
+compatibility_level = 3.11
+relayhost = [smtp-relay.brevo.com]:587
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = lmdb:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = may
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+inet_interfaces = loopback-only
+header_size_limit = 4096000
+```
+
+Algunas cosas a tener en cuenta sobre esta configuración:
+
+- **`smtp_sasl_security_options = noanonymous`**: esto sobrescribe el valor por defecto de Postfix, `noplaintext, noanonymous`. Sin el cambio, los métodos de autenticación PLAIN y LOGIN (que usan la mayoría de los proveedores) serían rechazados. Establecemos `noanonymous` explícitamente para permitir PLAIN/LOGIN sobre TLS.
+- **`lmdb:`**: en Postfix 3.11+ (estable actual), `lmdb:` es el tipo de tabla compatible con el futuro. Las configuraciones antiguas usan `hash:`. Ambas funcionan hoy, pero `lmdb:` es la dirección que toma Postfix.
+- **`inet_interfaces = loopback-only`**: en una configuración de solo envío, esto evita que Postfix escuche en interfaces públicas. Reduce la superficie de ataque.
+- **`smtp_tls_CAfile`**: garantiza que la verificación de certificados TLS funcione en instalaciones mínimas donde los certificados CA pueden no estar en la ruta por defecto.
+
+Sustituye `smtp-relay.brevo.com` por el servidor SMTP de tu proveedor.
+
+**Paso 3:** crea el archivo de contraseñas SASL:
+
+```sh
+sudo nano /etc/postfix/sasl_passwd
+```
+
+Añade esta línea:
+
+```sh
+[smtp-relay.brevo.com]:587 your_username:your_password
+```
+
+Sustitúyela por tus credenciales SMTP reales.
+
+**Paso 4:** genera la tabla de consulta:
+
+```sh
+# Postfix 3.11+ (lmdb):
+sudo postmap lmdb:/etc/postfix/sasl_passwd
+
+# Older Postfix (hash):
+# sudo postmap hash:/etc/postfix/sasl_passwd
+```
+
+**Paso 5:** protege los archivos de credenciales:
+
+```sh
+sudo chown root:root /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+sudo chmod 0600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+```
+
+**Paso 6:** (opcional) reescribe la dirección del remitente para todo el correo saliente. Esto es útil cuando tu sistema envía correo como `root@hostname` pero quieres que todo salga desde una dirección real.
+
+```sh
+sudo nano /etc/postfix/sender_canonical
+```
+
+Añade:
+
+```sh
+/.+/    your_email@example.com
+```
+
+Crea el archivo de comprobación de cabeceras:
+
+```sh
+sudo nano /etc/postfix/smtp_header_checks
+```
+
+Añade:
+
+```sh
+/From:.*/ REPLACE From: your_email@example.com
+```
+
+Activa la reescritura:
+
+```sh
+sudo postconf -e 'sender_canonical_classes = envelope_sender, header_sender'
+sudo postconf -e 'sender_canonical_maps = regexp:/etc/postfix/sender_canonical'
+sudo postconf -e 'smtp_header_checks = regexp:/etc/postfix/smtp_header_checks'
+```
+
+**Paso 7:** define el mailname y reinicia:
+
+```sh
+echo "yourdomain.com" | sudo tee /etc/mailname
+sudo systemctl restart postfix
+```
+
+**Verificación:** ejecuta `postfix check`. No debería devolver errores. Después, `systemctl status postfix` debería mostrar `active (exiting)`.
+
+</Tab>
+<Tab name="Script automatizado">
+
+### Uso del script automatizado de configuración de Postfix
+
+El script lo hace todo de una vez: instalación de paquetes, configuración, credenciales, reescritura opcional del remitente y reinicio. Lo preparé para despliegues repetibles en varias instancias de VPS.
+
+**Paso 1:** descarga el script:
+
+```sh
+curl -sSL https://utils.bitdoze.com/scripts/postfix-setup.sh -o postfix-setup.sh
+```
+
+**Paso 2:** dale permisos de ejecución y ejecútalo:
+
+```sh
+chmod +x postfix-setup.sh
+bash postfix-setup.sh
+```
+
+**Paso 3:** sigue las indicaciones. El script te pedirá:
+- Tu nombre de usuario SMTP
+- Tu contraseña SMTP
+- El dominio que usas con tu proveedor SMTP
+- Una dirección de correo remitente (pulsa Enter para omitir)
+- Tu hostname de Postfix
+- La dirección y el puerto de tu servidor SMTP (p. ej., `[smtp-relay.brevo.com]:587`)
+
+**Salida de ejemplo:**
+
+```sh
+root@cloud:/var/log# bash postfix-setup.sh
+[2024-09-18 06:04:42] Step 1: Make sure you have already set up your domain with your SMTP provider and added any necessary DNS records (like SPF, DKIM, and CNAME).
+Enter your SMTP Username: bitdoze1@gmail.com
+Enter your SMTP Password:
+Enter the domain you are using with your SMTP provider (e.g. example.com): bitdoze.ro
+Enter the sender email address (optional, press Enter to skip):
+Enter your Postfix hostname (e.g. yourdomain.com): bitdoze.ro
+Enter your SMTP server with port (e.g. [smtp.provider.com]:587): [smtp-relay.brevo.com]:587
+[2024-09-18 06:05:20] Step 2: Updating system and installing Postfix...
+[2024-09-18 06:05:23] Step 3: Configuring Postfix...
+[2024-09-18 06:05:23] Backed up /etc/postfix/main.cf to /etc/postfix/main.cf.bak
+[2024-09-18 06:05:23] Step 4: Creating /etc/postfix/sasl_passwd file with SMTP credentials...
+[2024-09-18 06:05:23] Backed up /etc/postfix/sasl_passwd to /etc/postfix/sasl_passwd.bak
+[2024-09-18 06:05:23] Securing /etc/postfix/sasl_passwd and creating hash...
+[2024-09-18 06:05:25] Step 5: Configuring sender address settings...
+[2024-09-18 06:05:25] Resetting sender address configuration...
+[2024-09-18 06:05:25] Step 6: Configuring /etc/mailname...
+[2024-09-18 06:05:25] Backed up /etc/mailname to /etc/mailname.bak
+[2024-09-18 06:05:25] Step 7: Restarting Postfix...
+postfix/postfix-script: refreshing the Postfix mail system
+[2024-09-18 06:05:27] All done! Postfix has been configured with your SMTP settings.
+```
+
+**Verificación:** cuando el script termine, ejecuta `systemctl status postfix`. Debería mostrar `active`. Envía un correo de prueba (consulta la sección de pruebas más abajo) para confirmar la entrega.
+
+### Qué hace el script
+
+El script automatiza estos pasos:
+
+1. **Hace copia de seguridad de los archivos de configuración existentes**: crea copias `.bak` de `main.cf`, `sasl_passwd` y `mailname` antes de tocarlos. Si algo sale mal, puedes volver atrás.
+2. **Instala los paquetes necesarios**: ejecuta `apt update` e instala `mailutils` (y `libsasl2-modules` si el script está actualizado).
+3. **Configura main.cf**: define relayhost, autenticación SASL, TLS y otros ajustes del relay.
+4. **Crea las credenciales SASL**: escribe el archivo `sasl_passwd`, establece permisos `0600` y genera la tabla de consulta con `postmap`.
+5. **Reescritura opcional del remitente**: si proporcionas un correo remitente, configura `sender_canonical` y `smtp_header_checks` para que todo el correo saliente use esa dirección.
+6. **Reinicia Postfix**: aplica la nueva configuración.
+
+Durante todo el proceso, el script registra cada paso y comprueba errores. Si algo falla, se detiene e informa del problema en lugar de continuar con una configuración rota.
+
+</Tab>
+</Tabs>
+
+Vídeo de YouTube con el recorrido de la configuración en un clic:
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/lEPuB0Eh8Sg"
+  label="Configuración de Postfix en 1 clic"
+/>
+
+## Puerto 465 con TLS implícito (opcional)
+
+El puerto 587 con STARTTLS es la configuración más común y probada. Pero muchos proveedores (incluido Brevo) también admiten el **puerto 465 con TLS implícito** (a veces llamado SMTPS o wrappermode). El RFC 8314 ahora recomienda el puerto 465 para TLS implícito junto al 587 para STARTTLS.
+
+Para usar el puerto 465, cambia tu relayhost y añade una línea a `main.cf`:
+
+```sh
+relayhost = [smtp-relay.brevo.com]:465
+smtp_tls_wrappermode = yes
+```
+
+Eso es todo. El resto de la configuración sigue igual.
+
+<Notice type="info" title="Quédate con el puerto 587 salvo que tu proveedor exija el 465">
+El puerto 587 con STARTTLS es la combinación más probada. El puerto 465 funciona en versiones modernas de Postfix, pero algunas distribuciones antiguas tienen peculiaridades con wrappermode. Usa el 587 por defecto salvo que tu proveedor requiera específicamente el 465.
+</Notice>
+
+## Prueba y verificación de tu relay SMTP de Postfix
+
+Después de la configuración (manual o con script), verifica que todo funciona antes de confiarle correo real.
+
+### Envía un correo de prueba
+
+```sh
+echo "Postfix relay test" | mail -s "Test Email" recipient@example.com
+```
+
+Con una dirección de remitente personalizada:
+
+```sh
+echo "Postfix relay test" | mail -s "Test Email" -r sender@yourdomain.com recipient@example.com
+```
+
+Sustituye `recipient@example.com` por una dirección que puedas comprobar.
+
+### Revisa el registro de correo
+
+Sigue el registro en tiempo real mientras envías:
+
+```sh
+tail -f /var/log/mail.log
+```
+
+O revisa las entradas recientes:
+
+```sh
+tail -100 /var/log/mail.log
+```
+
+Una entrega correcta tiene este aspecto:
+
+```sh
+Jul 17 10:30:45 hostname postfix/smtp[12345]: 1AB2C3D4E5F: to=<recipient@example.com>, relay=smtp-relay.brevo.com[1.2.3.4]:587, delay=0.8, delays=0.02/0.00/0.5/0.28, dsn=2.0.0, status=sent (250 2.0.0 OK 1234567890abcdef)
+```
+
+La clave es `status=sent`. Si ves `status=bounced`, `status=deferred` o `status=failed`, lee el mensaje de error que sigue. Normalmente te dice exactamente qué está mal.
+
+También puedes usar `journalctl`:
+
+```sh
+journalctl -u postfix -f
+```
+
+### Verifica la entregabilidad
+
+1. **Envía a varios dominios**: prueba con Gmail, Outlook y Yahoo. Cada uno tiene filtros de spam distintos.
+2. **Revisa las carpetas de spam**: incluso con la configuración correcta, los dominios/IP nuevos a veces caen en spam hasta que se construye la reputación.
+3. **Usa mail-tester.com**: envía un correo de prueba a la dirección que te dan y revisa tu puntuación. Marcan problemas de SPF/DKIM/DMARC, listas negras y problemas de contenido.
+4. **Comprueba la reputación de la IP**: usa MXToolbox para verificar que la IP de tu VPS no está en ninguna lista negra (es independiente de la reputación de tu proveedor SMTP).
+
+## Solución de errores comunes del relay SMTP de Postfix
+
+Esta es la sección que me habría gustado que existiera cuando configuré por primera vez el relay de Postfix. Estos son los errores con los que más probablemente te vas a encontrar.
+
+### "No worthy mechs found": fallo de autenticación SASL
+
+**Síntoma:** en `/var/log/mail.log`:
+
+```sh
+warning: SASL authentication failure: No worthy mechs found
+```
+
+**Causa:** `libsasl2-modules` no está instalado. Es el fallo más común en las configuraciones nuevas de relay de Postfix.
+
+**Solución:**
+
+```sh
+sudo apt install -y libsasl2-modules
+sudo systemctl restart postfix
+```
+
+Verifica que los mecanismos SASL estén disponibles: `postconf -m | grep sasl`
+
+### "Authentication failed": credenciales incorrectas
+
+**Síntoma:** `SASL authentication failed` o `authentication failed` en el registro de correo.
+
+**Causa:** nombre de usuario o contraseña incorrectos en `/etc/postfix/sasl_passwd`. Algunos proveedores (Brevo, Gmail) requieren contraseñas específicas de aplicación o claves SMTP, no tu contraseña habitual de inicio de sesión.
+
+**Solución:**
+
+1. Verifica tus credenciales iniciando sesión en el panel de tu proveedor
+2. Revisa el archivo sasl_passwd: `sudo cat /etc/postfix/sasl_passwd`
+3. Regenera la tabla de consulta: `sudo postmap lmdb:/etc/postfix/sasl_passwd`
+4. Reinicia: `sudo systemctl restart postfix`
+
+### "Connection timed out": puertos SMTP bloqueados
+
+<Notice type="warning" title="Los proveedores de VPS económicos suelen bloquear los puertos SMTP">
+Hetzner, OVH, Contabo y muchos otros proveedores bloquean por defecto los puertos salientes 587 y 465. Tendrás que abrir un ticket de soporte pidiendo que desbloqueen el puerto 587 para tu servidor. Algunos proveedores exigen una cuenta de pago durante cierto tiempo antes de desbloquear SMTP.
+</Notice>
+
+**Síntoma:** `Connection timed out` o `Network is unreachable` en el registro de correo.
+
+**Causa:** tu proveedor de VPS está bloqueando el tráfico SMTP saliente.
+
+**Solución:** abre un ticket de soporte con tu proveedor de hosting pidiendo desbloquear el puerto 587. Para verificarlo, prueba la conexión: `nc -zv smtp-relay.brevo.com 587`
+
+### "Relay access denied"
+
+**Síntoma:** `relay access denied` en el registro de correo.
+
+**Causa:** la directiva `relayhost` falta o está mal configurada, o la autenticación SASL no funciona (Postfix intenta entregar directamente y el servidor destinatario lo rechaza).
+
+**Solución:** verifica que `relayhost` esté definido en `/etc/postfix/main.cf`:
+
+```sh
+postconf relayhost
+```
+
+Debería devolver algo como `[smtp-relay.brevo.com]:587`. Si está vacío, añádelo y reinicia Postfix.
+
+### Los correos caen en spam
+
+**Síntoma:** los correos se envían correctamente (`status=sent` en el registro) pero los destinatarios no los ven en su bandeja de entrada.
+
+**Causa:** registros DNS de SPF, DKIM o DMARC ausentes o incorrectos. Es un problema de configuración de DNS, no de Postfix.
+
+**Solución:**
+
+1. Inicia sesión en el panel de tu proveedor SMTP y comprueba el estado de autenticación del dominio
+2. Verifica que existan los registros SPF, DKIM y DMARC en la zona DNS de tu dominio
+3. Usa mail-tester.com para obtener un informe detallado de entregabilidad
+4. Consulta MXToolbox para detectar problemas de DNS y listas negras
+
+## Conclusiones
+
+Configurar Postfix para reenviar a través de un servidor SMTP externo es el camino fiable para la entrega de correo desde un VPS. Obtienes la flexibilidad de un MTA local sin el dolor de gestionar la reputación de tu propio servidor de correo. Brevo sigue siendo mi recomendación por defecto para necesidades de nivel gratuito: 300 correos/día cubren la mayoría de las cargas de trabajo.
+
+Prueba siempre a fondo antes de depender de la configuración para correo en producción. Revisa el registro de correo, verifica la entregabilidad con varios proveedores y asegúrate de que tus registros DNS sean sólidos.
+
+Si también necesitas [enviar correos de WordPress por SMTP](/es/enviar-emails-wordpress-zoho-smtp-fluentsmtp/), las mismas credenciales del proveedor SMTP funcionan con plugins como FluentSMTP. Como siguiente paso para [proteger tu servidor](/es/informe-seguridad-bsi-docker-ufw/), consulta la guía de seguridad de Docker, o [endurece tu servidor Linux](/secure-ssh-server-linux/) con el tutorial de hardening de SSH.
+
+<Button text="Explora más guías de Linux" link="/linux-commands" variant="solid" color="blue" size="md" icon="arrow-right" />

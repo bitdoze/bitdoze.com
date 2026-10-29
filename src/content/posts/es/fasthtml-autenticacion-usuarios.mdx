@@ -1,0 +1,1043 @@
+---
+date: 2025-03-04
+lastmod: 2026-08-16T00:00:00Z
+translationKey: "fasthtml-user-auth"
+title: "Autenticación de Usuarios en FastHTML: OAuth, Login y Controles de Administrador"
+meta_title: "Autenticación de Usuarios en FastHTML: OAuth, Login y Controles de Administrador"
+description: "Aprende a añadir autenticación de usuarios en FastHTML a tu app Python con GitHub OAuth, login por email, sesiones, protección CSRF y controles de administrador basados en roles."
+image: "@assets/images/25/03/fasthtml-user-auth.jpg"
+categories: ["web-development"]
+authors: ["Dragos"]
+series: ["FastHTML Tutorial Series", "6"]
+tags: ["fasthtml", "oauth", "sqlite"]
+canonical: "https://www.bitdoze.com/es/fasthtml-autenticacion-usuarios/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+
+En este tutorial de autenticación de usuarios en FastHTML, añadiremos login con GitHub OAuth, registro con email/contraseña y controles de administrador basados en roles al Generador de Títulos con IA de nuestra serie. Esta es la Parte 6. Si has seguido la serie desde [FastHTML para Principiantes](/es/empezar-fasthtml/), pasando por la [estructura de proyecto multipágina](/es/fasthtml-multiples-paginas/) y el [Generador de Títulos con IA que construimos antes](/es/fasthtml-herramientas-ia-complejas/), ya tienes una app funcional que [genera títulos con un LLM](/es/fasthtml-herramientas-pydanticai/) y los guarda en SQLite. Hoy la protegemos.
+
+Al finalizar tendrás:
+
+- Login con GitHub OAuth mediante el `GitHubAppClient` integrado (sin código manual con `requests`)
+- Registro y login con email/contraseña y hash seguro de contraseñas
+- Protección CSRF en todos los formularios que modifican estado
+- Endurecimiento de sesiones (`secret_key`, `max_age`, `same_site`, solo HTTPS)
+- Controles de administrador basados en roles por petición usando Beforeware
+- Paneles de historial por usuario y globales para administradores
+
+<Notice type="info" title="Serie: FastHTML Tutorial Series">
+Esta es la Parte 6. Las partes anteriores cubren [la construcción de una UI](/es/empezar-fasthtml/), la [estructura multipágina](/es/fasthtml-multiples-paginas/), [SQLite con Fastlite](/es/fasthtml-sqlite-db/), [herramientas de IA complejas](/es/fasthtml-herramientas-ia-complejas/) y la [integración con PydanticAI](/es/fasthtml-herramientas-pydanticai/). [FastHTML](/best-python-web-frameworks/) es un framework web de Python de AnswerDotAI que usa HTMX y Starlette internamente.
+</Notice>
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+
+- Python >= 3.10
+- `python-fasthtml>=0.14,<0.15` fijada en tu `requirements.txt`
+- Una cuenta de GitHub con una OAuth App registrada (Settings > Developer settings > OAuth Apps)
+- El Generador de Títulos de la [Parte 5](/es/fasthtml-herramientas-ia-complejas/) funcionando en local
+- Un archivo `.env` con `SECRET_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ADMIN_EMAIL` y `ADMIN_PASSWORD`
+
+</ListCheck>
+
+<Notice type="warning" title="Fijación de Versión">
+Este tutorial está dirigido a `python-fasthtml` 0.14.x. La versión 0.14.1 eliminó varios imports de `fasthtml.common` (incluidos `uvicorn`, `Database`, `fastlite` y `pico`), y la 0.12.0 cambió fastlite a `apsw`. Si actualizas desde una versión anterior, fija `python-fasthtml>=0.14,<0.15` en tu `requirements.txt` y actualiza los imports en consecuencia.
+</Notice>
+
+## Visión general
+
+Este sistema de autenticación de usuarios en FastHTML tiene varias capas que cooperan entre sí. Así encajan las piezas:
+
+| Componente | Archivos | Descripción | Características clave |
+|-----------|-------|-------------|----------------------|
+| **Capa de base de datos** | `db/database.py`, `db/user_dao.py`, `db/history_dao.py` | Persistencia de datos y seguridad de contraseñas | SQLite con tablas users + title_history, PBKDF2 con 600k iteraciones, claves foráneas, creación automática de admin |
+| **Servicios de autenticación** | `auth/auth_manager.py`, `auth/email_auth.py` | Login, gestión de sesiones, validación de contraseñas | Auth por email/contraseña, helpers de sesión, comprobaciones de rol |
+| **GitHub OAuth** | `main.py` (subclase `OAuth` inline) | Flujo OAuth de GitHub integrado en FastHTML | `GitHubAppClient` + subclase `OAuth`, manejo automático de redirecciones |
+| **Beforeware** | `main.py` | Comprobaciones de auth y admin por petición | Sustituye a `require_auth()` por ruta, inyecta el parámetro `auth`, consulta `is_admin` en vivo |
+| **CSRF** | `main.py`, plantillas de formularios | Protección contra falsificación de peticiones entre sitios | Token guardado en sesión, campo `Hidden`, validación con `hmac.compare_digest` |
+| **Componentes de UI** | `components/header.py`, `components/page_layout.py` | Navegación y layout conscientes del estado de autenticación | Nav dinámica según el estado de auth, enlaces de admin, tokens CSRF en formularios |
+| **Páginas públicas** | `pages/home.py`, `pages/login.py`, `pages/register.py` | Accesibles sin login | Landing page, formulario de login con GitHub + email, registro con validación |
+| **Páginas protegidas** | `pages/title_generator.py`, `pages/history.py` | Requieren autenticación | Formulario de generación de títulos, panel de historial por usuario |
+| **Páginas de administración** | `pages/admin.py` | Requieren rol de administrador | Gestión de usuarios, asignación de roles, vista global del historial |
+
+## Explicación del flujo de autenticación
+
+El flujo de GitHub OAuth de FastHTML usa el `GitHubAppClient` integrado y la subclase `OAuth` en lugar de llamadas manuales con `requests`. Estos son los cuatro flujos:
+
+**1. Flujo de registro:**
+- El usuario visita `/register` y envía el formulario
+- El handler `email_register()` valida la entrada (formato, longitud de contraseña, email único)
+- `UserDAO.create_user()` hashea la contraseña con PBKDF2 (600k iteraciones) y la guarda
+- Si todo va bien, redirige a `/login` con un mensaje de éxito
+
+**2. Flujo de login por email:**
+- El usuario envía email + contraseña en `/login`
+- El handler `email_login()` llama a `EmailAuth.authenticate()`
+- La contraseña se compara con `hmac.compare_digest()` (tiempo constante)
+- `AuthManager.login_user()` escribe `user_id` y un token CSRF en la sesión
+- Redirige a `/` (Beforeware ya reconoce la sesión)
+
+**3. Flujo de login con GitHub OAuth:**
+- El usuario hace clic en "Sign in with GitHub", que enlaza a `oauth.login_link(req)`
+- GitHub redirige de vuelta a `/auth/github/callback` con un código de autorización
+- La subclase `OAuth` intercambia el código por la información del usuario vía `client.retr_info()`
+- `get_auth()` encuentra o crea el usuario en SQLite y establece la sesión
+- Redirige automáticamente a `/`
+
+**4. Comprobación de autorización (Beforeware):**
+- Cada petición pasa por `Beforeware(before, skip=[...])`
+- `before()` comprueba `session.get('user_id')`; si falta, redirige a `/login`
+- En las rutas de admin, el handler hace una consulta `is_admin` a la BD por petición (sin caché en sesión), para que las degradaciones surtan efecto de inmediato
+- Las rutas públicas (`/`, `/login`, `/register`, archivos estáticos) se omiten
+
+```python
+# Simplified Beforeware flow
+login_redir = RedirectResponse('/login', status_code=303)
+
+def before(req, sess):
+    auth = req.scope['auth'] = sess.get('user_id', None)
+    if not auth:
+        return login_redir
+
+bware = Beforeware(before, skip=[r'/favicon\.ico', r'/static/.*', r'.*\.css',
+                                 '/', '/login', '/register', '/auth/github/callback'])
+```
+
+## Visión general del esquema de la base de datos
+
+La capa de base de datos usa SQLite con dos tablas. Si has seguido la serie, ya [añadiste una base de datos SQLite con Fastlite](/es/fasthtml-sqlite-db/). Aquí extendemos ese esquema.
+
+### Tabla users
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    email TEXT UNIQUE,
+    password_hash TEXT,
+    salt TEXT,
+    github_id TEXT UNIQUE,
+    is_admin BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login TIMESTAMP
+)
+```
+
+El flag `is_admin` controla el acceso basado en roles. En lugar de cachearlo en la sesión, lo consultamos en la base de datos en cada petición mediante Beforeware. Esto significa que si degradas a un admin en la base de datos, pierde el acceso inmediatamente (sin necesidad de volver a iniciar sesión).
+
+Las columnas `password_hash` y `salt` almacenan las credenciales del hash de contraseñas de FastHTML usando PBKDF2-HMAC-SHA256 con 600.000 iteraciones y un salt aleatorio por usuario (`secrets.token_hex(16)`). La comparación de contraseñas usa `hmac.compare_digest()` para una comparación en tiempo constante que evita ataques de temporización.
+
+<Notice type="info" title="Hash de Contraseñas en FastHTML">
+OWASP recomienda PBKDF2-HMAC-SHA256 con al menos 600.000 iteraciones (frente a las 100k que usan muchos tutoriales antiguos). Argon2id es la recomendación principal para proyectos nuevos. Consulta la [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). Si quieres Argon2id, usa `argon2-cffi` o `passlib` en lugar del enfoque con `hashlib` de la stdlib mostrado aquí.
+</Notice>
+
+### Tabla title_history
+
+```sql
+CREATE TABLE IF NOT EXISTS title_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    topic TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    style TEXT NOT NULL,
+    number_of_titles INTEGER NOT NULL,
+    titles TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+)
+```
+
+La clave foránea `user_id` asocia cada generación con un usuario. Los usuarios normales solo ven su propio historial; los administradores lo ven todo. Es el mismo patrón de aislamiento de datos por usuario que recomiendan los docs de FastHTML (`todos.xtra(name=auth)`).
+
+## Cambios en la estructura del proyecto
+
+Estamos limpiando el árbol de archivos. El antiguo `auth/github_auth.py` (OAuth manual con `requests`) desaparece, reemplazado por el `GitHubAppClient` integrado en `main.py`. Si sigues la [estructura de proyecto multipágina](/es/fasthtml-multiples-paginas/) de la Parte 3, la disposición te resultará familiar:
+
+```
+your-app/
+├── auth/
+│   ├── auth_manager.py      # Session helpers, login_user(), is_admin()
+│   └── email_auth.py        # Email/password validation and authentication
+├── components/
+│   ├── header.py            # Auth-aware navigation
+│   ├── footer.py            # Footer component
+│   └── page_layout.py       # Page wrapper with header/footer
+├── db/
+│   ├── database.py          # Database class, schema init, password hashing
+│   ├── user_dao.py          # User CRUD operations
+│   └── history_dao.py       # History CRUD operations
+├── pages/
+│   ├── home.py              # Landing page
+│   ├── login.py             # Login form (email + GitHub OAuth)
+│   ├── register.py          # Registration form
+│   ├── title_generator.py   # Protected: title generation form
+│   ├── history.py           # Protected: user history dashboard
+│   └── admin.py             # Admin-only: user mgmt, global history
+├── tools/
+│   └── title_generator.py   # LLM title generation logic
+├── main.py                  # Routes, OAuth subclass, Beforeware, app init
+├── config.py                # Environment config
+├── .env                     # Secrets (not committed)
+└── requirements.txt         # python-fasthtml>=0.14,<0.15, python-dotenv, etc.
+```
+
+## Implementación paso a paso
+
+### Paso 1: actualizar la estructura de la base de datos
+
+El esquema de la base de datos es el mismo de antes, pero subimos el número de iteraciones de PBKDF2 de 100.000 a 600.000 y cambiamos a `hmac.compare_digest()` para la verificación de contraseñas.
+
+**Archivo: `db/database.py`**
+
+```python
+import os
+import hashlib
+import hmac
+import secrets
+from contextlib import contextmanager
+import sqlite3
+import config
+
+class Database:
+    def __init__(self, db_path=None):
+        self.db_path = db_path or config.DB_PATH
+        if not self.db_path:
+            self.db_path = "tools.db"
+        self._initialize_db()
+
+    def _initialize_db(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                salt TEXT,
+                github_id TEXT UNIQUE,
+                is_admin BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+            ''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS title_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                topic TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                style TEXT NOT NULL,
+                number_of_titles INTEGER NOT NULL,
+                titles TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            ''')
+            # Auto-create admin if configured
+            cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+            if cursor.fetchone()[0] == 0 and config.ADMIN_EMAIL and config.ADMIN_PASSWORD:
+                salt = secrets.token_hex(16)
+                password_hash = self._hash_password(config.ADMIN_PASSWORD, salt)
+                cursor.execute('''
+                INSERT INTO users (username, email, password_hash, salt, is_admin)
+                VALUES (?, ?, ?, ?, 1)
+                ''', ('admin', config.ADMIN_EMAIL, password_hash, salt))
+            conn.commit()
+
+    @staticmethod
+    def _hash_password(password, salt):
+        """PBKDF2-HMAC-SHA256 with 600,000 iterations (OWASP minimum)."""
+        return hashlib.pbkdf2_hmac(
+            'sha256',
+            password.encode('utf-8'),
+            salt.encode('utf-8'),
+            600_000  # was 100_000 in the original article
+        ).hex()
+
+    @contextmanager
+    def get_connection(self):
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+db = Database()
+```
+
+**Archivo: `db/user_dao.py`** (los cambios clave son la comparación de contraseñas en tiempo constante):
+
+```python
+from typing import Optional, Dict, Any, List
+import hmac
+import secrets
+from datetime import datetime
+from .database import db
+
+class UserDAO:
+    @staticmethod
+    def create_user(username: str, email: str, password: Optional[str] = None,
+                    github_id: Optional[str] = None) -> int:
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM users WHERE email = ? OR username = ? "
+                    "OR (github_id = ? AND github_id IS NOT NULL)",
+                    (email, username, github_id)
+                )
+                if cursor.fetchone():
+                    return 0
+
+                password_hash = None
+                salt = None
+                if password:
+                    salt = secrets.token_hex(16)
+                    password_hash = db._hash_password(password, salt)
+
+                cursor.execute('''
+                INSERT INTO users (username, email, password_hash, salt, github_id, is_admin)
+                VALUES (?, ?, ?, ?, ?, 0)
+                ''', (username, email, password_hash, salt, github_id))
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"Error creating user: {e}")
+            return 0
+
+    @staticmethod
+    def authenticate_email(email: str, password: str) -> Optional[Dict[str, Any]]:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM users WHERE email = ?", (email,)
+            )
+            user = cursor.fetchone()
+            if not user:
+                return None
+            if not user['password_hash'] or not user['salt']:
+                return None
+
+            # Constant-time comparison (OWASP recommendation)
+            password_hash = db._hash_password(password, user['salt'])
+            if not hmac.compare_digest(password_hash, user['password_hash']):
+                return None
+
+            # Update last_login
+            cursor.execute(
+                "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
+                (user['id'],)
+            )
+            conn.commit()
+            return dict(user)
+
+    @staticmethod
+    def find_or_create_github_user(github_id: str, username: str,
+                                    email: str) -> Optional[Dict[str, Any]]:
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                # Try to find by github_id first
+                cursor.execute("SELECT * FROM users WHERE github_id = ?", (github_id,))
+                user = cursor.fetchone()
+                if user:
+                    cursor.execute(
+                        "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?",
+                        (user['id'],)
+                    )
+                    conn.commit()
+                    return dict(user)
+
+                # Create new GitHub user
+                cursor.execute('''
+                INSERT INTO users (username, email, github_id, is_admin)
+                VALUES (?, ?, ?, 0)
+                ''', (username, email, github_id))
+                conn.commit()
+                cursor.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,))
+                return dict(cursor.fetchone())
+        except Exception as e:
+            print(f"Error with GitHub user: {e}")
+            return None
+
+    @staticmethod
+    def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+            return dict(user) if user else None
+
+    @staticmethod
+    def is_user_admin(user_id: int) -> bool:
+        """Check admin status from DB (not session) for live demotion."""
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+            return bool(user and user['is_admin'])
+
+    @staticmethod
+    def get_all_users() -> List[Dict[str, Any]]:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, username, email, github_id, is_admin, "
+                          "created_at, last_login FROM users ORDER BY created_at DESC")
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def set_admin(user_id: int, is_admin: bool) -> bool:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET is_admin = ? WHERE id = ?",
+                          (int(is_admin), user_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def delete_user(user_id: int) -> bool:
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM title_history WHERE user_id = ?", (user_id,))
+                cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error deleting user: {e}")
+            return False
+```
+
+El `HistoryDAO` se mantiene prácticamente igual que el original. Filtra por `user_id` para usuarios normales y devuelve todos los registros a los administradores.
+
+<Notice type="warning" title="Cambio Disruptivo: fastlite 0.12.0+">
+Si actualizas desde una versión antigua, fastlite ahora usa `apsw` en lugar del `sqlite3` de la stdlib. Si tu base de datos se creó con el driver antiguo, puede que tengas que recrearla. La clase `Database` mostrada arriba usa `sqlite3` de la stdlib directamente, que sigue funcionando bien.
+</Notice>
+
+**Verificación:** Ejecuta `python -c "from db.database import Database; Database()"` para confirmar que el esquema se inicializa sin errores. Debería crearse un archivo `tools.db`.
+
+### Paso 2: configuración y seguridad de la sesión
+
+**Archivo: `config.py`**
+
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Database
+DB_PATH = os.getenv("DB_PATH", "tools.db")
+
+# Security -- no placeholder default! Fail fast if unset.
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable is required. "
+                     "Generate one with: python -c 'import secrets; print(secrets.token_hex(32))'")
+
+# Session
+SESSION_EXPIRY = int(os.getenv("SESSION_EXPIRY", 604800))  # 7 days in seconds
+
+# GitHub OAuth
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
+
+# Admin bootstrap
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+
+# LLM (inherited from Part 5)
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "openai/gpt-4o-mini")
+
+# App
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+```
+
+<Notice type="error" title="No Uses Secretos de Relleno">
+El código antiguo tenía `"your-secret-key-change-in-production"` como valor por defecto de `SECRET_KEY`. Eso es una trampa. Cualquiera que olvide definir la variable de entorno ejecuta la app con una clave conocida. La configuración anterior lanza `ValueError` inmediatamente si `SECRET_KEY` no está definida. Genera una clave con: `python -c "import secrets; print(secrets.token_hex(32))"`
+</Notice>
+
+#### Inicialización de la app con Beforeware
+
+**Archivo: `main.py`** (inicialización de la app y Beforeware, que sustituye al antiguo patrón `require_auth()` por ruta):
+
+```python
+from fasthtml.common import *
+from fasthtml.oauth import GitHubAppClient, OAuth, redir_url
+import secrets
+import hmac
+import config
+from auth.auth_manager import AuthManager
+from auth.email_auth import EmailAuth
+from db.user_dao import UserDAO
+from db.history_dao import HistoryDAO
+
+login_redir = RedirectResponse('/login', status_code=303)
+
+def before(req, sess):
+    """Beforeware: check session auth, redirect to login if missing."""
+    auth = req.scope['auth'] = sess.get('user_id', None)
+    if not auth:
+        return login_redir
+
+bware = Beforeware(before, skip=[
+    r'/favicon\.ico', r'/static/.*', r'.*\.css',
+    '/', '/login', '/register',
+    '/auth/github/callback',
+    '/error',
+])
+
+app = FastHTML(
+    secret_key=config.SECRET_KEY,
+    before=bware,
+    session_cookie="session",
+    max_age=config.SESSION_EXPIRY,
+    sess_path="/",
+    same_site="lax",
+    sess_https_only=not config.DEBUG,
+)
+
+# Route helper: get user_id from req.scope (set by Beforeware)
+def get_auth(req): return req.scope['auth']
+```
+
+<Notice type="info" title="Comportamiento de ./sesskey">
+Si no pasas `secret_key` a `FastHTML()`, genera automáticamente una clave de firma y la guarda en `./sesskey`. Esto significa que las sesiones sobreviven a los reinicios, pero deberías añadir `sesskey` a `.gitignore` si dependes de esto. En producción, define siempre `SECRET_KEY` explícitamente.
+</Notice>
+
+El patrón `Beforeware` sustituye a las antiguas llamadas `require_auth(session)` por ruta. Los handlers que necesitan el ID de usuario declaran un parámetro `auth`. FastHTML lo inyecta desde `req.scope['auth']`. La lista `skip` define las rutas públicas que no necesitan autenticación.
+
+### Paso 3: GitHub OAuth con GitHubAppClient
+
+Este es el mayor cambio de código. El antiguo `auth/github_auth.py` (unas 100 líneas de OAuth manual basado en `requests` con query strings sin codificar) se reemplaza por ~30 líneas usando el OAuth integrado de FastHTML.
+
+#### Configuración de la OAuth App de GitHub
+
+1. Ve a GitHub > Settings > Developer settings > OAuth Apps > New OAuth App
+2. Define la **Authorization callback URL** con tu URL completa: `http://localhost:5001/auth/github/callback`
+3. Copia el Client ID y el Client Secret a tu archivo `.env`
+
+La URL de callback debe ser absoluta (no una ruta relativa como `/auth/github/callback`). `redir_url()` de FastHTML la construye automáticamente a partir del host de la petición.
+
+#### La subclase OAuth
+
+```python
+# In main.py, after app initialization
+
+client = GitHubAppClient(
+    config.GITHUB_CLIENT_ID,
+    config.GITHUB_CLIENT_SECRET,
+    scope="user:email"
+)
+
+class Auth(OAuth):
+    def get_auth(self, info, ident, session, state):
+        """
+        Called after GitHub redirects back.
+
+        Args:
+            info: dict with 'login', 'email' (may be None), etc.
+            ident: the GitHub user ID (from client.id_key == 'id')
+            session: the Starlette session
+            state: the CSRF state parameter
+        """
+        # GitHub may return email: null for non-public emails
+        email = info.get('email') or f"{info['login']}-{ident}@github.user"
+
+        user = UserDAO.find_or_create_github_user(
+            str(ident), info['login'], email
+        )
+        if not user:
+            return None  # redirects back to /login
+
+        AuthManager.login_user(session, user)
+        # Generate CSRF token on login
+        session['csrf'] = secrets.token_hex(32)
+        return RedirectResponse('/', status_code=303)
+
+oauth = Auth(app, client, redir_path='/auth/github/callback', login_path='/login')
+```
+
+Luego, en la plantilla de tu página de login:
+
+```python
+# pages/login.py
+from fasthtml.common import *
+
+def login_page(error=None, success=None, session=None):
+    return Div(
+        # Error/success messages...
+        H2("Sign In", cls="text-2xl font-bold mb-6"),
+
+        # GitHub OAuth button
+        A("Sign in with GitHub",
+          href="/login",  # OAuth's login_path handles the redirect
+          cls="block w-full text-center bg-gray-800 text-white py-2 px-4 rounded mb-4 hover:bg-gray-700"),
+
+        Div("or", cls="text-center text-gray-500 my-4"),
+
+        # Email/password form
+        Form(
+            # CSRF token in every state-changing form
+            Input(type="hidden", id="csrf", value=session.get('csrf', '')),
+            Input(type="email", name="email", placeholder="Email", required=True,
+                  cls="w-full p-2 border rounded mb-3"),
+            Input(type="password", name="password", placeholder="Password",
+                  required=True, cls="w-full p-2 border rounded mb-3"),
+            Button("Sign In with Email", type="submit",
+                   cls="w-full bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700"),
+            method="post", action="/auth/email/login"
+        ),
+
+        # Register link
+        P(A("Create an account", href="/register", cls="text-blue-600"),
+          cls="mt-4 text-center"),
+        cls="max-w-md mx-auto mt-10 p-6 bg-white rounded shadow"
+    )
+```
+
+<Notice type="info" title="Caso Límite con el Email de GitHub">
+Con `scope="user:email"`, el endpoint `/user` de GitHub devuelve `email: null` para usuarios que no han configurado un email público. El fallback (`{username}-{id}@github.user`) crea un email de relleno. En producción, llamarías a `https://api.github.com/user/emails` con el token de acceso para obtener el email principal. El `GitHubAppClient` se encarga del intercambio del token por ti.
+</Notice>
+
+**Verificación:** Visita `/login` en tu navegador. El enlace "Sign in with GitHub" debería redirigir a `https://github.com/login/oauth/authorize?...`. Tras autorizar, deberías ser redirigido de vuelta y quedar logueado.
+
+### Paso 4: autenticación con email y contraseña
+
+El servicio `EmailAuth` gestiona la validación del registro y el login. Con Beforeware en marcha, los handlers simplemente escriben en `session['user_id']` (no hacen falta comprobaciones manuales de auth).
+
+**Archivo: `auth/email_auth.py`**
+
+```python
+import re
+from typing import Optional, Dict, Any, Tuple
+
+class EmailAuth:
+    @staticmethod
+    def validate_registration(username: str, email: str,
+                               password: str) -> Tuple[bool, str]:
+        """Validate registration input. Returns (is_valid, error_message)."""
+        if not username or len(username) < 3:
+            return False, "Username must be at least 3 characters"
+        if not email or not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', email):
+            return False, "Invalid email address"
+        if not password or len(password) < 8:
+            return False, "Password must be at least 8 characters"
+        if not re.search(r'[A-Z]', password) or not re.search(r'[0-9]', password):
+            return False, "Password must contain at least one uppercase letter and one number"
+        return True, ""
+
+    @staticmethod
+    def authenticate(email: str, password: str) -> Optional[Dict[str, Any]]:
+        """Authenticate user with email/password."""
+        from db.user_dao import UserDAO
+        return UserDAO.authenticate_email(email, password)
+```
+
+**Handlers de rutas en `main.py`:**
+
+```python
+@app.post('/auth/email/register')
+def email_register(req, username: str, email: str, password: str,
+                   confirm_password: str, csrf: str = ""):
+    session = req.session
+
+    # CSRF validation
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        return RedirectResponse('/register', status_code=303)
+
+    # Validate input
+    valid, error = EmailAuth.validate_registration(username, email, password)
+    if not valid:
+        return register_page(error=error, session=session)
+
+    if password != confirm_password:
+        return register_page(error="Passwords do not match", session=session)
+
+    # Create user
+    from db.user_dao import UserDAO
+    user_id = UserDAO.create_user(username=username, email=email, password=password)
+    if not user_id:
+        return register_page(error="Email or username already exists", session=session)
+
+    return RedirectResponse('/login?registered=1', status_code=303)
+
+@app.post('/auth/email/login')
+def email_login(req, email: str, password: str, csrf: str = ""):
+    session = req.session
+
+    # CSRF validation
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        return login_page(error="Invalid request", session=session)
+
+    user = EmailAuth.authenticate(email, password)
+    if not user:
+        return login_page(error="Invalid email or password", session=session)
+
+    AuthManager.login_user(session, user)
+    session['csrf'] = secrets.token_hex(32)
+    return RedirectResponse('/', status_code=303)
+```
+
+**Verificación:** Registra un usuario nuevo en `/register` y luego inicia sesión en `/login`. Comprueba que se te redirige a `/` y que la navegación muestra tu nombre de usuario.
+
+### Paso 5: protección CSRF
+
+FastHTML no tiene protección CSRF integrada. Añadimos un patrón de token aleatorio guardado en sesión que protege todos los formularios que modifican estado.
+
+El enfoque:
+1. Al iniciar sesión (email o GitHub), genera `session['csrf'] = secrets.token_hex(32)`
+2. Incluye `Input(type="hidden", id="csrf", value=session.get('csrf', ''))` en todos los formularios que hacen POST
+3. En cada handler POST, valida con `hmac.compare_digest(session.get('csrf', ''), csrf)`
+4. Si el token no coincide, rechaza la petición
+
+```python
+# Helper to inject CSRF hidden field into forms
+def csrf_field(session):
+    return Input(type="hidden", id="csrf", name="csrf",
+                 value=session.get('csrf', ''))
+
+# In any POST form:
+Form(
+    csrf_field(session),
+    Input(type="text", name="topic", ...),
+    Button("Generate Titles", type="submit"),
+    method="post", action="/generate"
+)
+
+# In any POST handler:
+@app.post('/generate')
+def generate_titles(req, topic: str, csrf: str = "", ...):
+    session = req.session
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        return Div("Invalid request", cls="text-red-600")
+    # ... rest of handler
+```
+
+<Notice type="warning" title="FastHTML No Tiene Protección CSRF Integrada">
+Este es un patrón DIY basado en la [guía de Marius Vach](https://blog.mariusvach.com/posts/fasthtml-csrf-protection). Todos los formularios que modifican estado (register, login, make-admin, delete-user, delete-history) necesitan el campo oculto `csrf`. No te lo saltes. Las acciones de administrador son objetivos de alto valor.
+</Notice>
+
+**Verificación:** Abre las herramientas de desarrollo de tu navegador en cualquier formulario, inspecciona el HTML y confirma que el campo oculto `csrf` está presente con un valor hexadecimal aleatorio. Envía un formulario sin él (o con un valor manipulado) y confirma que es rechazado.
+
+### Paso 6: control de acceso basado en roles y páginas de administración
+
+Los controles de administración usan el flag `is_admin` de la base de datos. La decisión de diseño clave: `is_admin` se consulta en la base de datos en cada petición (vía `UserDAO.is_user_admin()`), no se cachea en la sesión. Esto significa que degradar a un admin en la base de datos surte efecto inmediatamente.
+
+```python
+# In main.py -- admin route helper
+def require_admin(req):
+    """Check admin status from DB. Returns user_id or raises."""
+    user_id = get_auth(req)
+    if not UserDAO.is_user_admin(user_id):
+        raise HTTPException(403, "Admin access required")
+    return user_id
+
+# Admin dashboard
+@app.get('/admin')
+def admin_dashboard(req):
+    user_id = require_admin(req)
+    users = UserDAO.get_all_users()
+    return page_layout("Admin Dashboard",
+                      admin_dashboard_content(users),
+                      current_page="/admin", session=req.session)
+
+@app.post('/admin/make-admin')
+def make_admin(req, user_id: int, csrf: str = ""):
+    session = req.session
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        raise HTTPException(401, "Invalid CSRF token")
+    admin_id = require_admin(req)
+    UserDAO.set_admin(user_id, True)
+    return RedirectResponse('/admin', status_code=303)
+
+@app.post('/admin/delete-user')
+def delete_user(req, user_id: int, csrf: str = ""):
+    session = req.session
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        raise HTTPException(401, "Invalid CSRF token")
+    admin_id = require_admin(req)
+    if user_id == admin_id:
+        return RedirectResponse('/admin?error=cannot_delete_self', status_code=303)
+    UserDAO.delete_user(user_id)
+    return RedirectResponse('/admin', status_code=303)
+```
+
+Las páginas de administración incluyen:
+- **Panel de administración** (`/admin`): vista general con número de usuarios, registros recientes, estadísticas de generación
+- **Usuarios admin** (`/admin/users`): lista de todos los usuarios con acciones de hacer admin/eliminar
+- **Historial admin** (`/admin/history`): ver el historial de generación de todos los usuarios
+
+### Paso 7: actualizar los componentes de UI
+
+Los componentes de cabecera y layout ahora usan el parámetro `auth` inyectado por Beforeware.
+
+**Archivo: `components/header.py`**
+
+```python
+from fasthtml.common import *
+from db.user_dao import UserDAO
+
+def header(current_page="/", auth=None):
+    """Auth-aware navigation header."""
+    nav_items = [A("Home", href="/", cls="hover:text-blue-600")]
+
+    if auth:
+        nav_items.extend([
+            A("Title Generator", href="/title-generator",
+              cls="hover:text-blue-600"),
+            A("My History", href="/history",
+              cls="hover:text-blue-600"),
+        ])
+        # Admin link only for admins (DB check, not session)
+        if UserDAO.is_user_admin(auth):
+            nav_items.append(
+                A("Admin", href="/admin", cls="hover:text-red-600 font-semibold")
+            )
+        nav_items.append(
+            A("Logout", href="/logout", cls="hover:text-red-600")
+        )
+    else:
+        nav_items.extend([
+            A("Login", href="/login", cls="hover:text-blue-600"),
+            A("Register", href="/register", cls="hover:text-blue-600"),
+        ])
+
+    return Nav(
+        Div(
+            A("AI Title Generator", href="/", cls="text-xl font-bold"),
+            Div(*nav_items, cls="flex gap-4"),
+            cls="container mx-auto px-4 py-3 flex justify-between items-center"
+        ),
+        cls="bg-white shadow"
+    )
+```
+
+**Archivo: `components/page_layout.py`** (fíjate en el parámetro `auth`):
+
+```python
+from fasthtml.common import *
+from .header import header
+from .footer import footer
+
+def page_layout(title, content, current_page="/", auth=None):
+    return Html(
+        Head(
+            Title(title),
+            Meta(charset="UTF-8"),
+            Meta(name="viewport", content="width=device-width, initial-scale=1.0"),
+            Script(src="https://cdn.tailwindcss.com"),
+        ),
+        Body(
+            Div(
+                header(current_page, auth),
+                Main(
+                    Div(content, cls="container mx-auto px-4 py-8"),
+                    cls="flex-grow"
+                ),
+                footer(),
+                cls="flex flex-col min-h-screen"
+            )
+        )
+    )
+```
+
+### Paso 8: rutas protegidas -- generador de títulos e historial de usuario
+
+Con Beforeware gestionando la autenticación, estas rutas quedan protegidas automáticamente. No hace falta ninguna llamada manual a `require_auth()`.
+
+```python
+# Title generator -- protected by Beforeware
+@app.get('/title-generator')
+def title_generator_page(req):
+    auth = get_auth(req)
+    return page_layout("Title Generator",
+                      title_generator_form(),
+                      current_page="/title-generator", auth=auth)
+
+@app.post('/generate')
+def generate_titles(req, topic: str, platform: str, style: str,
+                    number: int, csrf: str = ""):
+    session = req.session
+    auth = get_auth(req)
+
+    # CSRF check
+    if not hmac.compare_digest(session.get('csrf', ''), csrf):
+        return title_generator_form(error="Invalid request")
+
+    # Generate titles (LLM call from Part 5)
+    from tools.title_generator import generate
+    titles = generate(topic, platform, style, number)
+
+    # Save to history with user_id
+    HistoryDAO.save_generation(auth, topic, platform, style, number, titles)
+
+    return title_generator_form(titles=titles, session=session, auth=auth)
+
+# User history -- shows only the logged-in user's records
+@app.get('/history')
+def history_page(req):
+    auth = get_auth(req)
+    records = HistoryDAO.get_user_history(auth)
+    return page_layout("My History",
+                      user_history_content(records),
+                      current_page="/history", auth=auth)
+
+# Admin history -- shows all users (admin check via DB)
+@app.get('/admin/history')
+def admin_history(req):
+    auth = require_admin(req)
+    records = HistoryDAO.get_all_history()
+    return page_layout("All History",
+                      admin_history_content(records),
+                      current_page="/admin/history", auth=auth)
+```
+
+### Paso 9: variables de entorno y ejecución de la app
+
+Crea tu archivo `.env`:
+
+```bash
+# .env
+SECRET_KEY=your-random-64-char-hex-string
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=YourStr0ngPassword
+DB_PATH=tools.db
+DEBUG=true
+SESSION_EXPIRY=604800
+DEFAULT_MODEL=openai/gpt-4o-mini
+```
+
+Instala las dependencias y ejecuta:
+
+```bash
+pip install python-fasthtml>=0.14,<0.15 python-dotenv
+python main.py
+```
+
+Abre `http://localhost:5001` en tu navegador. Deberías ver:
+- La landing page con opciones de login/registro
+- Tras iniciar sesión (email o GitHub), acceso al generador de títulos y a tu historial
+- El panel de administración si iniciaste sesión con las credenciales de admin
+
+<Notice type="info" title="Scope de GitHub">
+El cliente OAuth usa `scope="user:email"`, que es suficiente para recuperar el perfil y el email del usuario. La antigua combinación de scopes `read:user user:email` ya no es necesaria.
+</Notice>
+
+## Verificación y resolución de problemas
+
+### Problemas de versión e imports
+
+`python-fasthtml` 0.14.1 eliminó varios re-exports de `fasthtml.common`:
+
+| Qué se eliminó | Dónde importarlo ahora |
+|---|---|
+| `uvicorn` | `import uvicorn` directamente |
+| `Database` (apswutils) | `from fastlite import Database` |
+| componentes de `fastlite` | `from fastlite import *` |
+| componentes de `pico` | `from fasthtml.pico import picolink` |
+
+Si obtienes un `ImportError` tras actualizar, revisa estos imports primero. Es lo primero que se rompe al pasar de 0.6.x a 0.14.x.
+
+### Probar los flujos de autenticación
+
+FastHTML 0.14.1 añadió `FastHTMLTestClient` con decodificación de sesiones:
+
+```python
+from fasthtml.test import FastHTMLTestClient
+
+client = FastHTMLTestClient(app)
+
+# Test registration
+resp = client.post('/auth/email/register', data={
+    'username': 'testuser',
+    'email': 'test@example.com',
+    'password': 'TestPass123',
+    'confirm_password': 'TestPass123',
+    'csrf': ''  # bypass CSRF in tests or set session first
+})
+assert resp.status_code == 303
+
+# Test login
+resp = client.post('/auth/email/login', data={
+    'email': 'test@example.com',
+    'password': 'TestPass123',
+    'csrf': ''
+})
+assert resp.status_code == 303
+assert 'session' in resp.cookies
+```
+
+### Modos de fallo comunes
+
+<Accordion label="¿Cómo arreglo ./sesskey commiteado a git?" group="troubleshoot">
+Si `./sesskey` está commiteado a git, cualquiera que clone el repositorio obtiene tu clave de firma de sesiones. Añade `sesskey` a `.gitignore` inmediatamente y rota la clave borrando el archivo y reiniciando la app (o define `SECRET_KEY` explícitamente).
+</Accordion>
+
+<Accordion label="Error en el callback de GitHub OAuth" group="troubleshoot">
+La URL de callback debe ser absoluta: `http://localhost:5001/auth/github/callback` (no `/auth/github/callback`). `redir_url()` de FastHTML la construye a partir del host de la petición, así que funciona en desarrollo y en producción. Asegúrate de que la "Authorization callback URL" de tu OAuth App de GitHub coincide.
+</Accordion>
+
+<Accordion label="Colisión de nombre de usuario de GitHub al registrarse" group="troubleshoot">
+Si el nombre de usuario de GitHub colisiona con el `username` de un usuario existente de email/contraseña (que tiene una restricción UNIQUE), el insert de `find_or_create_github_user()` fallará. El `except` amplio lo captura y devuelve `None`, devolviendo al usuario a `/login`. En producción, gestiona esto con un fallback de nombre de usuario generado.
+</Accordion>
+
+<Accordion label="Un admin degradado sigue teniendo acceso" group="troubleshoot">
+Si cacheas `is_admin` en la sesión, las degradaciones no surten efecto hasta el próximo login. El código de este tutorial hace una consulta `UserDAO.is_user_admin()` a la base de datos en cada petición, así que las degradaciones son inmediatas. Si ves acceso de admin obsoleto, comprueba que tus rutas de administración llaman a `require_admin()` (consulta a BD) en lugar de leer de la sesión.
+</Accordion>
+
+<Accordion label="La app no arranca: SECRET_KEY no definida" group="troubleshoot">
+La configuración lanza `ValueError` si falta `SECRET_KEY`. Genera una: `python -c "import secrets; print(secrets.token_hex(32))"` y añádela a tu archivo `.env`.
+</Accordion>
+
+<Accordion label="Ataque de temporización en la comparación de contraseñas" group="troubleshoot">
+El código antiguo usaba `!=` para comparar contraseñas, lo cual no es de tiempo constante. El código actualizado usa `hmac.compare_digest()`, que tarda lo mismo independientemente de dónde difieran las cadenas. Esto evita la adivinación de contraseñas basada en temporización.
+</Accordion>
+
+### Protección contra fuerza bruta
+
+No hay limitación de tasa en `/auth/email/login` ni en el callback de OAuth. En producción, añade `slowapi` con `@limiter.limit("30/day")` en los endpoints de login, o pon `fail2ban` delante de tu proxy inverso. El paquete `fasthtml-admin` (AndreasThinks, GitHub) usa este patrón de serie.
+
+## Notas de producción
+
+### SQLite en producción
+
+Un VPS de instancia única es suficiente para SQLite. Activa el modo WAL para mejor concurrencia:
+
+```python
+conn.execute("PRAGMA journal_mode=WAL")
+```
+
+La sesión de cookie firmada significa que varios workers de uvicorn pueden compartir el estado de autenticación -- no hay un almacén de sesiones en el servidor que sincronizar. Si escalas más allá de una máquina, considera PostgreSQL vía `fastlite`.
+
+Para el despliegue, puedes [ejecutar tu app FastHTML en Docker](/docker-run-python/) o [desplegar la app con Dokploy](/es/dokploy-python-railpack-uv/). Un [VPS de Hetzner](https://go.bitdoze.com/hetzner) por ~5 EUR/mes maneja esta carga sin problemas. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) es otra opción económica con virtualización KVM.
+
+_Los precios de los VPS subieron en general en 2026 — si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="info" title="Paquetes de Autenticación de Terceros">
+Si necesitas verificación de email, restablecimiento de contraseña o un sistema de autenticación más completo, echa un vistazo a `fasthtml-admin` (AndreasThinks, 17 estrellas en GitHub, licencia MIT), que implementa registro con confirmación por email, autenticación basada en Beforeware, OAuth y backup/restauración de BD. `fasthtml-auth` en PyPI anuncia RBAC, gestión de sesiones y proveedores OAuth. Ambos son paquetes jóvenes -- pruébalos antes de confiar en ellos en producción. Para [endurecer tu servidor](/es/informe-seguridad-bsi-docker-ufw/) más allá de la autenticación a nivel de aplicación, consulta la checklist de seguridad del BSI.
+</Notice>
+
+## Conclusión
+
+Hemos construido un sistema completo de autenticación de usuarios en FastHTML para el Generador de Títulos con IA: GitHub OAuth mediante el `GitHubAppClient` integrado, registro con email/contraseña con hash seguro de contraseñas (PBKDF2 con 600k iteraciones), protección CSRF en todos los formularios, endurecimiento de sesiones con una gestión correcta de `secret_key` y controles de administrador basados en roles con consultas a la base de datos en cada petición. El patrón Beforeware mantiene la lógica de autenticación en un solo lugar en lugar de dispersa por cada handler de ruta.
+
+Desde aquí, los siguientes pasos naturales son la verificación de email, el restablecimiento de contraseña y el acceso por equipos -- pero eso es otro tutorial. El paquete `fasthtml-admin` cubre parte de ese terreno si lo necesitas ya.
+
+<Button text="Volver a la serie FastHTML" link="/es/empezar-fasthtml/" variant="outline" color="blue" size="md" />

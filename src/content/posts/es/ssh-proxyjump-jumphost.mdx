@@ -1,0 +1,541 @@
+---
+date: 2025-01-17
+lastmod: 2026-08-10T00:00:00Z
+translationKey: "ssh-proxyjump-jumphost"
+title: "Cómo acceder a servidores remotos con SSH ProxyJump y jump hosts"
+meta_title: "SSH ProxyJump y jump hosts: acceso seguro a servidores remotos"
+description: "Aprende a configurar SSH ProxyJump y un jump host para acceder de forma segura a servidores remotos. Configuración paso a paso del host bastión, refuerzo de seguridad y solución de problemas."
+image: "@assets/images/25/01/ssh-proxyjump-jumphost.jpg"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["proxyjump", "jumphost", "openssh"]
+slug: "ssh-proxyjump-jumphost"
+canonical: "https://www.bitdoze.com/es/ssh-proxyjump-jumphost/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+
+Acceder a servidores escondidos en una red privada no debería requerir un dispositivo VPN, un plugin de navegador ni tres horas depurando el firewall. Los jump hosts SSH y la función integrada ProxyJump lo resuelven con un solo comando y cero software adicional.
+
+Un jump host es un único servidor reforzado expuesto a internet que actúa como relevo hacia tus máquinas internas. En lugar de dejar todos los servidores accesibles desde la internet pública (que es como dejar todas las puertas sin cerrar), lo bloqueas todo detrás de una única entrada bien vigilada. ProxyJump, integrado en OpenSSH desde la versión 7.3, convierte ese inicio de sesión en dos pasos en una única conexión transparente. Antes de usar jump hosts, yo dependía de [medidas básicas de seguridad SSH](https://www.bitdoze.com/secure-ssh-server-linux/), que dejaron de ser suficientes en cuanto los servidores empezaron a repartirse entre varias redes privadas.
+
+Esta guía cubre el panorama completo: cómo funcionan los jump hosts, cómo configurar ProxyJump con el archivo de configuración SSH, redirección de puertos y multiplexación a través de jump hosts, refuerzo de seguridad para servidores bastión y solución de los fallos con los que realmente te vas a encontrar.
+
+![Ventajas de usar jump hosts SSH y ProxyJump para un acceso seguro a servidores](@assets/images/25/01/benefits-jumphosts.png)
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener lo siguiente:
+
+<ListCheck>
+<ul>
+<li>Un VPS o servidor dedicado que actúe como jump host (1 vCPU, 512 MB de RAM y 10 GB de disco son suficientes; el ancho de banda del tráfico SSH es despreciable)</li>
+<li>OpenSSH 7.3+ en tu máquina cliente (para soporte de ProxyJump; la mayoría de las distribuciones modernas cumplen)</li>
+<li>Un par de claves SSH generado (se recomienda ed25519: `ssh-keygen -t ed25519`)</li>
+<li>Familiaridad con los <a href="https://www.bitdoze.com/linux-commands/">comandos básicos de Linux</a></li>
+<li>Acceso root o sudo en el jump host para editar sshd_config y las reglas del firewall</li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="Comprueba tu versión de OpenSSH">
+Ejecuta `ssh -V` en tu cliente. Cualquier versión a partir de la 7.3 (2016) soporta ProxyJump. Ubuntu 24.04 incluye la 9.6p1, Debian 12 incluye la 9.2p1; ambas valen. En el lado del servidor, OpenSSH 9.8+ te da protección contra abusos integrada (PerSourcePenalties), que se trata más adelante en esta guía.
+</Notice>
+
+Un jump host apenas necesita recursos. Un [Hetzner CX22](https://go.bitdoze.com/hetzner) por unos 4 €/mes es más que suficiente. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) y [Vultr](https://go.bitdoze.com/vultr) son alternativas si necesitas otra región u otro modelo de facturación.
+
+_Los precios de los VPS subieron en todo el sector en 2026 — si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+## Entendiendo lo básico: ¿qué es SSH?
+
+SSH (Secure Shell) es un protocolo cifrado para ejecutar comandos en una máquina remota como si estuvieras sentado frente a ella. Cada pulsación de tecla viaja por un túnel cifrado — nadie en la red puede leerla.
+
+Uso básico:
+
+```bash
+ssh username@remote-server
+# For example:
+ssh john@192.168.1.100
+```
+
+La conexión sigue un modelo cliente-servidor: tu máquina inicia, la máquina remota autentica y, a partir de ahí, tienes una shell. Si eres nuevo en la administración de servidores, revisa cómo [securizar tu servidor SSH](https://www.bitdoze.com/secure-ssh-server-linux/) antes de exponer nada a internet.
+
+La conexión directa funciona bien cuando el destino tiene una IP pública y puedes alcanzar el puerto 22. ¿Y qué pasa con los servidores en subredes privadas sin dirección pública? Ahí es donde entran los jump hosts.
+
+## ¿Qué es un jump host (u host bastión)?
+
+Un jump host (también llamado host bastión) es un servidor dedicado que actúa como puerta de enlace única a tu red interna. Piensa en él como la recepción segura de un edificio: todo el mundo entra por una única entrada bien vigilada en lugar de colarse por puertas aleatorias.
+
+Esta es una configuración típica:
+
+```
+Internet -> Jump Host -> Internal Servers
+(Public)    (Public)    (Private)
+```
+
+![Configuración típica de un jump host SSH mostrando el flujo Internet, Jump Host y servidores internos](@assets/images/25/01/jumphost1.png)
+
+Para alcanzar un servidor interno a través de un jump host de forma manual, harías:
+
+```bash
+# First, connect to the jump host
+ssh jumpuser@jump-host.example.com
+
+# Then, from the jump host, connect to the internal server
+ssh internaluser@internal-server
+```
+
+Este proceso en dos pasos funciona, pero es engorroso. Tienes que gestionar credenciales en el jump host, las sesiones van anidadas y las transferencias de archivos requieren saltos extra. Las principales razones para usar un jump host a pesar de la fricción:
+
+1. **Punto único de exposición**: solo el jump host tiene IP pública, lo que reduce tu superficie de ataque a una máquina
+2. **Control de acceso centralizado**: todas las conexiones pasan por un mismo lugar, lo que facilita conceder y revocar accesos
+3. **Registro de auditoría**: puedes rastrear quién se conectó a qué y cuándo, todo desde un solo log
+4. **Reglas de firewall simplificadas**: solo el jump host necesita tener SSH abierto a internet
+
+## Presentamos SSH ProxyJump: una forma más sencilla de usar jump hosts
+
+ProxyJump se introdujo en OpenSSH 7.3 (2016) y eliminó el baile de dos pasos. En lugar de conectarte manualmente al jump host y luego a tu destino, lo haces todo en un solo comando:
+
+```bash
+# Old way (two separate connections):
+ssh jumpuser@jumphost
+ssh internaluser@internal-server
+
+# With ProxyJump (one command):
+ssh -J jumpuser@jumphost internaluser@internal-server
+```
+
+La opción `-J` le dice a SSH que haga túnel a través del jump host de forma transparente. Tu sesión se conecta directamente al servidor de destino, pero el tráfico se reenvía a través del bastión. Desde la perspectiva del usuario se siente como una sesión SSH normal.
+
+Puedes encadenar varios jump hosts con comas:
+
+```bash
+# Going through two jump hosts
+ssh -J user1@jump1.com,user2@jump2.com target_user@final-server.com
+```
+
+<Notice type="info" title="scp y sftp también admiten -J">
+Desde OpenSSH 8.0 (2019), `scp` y `sftp` también aceptan la opción `-J`. Copia archivos a través de un jump host con:
+`scp -J user@jump local-file.txt target-user@target:/path/`
+</Notice>
+
+<Notice type="info" title="ProxyCommand para clientes antiguos">
+Si estás atascado con un cliente anterior a la 7.3, el equivalente heredado es:
+`ssh -o ProxyCommand="ssh -W %h:%p user@jump" user@target`
+Hoy en día rara vez hace falta — incluso CentOS 7 incluye OpenSSH 7.4.
+</Notice>
+
+<Notice type="warning" title="Evita el reenvío de agente con jump hosts">
+No uses `ForwardAgent yes` con jump hosts. Si el jump host se ve comprometido, un atacante puede secuestrar tu agente reenviado y autenticarse como tú en otros servidores. ProxyJump es más seguro porque tus claves privadas nunca salen de tu máquina local — el jump host solo reenvía tráfico cifrado.
+</Notice>
+
+OpenSSH viene integrado en Windows 10 y 11 (Configuración > Características opcionales > Cliente OpenSSH). ProxyJump funciona igual en Windows.
+
+## Configuración de SSH ProxyJump con el archivo de configuración SSH
+
+Escribir `-J` cada vez se hace pesado rápido. El archivo `~/.ssh/config` hace que ProxyJump sea persistente:
+
+```bash
+# Jump host configuration
+Host jumphost
+    HostName jump.example.com
+    User admin
+    IdentityFile ~/.ssh/jump_key
+    IdentitiesOnly yes
+
+# Target server using the jump host
+Host internal-server
+    HostName 192.168.1.100
+    User ubuntu
+    ProxyJump jumphost
+    IdentityFile ~/.ssh/internal_key
+    IdentitiesOnly yes
+```
+
+Después de esto, conectar es simplemente:
+
+```bash
+ssh internal-server
+```
+
+Puedes usar comodines para varios servidores internos:
+
+```bash
+# In ~/.ssh/config
+Host *.internal
+    ProxyJump jumphost
+    IdentitiesOnly yes
+```
+
+Ahora `ssh server1.internal` y `ssh server2.internal` pasan automáticamente por el jump host.
+
+Aquí `IdentitiesOnly yes` es importante — le dice a SSH que use solo la clave configurada explícitamente, no todas las claves cargadas en ssh-agent. Sin esto, SSH prueba las claves una a una y te encontrarás con el error [«too many authentication failures»](https://www.bitdoze.com/fix-ssh-too-many-authentication-failures/) en cuanto acumules suficientes claves en tu agente.
+
+Asegúrate de que tu archivo de configuración tenga los permisos correctos:
+
+```bash
+chmod 600 ~/.ssh/config
+```
+
+<Notice type="info" title="Verificación de claves de host más segura para flujos automatizados">
+Para conexiones con scripts o de CI donde no puedes aceptar claves de host de forma interactiva, usa `StrictHostKeyChecking=accept-new` en lugar de `=no`. Acepta automáticamente las claves de host nuevas pero **rechaza las claves cambiadas**, así que sigues recibiendo un aviso si la clave de un servidor cambia (lo que podría indicar un ataque MITM). Disponible desde OpenSSH 7.6.
+
+`ssh -o StrictHostKeyChecking=accept-new -J user@jump target@server`
+</Notice>
+
+## Redirección de puertos a través de jump hosts SSH
+
+ProxyJump funciona con las opciones de redirección de puertos de SSH, lo que te permite acceder a servicios internos que no son SSH: bases de datos, interfaces web, paneles de monitorización. Si quieres profundizar en el tunelizado, consulta las [técnicas de redirección de puertos SSH](/es/tuneles-ssh-linux/).
+
+### Redirección local de puertos (-L)
+
+Accede a una base de datos PostgreSQL en un servidor interno desde tu máquina local:
+
+```bash
+ssh -L 5432:db.internal:5432 -J user@jump target-user@target
+```
+
+Esto vincula el puerto local 5432 al puerto de la base de datos en `db.internal` (al que el destino puede llegar). Conéctate a `localhost:5432` con cualquier cliente PostgreSQL y el tráfico se tuneliza a través del jump host.
+
+### Redirección remota de puertos (-R)
+
+Expón un servicio local a la red interna:
+
+```bash
+ssh -R 8080:localhost:80 -J user@jump target-user@target
+```
+
+Esto hace que tu puerto local 80 sea accesible en el puerto 8080 del destino.
+
+### Proxy SOCKS (-D)
+
+Navega por la web a través de la red interna:
+
+```bash
+ssh -D 1080 -J user@jump target-user@target
+```
+
+Configura tu navegador para usar `localhost:1080` como proxy SOCKS5 y todo el tráfico se enrutará a través del jump host y el servidor de destino.
+
+## Avanzado: ProxyJump condicional con Match exec
+
+Si trabajas desde varias ubicaciones (LAN de la oficina, casa, VPN), puede que quieras un enrutado diferente: conexión directa desde la oficina y jump host desde cualquier otro lugar. `Match exec` se encarga de esto:
+
+```ssh-config
+Match host internal-* !exec "ip addr show en0 | grep -q 192.168.1."
+    ProxyJump home-bastion
+
+Host internal-*
+    ProxyJump office-bastion
+```
+
+<Notice type="info" title="Match exec se ejecuta en cada conexión">
+El comando `exec` se ejecuta en tu cliente antes de cada conexión SSH. Se adapta automáticamente — no hace falta cambiar nada manualmente. Sustituye `en0` y `192.168.1.` por tu interfaz y subred reales. En Linux la interfaz suele ser `eth0` o `wlan0`.
+</Notice>
+
+## Avanzado: multiplexación SSH con jump hosts
+
+Si te conectas a través de un jump host con frecuencia (Ansible, rsync, varios terminales), la multiplexación ahorra mucho tiempo. SSH puede reutilizar una única conexión al jump host en lugar de volver a autenticarse cada vez:
+
+```ssh-config
+Host jumphost
+    HostName jump.example.com
+    User admin
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 10m
+```
+
+`ControlMaster auto` le dice a SSH que cree un socket persistente en la primera conexión y lo reutilice en las siguientes. `ControlPersist 10m` mantiene el socket abierto durante 10 minutos después de que se cierre la última sesión.
+
+También puedes añadir multiplexación en el lado del destino:
+
+```ssh-config
+Host *.internal
+    ProxyJump jumphost
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 5m
+```
+
+El resultado: el primer `ssh internal-server` se autentica con normalidad. Cualquier conexión a `*.internal` en los siguientes 5 minutos salta directamente por el túnel ya abierto. Esto hace que los playbooks de Ansible a través de jump hosts sean drásticamente más rápidos.
+
+## Refuerzo de seguridad para jump hosts SSH
+
+Tu jump host es la puerta principal a tu infraestructura. Si se ve comprometido, todos los servidores internos son potencialmente alcanzables. Esta sección explica cómo protegerlo correctamente.
+
+![Lista de comprobación de refuerzo de seguridad para la configuración de un jump host SSH](@assets/images/25/01/enhance-jumphost-security.png)
+
+### sshd_config para hosts bastión
+
+Pon esto en `/etc/ssh/sshd_config.d/50-bastion.conf` en tu jump host:
+
+```bash
+# /etc/ssh/sshd_config.d/50-bastion.conf
+
+# Authentication
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+
+# Session limits
+MaxSessions 2
+MaxStartups 10:30:60
+UnusedConnectionTimeout 2m
+
+# Forwarding (allowed for jump users, restricted via Match blocks below)
+AllowTcpForwarding yes
+X11Forwarding no
+PermitTunnel no
+AllowAgentForwarding no
+```
+
+<Notice type="warning" title="No ejecutes Docker en tu bastión">
+Docker manipula iptables directamente y puede abrir agujeros en tus reglas de firewall cuidadosamente diseñadas. Mantén el jump host ligero — SSH y nada más. Si usas Docker en otra parte de tu red, lee sobre [cómo Docker se salta las reglas del firewall](/es/docker-evita-firewall/) para entender el riesgo.
+</Notice>
+
+### PerSourcePenalties: protección contra abusos integrada
+
+<Notice type="success" title="Integrado desde OpenSSH 9.8">
+Desde OpenSSH 9.8 (julio de 2024), sshd tiene penalizaciones de IP integradas para fallos de autenticación repetidos, conexiones incompletas y disparadores de fallos. Está **activado por defecto** — no necesitas configurar nada. Reduce la necesidad de fail2ban en los hosts bastión, aunque funcionan bien juntos como protección adicional.
+</Notice>
+
+PerSourcePenalties bloquea temporalmente las IP que muestran patrones de ataque. Los umbrales por defecto valen para la mayoría de las configuraciones. Puedes ajustarlos:
+
+```bash
+# In /etc/ssh/sshd_config.d/50-bastion.conf (optional)
+PerSourcePenalties penalty=crash:2h,authfail:1h,noauth:1h
+PerSourcePenaltyExemptList 10.0.0.0/8
+```
+
+### Usuarios de salto dedicados con bloques Match
+
+Crea un grupo restringido para los usuarios de salto en el bastión:
+
+```bash
+# In /etc/ssh/sshd_config.d/50-bastion.conf
+Match Group jumpusers
+    AllowTcpForwarding yes
+    X11Forwarding no
+    PermitTunnel no
+    MaxSessions 2
+    AuthenticationMethods publickey
+```
+
+Para cuentas de servicio que no sean de salto (copias de seguridad, monitorización), restríngelas aún más:
+
+```bash
+Match User backup
+    DisableForwarding yes
+    PermitTTY no
+    ForceCommand /usr/local/bin/authorized-backup
+```
+
+Crea el grupo y el usuario:
+
+```bash
+sudo groupadd jumpusers
+sudo usermod -aG jumpusers your-jump-user
+```
+
+### Configuración del firewall
+
+Reglas UFW para el jump host — deniega todo excepto SSH desde IP conocidas:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from 203.0.113.50/32 to any port 22
+sudo ufw enable
+sudo ufw status verbose
+```
+
+Sustituye `203.0.113.50` por la IP de tu oficina o casa. Si tu IP cambia con frecuencia, considera una VPN o una regla de permiso basada en DNS dinámico.
+
+### Buenas prácticas de autenticación
+
+Genera una clave ed25519 robusta:
+
+```bash
+ssh-keygen -t ed25519 -a 100
+```
+
+La opción `-a 100` aumenta las rondas de KDF, lo que ralentiza los ataques de fuerza bruta contra el archivo de la clave. Nota: solo tiene efecto si pones una frase de contraseña en la clave. Pon siempre una frase de contraseña.
+
+Para bastiones de alta seguridad, considera claves hardware FIDO2 (`ed25519-sk` o `ecdsa-sk`):
+
+```bash
+ssh-keygen -t ed25519-sk -O resident
+```
+
+Esto requiere una clave de seguridad hardware (YubiKey, etc.) para cada autenticación. El material de la clave privada permanece en el token hardware — incluso si el bastión se ve comprometido, la clave no puede extraerse.
+
+### Mantén tu bastión actualizado
+
+- Ejecuta `sudo apt update && sudo apt upgrade -y` con regularidad (o configura `unattended-upgrades`)
+- Monitoriza los logs de SSH: `journalctl -u sshd --since -1h`
+- Revisa las claves autorizadas periódicamente
+- Mantén el host ligero — sin paquetes extra, sin servicios extra
+
+Para prevención de intrusiones más allá de PerSourcePenalties, considera [securizar tu VPS con CrowdSec](/es/crowdsec-servidor-seguro/).
+
+## Verificación: prueba tu configuración
+
+No esperes a producción para encontrar problemas. Prueba tu configuración antes de depender de ella.
+
+<Notice type="info" title="Prueba siempre la configuración de sshd antes de reiniciar">
+Ejecuta `sudo sshd -t` antes de `sudo systemctl restart sshd`. Un error de sintaxis en tu configuración puede dejarte fuera de tu host bastión. Si estás haciendo cambios a través del propio SSH, mantén una segunda sesión abierta mientras editas.
+</Notice>
+
+```bash
+# Check OpenSSH version (client and server)
+ssh -V
+
+# Dump the effective config for a host alias
+ssh -G internal-server
+
+# Test connection with verbose output
+ssh -vv -J jumpuser@jump targetuser@target
+
+# Verify jump host sshd settings
+sudo sshd -T | grep -E 'AllowTcpForwarding|PermitTunnel|MaxSessions|PerSourcePenalties'
+
+# Test config syntax without restarting
+sudo sshd -t
+
+# Check that the jump users group exists
+getent group jumpusers
+```
+
+Si `ssh -G internal-server` muestra `proxyjump jumphost` en la salida, tu configuración se está leyendo correctamente. Si no muestra nada, revisa la ruta y los permisos de tu archivo de configuración.
+
+## Solución de problemas de conexiones SSH ProxyJump
+
+### Conexión rechazada
+
+```bash
+ssh: connect to host jump-host port 22: Connection refused
+```
+
+Comprueba si sshd está en ejecución y el puerto está abierto:
+
+```bash
+sudo systemctl status sshd
+sudo ufw status
+# or
+sudo iptables -L -n
+
+# Test the port directly
+nc -zv jump-host 22
+```
+
+Si el puerto está abierto pero las conexiones se rechazan, revisa `/var/log/auth.log` en busca de errores de arranque. Para más información sobre cómo comprobar puertos, consulta [cómo comprobar puertos remotos](https://www.bitdoze.com/check-remote-port-in-linux-nc/).
+
+### Problemas de autenticación
+
+```bash
+Permission denied (publickey)
+```
+
+Verifica los permisos de las claves y que se ofrece la clave correcta:
+
+```bash
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_ed25519
+chmod 644 ~/.ssh/id_ed25519.pub
+
+# Check which keys SSH is trying
+ssh -vv -J jumpuser@jumphost targetuser@target 2>&1 | grep "Offering\|Trying"
+```
+
+Si ves que se prueban demasiadas claves, añade `IdentitiesOnly yes` al bloque Host correspondiente en `~/.ssh/config`. Esta es la solución más común para el error [«too many authentication failures»](https://www.bitdoze.com/fix-ssh-too-many-authentication-failures/).
+
+### ProxyJump no funciona
+
+```bash
+# Check SSH version (needs 7.3+)
+ssh -V
+
+# Dump effective config for the host
+ssh -G internal-server
+
+# Test with full verbose output
+ssh -vvv -J jumpuser@jumphost targetuser@target
+```
+
+Busca líneas como `proxyconnect: establishing to jump.example.com:22` en la salida detallada. Si no ves que se invoque ProxyJump, puede que la sintaxis de tu configuración sea incorrecta.
+
+Errores comunes de configuración:
+
+```bash
+# Wrong keywords (case-sensitive):
+Host jumphost
+    Hostname jump.example.com   # WRONG — should be HostName
+    Username admin              # WRONG — should be User
+```
+
+### Permiso denegado tras un cambio de clave de host
+
+Si el jump host o el destino fueron reinstalados, verás un aviso sobre el cambio de la clave de host:
+
+```bash
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+```
+
+Si el cambio es esperado (reinstalación del servidor, migración), elimina la clave antigua:
+
+```bash
+ssh-keygen -R jump-host.example.com
+```
+
+Después vuelve a conectarte y acepta la nueva clave. Si el cambio no era esperado, investiga antes de continuar — podría indicar un ataque de intermediario (man-in-the-middle).
+
+### Conectividad de red
+
+```bash
+# Basic connectivity
+ping jump-host
+
+# Port check
+nc -zv jump-host 22
+
+# Route trace
+traceroute jump-host
+```
+
+Si puedes alcanzar el jump host pero no el destino interno, el problema probablemente esté en el lado del jump host — revisa sus reglas de firewall, el ajuste `AllowTcpForwarding` y que el servidor interno sea alcanzable desde la red del jump host.
+
+## Conclusión
+
+Los jump hosts SSH y ProxyJump son la forma estándar de acceder a servidores en redes privadas sin exponerlo todo a internet. Aquí tienes la referencia rápida:
+
+```bash
+# One-time connection
+ssh -J jumpuser@jumphost targetuser@internal-server
+
+# Persistent config (~/.ssh/config)
+Host internal-server
+    HostName internal-server
+    User targetuser
+    ProxyJump jumphost
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/internal_key
+```
+
+Puntos clave:
+
+- Un único punto de entrada reforzado es mejor que exponer todos los servidores
+- ProxyJump hace el salto transparente — `ssh internal-server` y estás dentro
+- `~/.ssh/config` con comodines maneja decenas de servidores con una sola regla
+- Protege el bastión: sin login de root, sin contraseñas, sin Docker, servicios mínimos
+- OpenSSH 9.8+ te da PerSourcePenalties gratis — úsalo
+- Prueba con `ssh -G` y `ssh -vv` antes de confiar en la configuración
+
+Si gestionas varios servidores, los [mejores paneles autoalojados](https://www.bitdoze.com/best-self-hosted-panels/) pueden ayudarte con el panorama general, y la [referencia de comandos de Linux](https://www.bitdoze.com/linux-commands/) cubre las herramientas que usarás junto a SSH. Para gestionar conexiones SSH desde una GUI, [Nexterm](/es/instalar-nexterm-docker/) merece un vistazo.
+
+<Button text="Profundiza en el tunelizado SSH" link="/es/tuneles-ssh-linux/" variant="outline" color="blue" size="md" icon="arrow-right" />

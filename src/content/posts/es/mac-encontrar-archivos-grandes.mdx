@@ -1,0 +1,564 @@
+---
+date: 2025-01-10
+lastmod: 2026-08-09T00:00:00Z
+translationKey: "mac-find-big-files"
+title: "Encuentra los archivos más grandes de tu Mac (script sencillo y herramientas)"
+meta_title: "Archivos grandes en Mac: script, Finder y Terminal"
+description: "Encuentra y elimina archivos grandes en tu Mac con un script Bash gratuito, la búsqueda de Finder, mdfind y ncdu. Libera espacio en macOS Sequoia y Tahoe con consejos de limpieza seguros."
+image: "@assets/images/25/01/find-big-file.jpg"
+categories: ["tools"]
+authors: ["Dragos"]
+tags: ["mac", "bash", "disk-space"]
+canonical: "https://www.bitdoze.com/es/mac-encontrar-archivos-grandes/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+¿Te estás quedando sin espacio en disco en tu Mac y no sabes a dónde ha ido a parar todo? No eres el único. Las propias herramientas de almacenamiento de Apple en macOS Sequoia y Tahoe te dan una visión general, pero a menudo ocultan a los verdaderos culpables: modelos de IA huérfanos, snapshots de Time Machine y clones de APFS que reportan tamaños engañosos. Las apps de terceros de «limpieza de disco» cobran suscripciones por lo que unos pocos comandos de terminal hacen gratis.
+
+Esta guía cubre cinco formas de encontrar archivos grandes en Mac: una búsqueda en Finder sin configuración, el CLI instantáneo `mdfind` de Spotlight, un script Bash mejorado para análisis completos del sistema, herramientas CLI interactivas modernas y los devoradores de espacio ocultos que la mayoría de las guías ignoran. Todo lo descrito aquí funciona en macOS Sequoia 15.x y Tahoe (macOS 26).
+
+<Notice type="info" title="Apple Intelligence usa ~7 GB de disco">
+macOS Sequoia 15.3+ almacena los recursos de Apple Intelligence localmente. Puedes ver el uso de almacenamiento en Ajustes del Sistema &gt; General &gt; Almacenamiento (haz clic en el icono de información junto a macOS). Los métodos basados en terminal, como el script de abajo, siguen dándote el panorama completo de todo lo que consume tu disco, incluidos archivos que Ajustes del Sistema no muestra.
+</Notice>
+
+Si buscas apps gratuitas para Mac más allá de la limpieza de disco, echa un vistazo a la [sección de apps para Mac de toolhunt.net](https://toolhunt.net/mac/).
+
+## Método rápido: búsqueda en Finder (sin Terminal)
+
+La forma más sencilla de encontrar archivos grandes usa la búsqueda integrada de Finder. Sin Terminal, sin scripts, sin instalaciones. Es suficiente para la mayoría de las limpiezas ocasionales.
+
+<ListCheck>
+<ul>
+<li>Abre Finder y pulsa <code>Cmd + F</code></li>
+<li>Haz clic en «Este Mac» para buscar en todo el disco (no solo en la carpeta actual)</li>
+<li>Haz clic en el primer desplegable → selecciona «Tamaño de archivo»</li>
+<li>Configura la condición como «es mayor que»</li>
+<li>Introduce un umbral: <code>1 GB</code> (ajústalo a 500 MB en discos pequeños, o a 5 GB si solo quieres los mayores infractores)</li>
+<li>Haz clic en la cabecera de la columna «Tamaño» para ordenar los resultados de mayor a menor</li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="Consejos de umbral">En un disco de 256 GB, empieza con 500 MB. En un disco de 1 TB o más, empieza con 1 GB. Obtendrás una lista manejable en lugar de cientos de resultados.</Notice>
+
+La búsqueda de Finder tiene límites: no muestra directorios ocultos (`~/Library`, `~/.ollama`), archivos del sistema ni archivos dentro de paquetes de apps. Para esos casos necesitas métodos de Terminal.
+
+## CLI de Spotlight: `mdfind` para resultados instantáneos
+
+`mdfind` consulta el índice de Spotlight, por lo que es casi instantáneo en comparación con recorrer el sistema de archivos con `find`. Es la forma más rápida de localizar archivos grandes si la indexación de Spotlight está activada.
+
+<Tabs>
+<Tab name="Buscar archivos > 1 GB">
+```bash
+# Find all files > 1 GB using Spotlight index (near-instant)
+mdfind "kMDItemFSSize > 1000000000" -onlyin ~/ 2>/dev/null | \
+  while IFS= read -r f; do
+    stat -f '%z %N' "$f" 2>/dev/null
+  done | sort -rn | head -20
+```
+</Tab>
+<Tab name="Buscar archivos > 500 MB">
+```bash
+# Find all files > 500 MB in your home directory
+mdfind "kMDItemFSSize > 500000000" -onlyin ~/ 2>/dev/null | \
+  while IFS= read -r f; do
+    stat -f '%z %N' "$f" 2>/dev/null
+  done | sort -rn | head -20
+```
+</Tab>
+</Tabs>
+
+La salida muestra los tamaños en bytes y las rutas completas, ordenados de mayor a menor. Puedes canalizarla a través de `numfmt --to=iec` para obtener tamaños legibles, aunque `stat` en macOS no incluye el `numfmt` de GNU por defecto.
+
+<Notice type="warning" title="Comprueba primero el estado de Spotlight">Si `mdfind` devuelve resultados vacíos o incompletos, Spotlight puede estar desactivado o reindexando. Compruébalo con:<br/><br/><code>mdutil -s /</code><br/><br/>Si indica que la indexación está desactivada, reactívala con:<br/><br/><code>sudo mdutil -E /</code><br/><br/>Reconstruir el índice tarda entre 10 y 30 minutos según el tamaño del disco.</Notice>
+
+**Ojo:** `mdfind` solo encuentra archivos que Spotlight ha indexado. Algunos directorios del sistema y discos externos pueden no estar indexados. Para un análisis exhaustivo, usa el script Bash de abajo.
+
+## El script Bash: análisis completo del sistema
+
+Este es el método principal: un script mejorado y optimizado para macOS que analiza tu sistema de archivos, informa del uso del disco y lista los archivos más grandes. La versión original de este script tenía problemas con los permisos del macOS moderno y analizaba discos externos. Esta versión corrige ambas cosas.
+
+### Requisito previo: acceso total al disco
+
+Desde macOS Mojave (10.14), ni siquiera `sudo` puede acceder a ciertos directorios de usuario si Terminal no tiene **acceso total al disco** (Full Disk Access). Sin él, el script omite silenciosamente árboles de directorios enteros. El `2>/dev/null` oculta los errores de «Operation not permitted».
+
+<Notice type="error" title="Requerido: acceso total al disco">Sin este ajuste, el script omite silenciosamente ~/Library, los adjuntos de Mail, Mensajes, las bases de datos de Fotos y otros archivos grandes. Obtendrás resultados incompletos sin saberlo.</Notice>
+
+**Concede acceso total al disco:**
+
+1. Abre **Ajustes del Sistema > Privacidad y seguridad > Acceso total al disco**
+2. Haz clic en el botón **+**
+3. Navega a `/Applications/Utilities/Terminal.app` (o tu terminal preferida, como [Ghostty](/es/terminal-ghostty/) o [WezTerm](/es/instalar-wezterm-mac/))
+4. Actívalo
+5. **Cierra y vuelve a abrir** la terminal para que los cambios surtan efecto
+
+<ListCheck>
+<ul>
+<li>macOS 12 (Monterey) o posterior</li>
+<li>Terminal.app (o Ghostty/WezTerm) añadido a Acceso total al disco</li>
+<li>Homebrew instalado (lo necesitarás después para herramientas CLI como <code>dust</code> y <code>gdu</code>). Instálalo desde <a href="https://brew.sh" target="_blank" rel="noopener">brew.sh</a>.</li>
+</ul>
+</ListCheck>
+
+### El script mejorado
+
+Cambios clave respecto al original:
+- Analiza tu **directorio personal** por defecto (donde está la mayoría de los archivos de usuario), con la opción `--all` para usuarios avanzados
+- Usa `-x` para quedarse en un solo sistema de archivos (no se adentra en discos externos ni montajes de red)
+- Excluye directorios ruidosos que hacen perder tiempo de análisis
+- Procesamiento de la salida más seguro con `IFS=$'\t'`
+- Añade una comprobación de snapshots de Time Machine al final
+
+```bash
+#!/bin/bash
+
+# Find the largest files on your Mac
+# Usage: ./find_large_files.sh [number_of_files]
+#        ./find_large_files.sh --all [number_of_files]  (scan entire system)
+
+# Parse arguments
+scan_path="$HOME"
+num_files=20
+
+if [[ "$1" == "--all" ]]; then
+    scan_path="/"
+    shift
+fi
+
+if [[ -n "$1" && "$1" =~ ^[0-9]+$ ]]; then
+    num_files=$1
+fi
+
+# Print disk space information
+echo "==========================================="
+echo "DISK SPACE INFORMATION"
+echo "==========================================="
+df -h "$scan_path" | awk 'NR==2 {
+    printf "Total Space: %s\n", $2
+    printf "Used Space:  %s\n", $3
+    printf "Free Space:  %s\n", $4
+    printf "Usage:       %s\n", $5
+}'
+echo "==========================================="
+echo
+
+# Build exclusion list. Skip directories that waste time or produce noise
+excludes=(
+    -not \( -path "/System/*" -prune \)
+    -not \( -path "/Volumes/*" -prune \)
+    -not \( -path "/private/var/vm/*" -prune \)
+    -not \( -path "/private/var/folders/*" -prune \)
+    -not \( -path "*/Library/Caches/*" -prune \)
+    -not \( -path "*/Library/Containers/*" -prune \)
+    -not \( -path "*/node_modules/*" -prune \)
+)
+
+echo "Searching for the $num_files largest files..."
+echo "Scanning: $scan_path"
+echo "This may take a minute on large drives."
+echo
+
+# Create temporary file for results
+tmp_file=$(mktemp)
+
+# Run the scan. -x keeps us on one filesystem
+# sudo is needed when scanning / or other users' directories
+if [[ "$scan_path" == "/" ]]; then
+    sudo find "$scan_path" -x "${excludes[@]}" \
+        -type f -print0 2>/dev/null | \
+        xargs -0 du -h 2>/dev/null | \
+        sort -rh | \
+        head -n "$num_files" > "$tmp_file"
+else
+    find "$scan_path" -x "${excludes[@]}" \
+        -type f -print0 2>/dev/null | \
+        xargs -0 du -h 2>/dev/null | \
+        sort -rh | \
+        head -n "$num_files" > "$tmp_file"
+fi
+
+# Print formatted results
+echo "==========================================="
+echo "TOP $num_files LARGEST FILES"
+echo "==========================================="
+echo
+printf "%-8s | %s\n" "Size" "File Path"
+echo "-------------------------------------------"
+while IFS=$'\t' read -r size file; do
+    printf "%-8s | %s\n" "$size" "$file"
+done < "$tmp_file"
+echo "==========================================="
+
+rm "$tmp_file"
+
+# Check for Time Machine local snapshots
+echo
+echo "==========================================="
+echo "TIME MACHINE LOCAL SNAPSHOTS"
+echo "==========================================="
+snapshots=$(tmutil listlocalsnapshots / 2>/dev/null)
+if [[ -n "$snapshots" ]]; then
+    count=$(echo "$snapshots" | wc -l | tr -d ' ')
+    echo "Found $count local snapshot(s). These are invisible to find/du:"
+    echo "$snapshots" | head -5
+    if (( count > 5 )); then
+        echo "  ... and $((count - 5)) more"
+    fi
+    echo
+    echo "To reclaim this space: sudo tmutil thinlocalsnapshots / 999999999999 4"
+else
+    echo "No local snapshots found."
+fi
+echo "==========================================="
+
+echo
+echo "Scan complete!"
+```
+
+### Ejecuta el script paso a paso
+
+1. **Abre Terminal.** Lo encontrarás en Aplicaciones > Utilidades, o pulsa `Cmd + Espacio` y escribe «Terminal». Si quieres una mejor experiencia de terminal, considera configurar [Fish shell en macOS](/es/fish-shell-macos-configuracion/) para un mejor autocompletado y resaltado de sintaxis.
+
+2. **Crea el archivo del script:**
+   ```bash
+   nano ~/find_large_files.sh
+   ```
+   Pega el script anterior y guarda con `Ctrl + X`, `Y`, `Enter`.
+
+3. **Hazlo ejecutable:**
+   ```bash
+   chmod +x ~/find_large_files.sh
+   ```
+
+4. **Ejecútalo:**
+
+<Tabs>
+<Tab name="Análisis del directorio personal">
+```bash
+# Scan your home directory (default, no sudo needed)
+./find_large_files.sh
+
+# Show top 30 files instead of 20
+./find_large_files.sh 30
+```
+</Tab>
+<Tab name="Análisis completo del sistema">
+```bash
+# Scan the entire system (requires sudo for /System, /private, etc.)
+./find_large_files.sh --all
+
+# Full scan, top 50 files
+./find_large_files.sh --all 50
+```
+</Tab>
+</Tabs>
+
+Al ejecutar un análisis completo del sistema se te pedirá la contraseña. El análisis tarda entre 1 y 5 minutos según el tamaño del disco y si tienes discos externos conectados.
+
+<Notice type="info" title="df vs du: por qué los números no siempre coinciden">La cabecera de espacio en disco usa <code>df</code> (vista a nivel de sistema de archivos), mientras que la lista de archivos usa <code>du</code> (suma los tamaños de archivos individuales). En APFS, estos números pueden diferir significativamente debido a clones, archivos dispersos y espacio purgable. Consulta la sección «¿Dónde está mi espacio en disco perdido?» más abajo. No entres en pánico si las cuentas no cuadran.</Notice>
+
+Para análisis largos, considera ejecutarlo dentro de un [multiplexor de terminal tmux](/es/tmux-comandos-basicos/) para poder desconectarte y volver más tarde.
+
+**Salida de ejemplo (análisis del directorio personal):**
+
+```
+===========================================
+DISK SPACE INFORMATION
+===========================================
+Total Space: 460Gi
+Used Space:  95Gi
+Free Space:  341Gi
+Usage:       22%
+===========================================
+
+Searching for the 20 largest files...
+Scanning: /Users/dragos
+This may take a minute on large drives.
+
+===========================================
+TOP 20 LARGEST FILES
+===========================================
+
+Size     | File Path
+-------------------------------------------
+13G      | /Users/dragos/.diffusionbee/downloaded_assets/FLUX.1-schnell_flux_schnell_q5p_NNC_all.sqlite
+13G      | /Users/dragos/.diffusionbee/downloaded_assets/FLUX.1-dev_flux_dev_q5p_NNC_all.sqlite
+8.4G     | /Users/dragos/.ollama/models/blobs/sha256-6e41c39f4490a9e8b7a65916425c6ed97f04ed95bab991c4ab6a462ff84d1608
+1.9G     | /Users/dragos/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff
+949M     | /Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve
+...
+
+===========================================
+TIME MACHINE LOCAL SNAPSHOTS
+===========================================
+Found 3 local snapshot(s). These are invisible to find/du:
+com.apple.TimeMachine.2025-01-09-183042.local
+com.apple.TimeMachine.2025-01-09-193042.local
+com.apple.TimeMachine.2025-01-09-203042.local
+
+To reclaim this space: sudo tmutil thinlocalsnapshots / 999999999999 4
+===========================================
+```
+
+Si la salida muestra principalmente rutas de `/System` o `/Volumes`, la opción `-x` o las exclusiones no están funcionando. Comprueba que estás ejecutando el script actualizado y no la versión antigua.
+
+**Verifica:** la cabecera de información del disco debería mostrar el tamaño real de tu disco y su uso. La lista de archivos debería contener rutas a nivel de usuario (directorio personal, Aplicaciones), no componentes internos del sistema.
+
+## Herramientas CLI modernas: `dust`, `gdu` y `ncdu`
+
+Si te ves haciendo limpieza de disco con regularidad, un script de un solo uso no es la mejor herramienta. Estas tres utilidades CLI te ofrecen vistas interactivas y navegables del uso del disco, mucho mejores para explorar y eliminar sobre la marcha.
+
+Las tres se instalan con [Homebrew](https://brew.sh):
+
+<Accordion label="dust - vista de árbol en Rust (12k ★)" group="cli-tools" expanded="true">
+
+```bash
+brew install dust
+```
+
+`dust` muestra los directorios y archivos más grandes como una visualización de árbol proporcional. Es rápido (basado en Rust) y la salida se lee de inmediato sin navegar por una TUI.
+
+```bash
+dust ~/              # full home directory tree
+dust -F ~/           # files only, no directory summaries
+dust -n 30 ~/        # show top 30 entries
+dust -d 2 ~/         # limit depth to 2 levels (quick overview)
+```
+
+GitHub: [bootandy/dust](https://github.com/bootandy/dust), 12k estrellas, mantenido activamente.
+
+</Accordion>
+
+<Accordion label="gdu - TUI interactiva en Go (5.9k ★)" group="cli-tools">
+
+```bash
+brew install gdu
+```
+
+`gdu` es un analizador de disco interactivo y rápido con navegación mediante las flechas del teclado. Usa procesamiento en paralelo, lo que lo hace significativamente más rápido que `ncdu` en SSD. Puedes navegar por los directorios y eliminar archivos directamente.
+
+```bash
+gdu ~/               # interactive mode. Arrow keys to navigate, 'd' to delete
+gdu -t 20 ~/         # non-interactive: top 20 largest items
+```
+
+GitHub: [dundee/gdu](https://github.com/dundee/gdu), 5.9k estrellas, basado en Go.
+
+</Accordion>
+
+<Accordion label="ncdu - el clásico" group="cli-tools">
+
+```bash
+brew install ncdu
+```
+
+`ncdu` (NCurses Disk Usage) ha sido el analizador de disco TUI de referencia durante más de una década. Es más lento que `gdu` en SSD modernos, pero está disponible en todas partes: Linux, BSD, macOS. La interfaz resulta familiar a la mayoría de los administradores de sistemas.
+
+```bash
+ncdu ~/              # scan and browse interactively
+ncdu -x /            # scan root filesystem, don't cross mount points
+```
+
+</Accordion>
+
+<Notice type="info" title="¿Cuál usar?">Usa <strong>dust</strong> cuando quieras una visión general rápida sin salir de la salida del comando. Usa <strong>gdu</strong> cuando quieras explorar y eliminar archivos de forma interactiva. Usa <strong>ncdu</strong> si estás en un sistema donde ya está instalado (está en todas partes). Las tres son gratuitas y de código abierto.</Notice>
+
+Si pasas mucho tiempo en la terminal, puedes [potenciar tu Fish shell con plugins](/es/mejores-plugins-fish-shell/) para un mejor autocompletado con tabulador en estos comandos.
+
+## ¿Dónde está mi espacio en disco «perdido»?
+
+Ejecutaste `df` y dice que hay 200 GB usados. Ejecutaste `du` en tu directorio personal y solo suma 120 GB. ¿A dónde fueron los otros 80 GB? En APFS (el sistema de archivos por defecto desde High Sierra), la respuesta suele ser una de estas tres cosas.
+
+### Snapshots locales de Time Machine
+
+Time Machine guarda snapshots locales cada hora directamente en tu disco de arranque. Pueden consumir **decenas de GB**, pero son completamente invisibles para `find`, `du` y Finder. No aparecen como archivos porque son snapshots a nivel de sistema de archivos.
+
+```bash
+# Check if snapshots are eating your space
+tmutil listlocalsnapshots /
+
+# If you see many snapshots and need space now:
+sudo tmutil thinlocalsnapshots / 999999999999 4
+```
+
+El comando `thinlocalsnapshots` le indica a macOS que purgue los snapshots locales, liberando espacio de inmediato. El parámetro de prioridad (`4`) significa «prioridad baja»: no interrumpirá otras operaciones. Estos snapshots se eliminan automáticamente cuando hay presión de disco, pero el adelgazamiento manual es seguro si necesitas espacio ahora.
+
+<Notice type="warning" title="Los snapshots ocultos pueden consumir más de 50 GB">No aparecen en Finder, du ni en la salida del script. Comprueba siempre con <code>tmutil</code> si te queda poco espacio sin explicación. Los snapshots son independientes de tu disco de copia de seguridad de Time Machine: adelgazar los snapshots locales no afecta a tus copias de seguridad.</Notice>
+
+### Clones de APFS, archivos dispersos y espacio purgable
+
+APFS tiene características que hacen que la salida de `du` sea engañosa:
+
+- **Clones:** `cp -c` (y muchas apps como pnpm, uv o los worktrees de git) crea clones copy-on-write. `du` reporta el tamaño completo de cada clon, pero eliminar un clon libera **cero** bloques si existe otro clon. Un árbol de `node_modules` puede reportar 20 GB en `du` y, al eliminarlo, liberar solo 3 MB.
+
+- **Archivos dispersos:** la imagen de disco `Docker.raw` de Docker y las imágenes de máquinas virtuales (UTM, Parallels) son archivos dispersos. Reportan 64 GB, pero solo ocupan los bloques realmente escritos (por ejemplo, 9 GB). Si usas Docker, mira cómo [limpiar las imágenes de Docker y recuperar espacio en disco](/cleanup-all-docker-things/).
+
+- **Espacio purgable:** macOS marca algunos archivos como purgables (cachés, snapshots locales, archivos descargados de iCloud). Cuentan como «usados» en `du`, pero macOS los eliminará automáticamente cuando se necesite espacio. Puedes comprobar el espacio purgable con:
+  ```bash
+  diskutil info / | grep -i purgeable
+  ```
+
+<Notice type="info" title="df vs du: por qué los números no coinciden">df muestra el uso real a nivel de sistema de archivos (lo que reporta el kernel). du suma los tamaños de archivos individuales. En APFS, los clones, los archivos dispersos y el espacio purgable hacen que estos números diverjan significativamente. En caso de duda, confía en df para «cuánto espacio está realmente usado» y en du para «qué archivos son los más grandes».</Notice>
+
+Si estás generando [imágenes con IA localmente, como los modelos Flux](/es/imagenes-ia-mac/), esos archivos de modelo pueden ocupar entre 10 y 13 GB cada uno, y DiffusionBee los guarda en `~/.diffusionbee/downloaded_assets/`.
+
+## Qué es seguro eliminar (y qué no tocar nunca)
+
+El script encuentra archivos grandes, pero no te dice qué es seguro eliminar. Aquí tienes una guía práctica organizada por categorías.
+
+<Accordion label="Modelos de IA (Ollama, DiffusionBee)" group="safe-delete" expanded="true">
+
+**Modelos de Ollama**: se guardan en `~/.ollama/models/`. Cada modelo ocupa entre 2 y 13 GB. Usa el CLI adecuado para eliminarlos (un `rm` directo deja blobs huérfanos):
+```bash
+ollama list              # see what's installed
+ollama rm <model-name>   # remove a specific model
+```
+Consulta la [guía completa de instalación de Ollama](/es/ollama-docker-instalacion/) para gestionar los modelos correctamente.
+
+**Modelos de DiffusionBee**: se guardan en `~/.diffusionbee/downloaded_assets/`. Son los archivos más grandes en muchos Mac (13 GB cada uno en el caso de los modelos FLUX). Puedes eliminar los archivos `.sqlite` directamente si ya no usas DiffusionBee.
+
+</Accordion>
+
+<Accordion label="Imágenes y contenedores de Docker" group="safe-delete">
+
+El uso de disco de Docker crece rápido. Comprueba qué está consumiendo espacio:
+```bash
+docker system df         # see Docker's disk usage breakdown
+docker system prune -a   # remove all unused images, containers, networks (careful!)
+docker image prune       # remove dangling images only (safer)
+```
+
+La imagen de disco `Docker.raw` de Docker (en `~/Library/Containers/com.docker.docker/`) puede superar los 50 GB como archivo disperso. Su tamaño reportado frente al uso real del disco diferirá. Consulta la [guía completa de limpieza de Docker](/cleanup-all-docker-things/) para un recorrido detallado.
+
+</Accordion>
+
+<Accordion label="Cachés de herramientas de desarrollo" group="safe-delete">
+
+Todas estas son seguras de eliminar: se regeneran en el siguiente uso:
+
+```bash
+# Homebrew cache (old downloads)
+brew cleanup -s
+
+# npm cache
+npm cache clean --force
+
+# pip cache
+pip cache purge
+
+# yarn cache
+yarn cache clean
+```
+
+Directorios a nivel de proyecto seguros de eliminar (se reconstruyen):
+- `node_modules/` — ejecuta `npm install` para regenerarlo
+- `.venv/` o `venv/` — ejecuta `python -m venv .venv` para recrearlo
+- `.next/` — caché de compilación de Next.js, se regenera con `npm run build`
+- `target/` — salida de compilación de Rust, se regenera con `cargo build`
+- `__pycache__/` — bytecode de Python, se regenera automáticamente
+
+</Accordion>
+
+<Accordion label="Restos de Xcode" group="safe-delete">
+
+Si alguna vez has tenido Xcode instalado, los archivos antiguos de compatibilidad de dispositivos se acumulan:
+```bash
+# Old iOS/tvOS/watchOS device support (can be many GB)
+rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport/*
+
+# Old Xcode caches
+rm -rf ~/Library/Developer/Xcode/DerivedData/*
+
+# Old simulator data
+xcrun simctl delete unavailable
+```
+
+</Accordion>
+
+<Notice type="error" title="Nunca elimines esto">NO elimines nada en estas ubicaciones a menos que sepas exactamente lo que estás haciendo:<br/><br/>
+• <code>/System</code> — archivos del sistema de macOS<br/>
+• <code>/usr</code> (excepto <code>/usr/local</code>) — binarios del sistema<br/>
+• <code>/Library/Extensions</code> — extensiones del kernel<br/>
+• <code>/Library/PreferencePanes</code> — paneles de preferencias del sistema<br/>
+• Cualquier archivo que no puedas identificar en un directorio del sistema<br/><br/>
+En caso de duda, no lo elimines. Muévelo primero a la Papelera y comprueba si algo se rompe antes de vaciarla.</Notice>
+
+Si no estás seguro de si dos directorios contienen lo mismo antes de eliminar uno, puedes [comparar el contenido de carpetas en Terminal](/compare-folders-content-differences/) para comprobarlo.
+
+## Herramientas de terminal relacionadas
+
+Si pasas tiempo en Terminal haciendo limpieza de disco y administración del sistema, estas herramientas mejoran la experiencia:
+
+- **[Ghostty](/es/terminal-ghostty/)** — emulador de terminal moderno y acelerado por GPU para macOS
+- **[WezTerm](/es/instalar-wezterm-mac/)** — terminal con multiplexación integrada tipo tmux
+- **[tmux](/es/tmux-comandos-basicos/)** — multiplexor de terminal para análisis largos y múltiples sesiones
+- **[Fish shell](/es/fish-shell-macos-configuracion/)** — mejor shell por defecto con autosugerencias y resaltado de sintaxis
+- **[cmux](/es/terminal-cmux/)** — sesiones de terminal asistidas por IA para usuarios avanzados
+
+## Conclusión
+
+No necesitas apps de pago para encontrar y gestionar archivos grandes en tu Mac. Entre la búsqueda de Finder para comprobaciones rápidas, `mdfind` para resultados instantáneos, el script Bash para análisis exhaustivos y `dust`/`gdu`/`ncdu` para la exploración interactiva, lo tienes todo.
+
+Los verdaderos devoradores de disco suelen ser los modelos de IA (Ollama, DiffusionBee, Stable Diffusion), las imágenes de Docker, los snapshots locales de Time Machine y las cachés de proyectos de desarrollo. Ejecuta el script una vez al mes o siempre que veas el aviso «Tu disco está casi lleno». Apple cobra 0,99 $/mes por 50 GB de almacenamiento en iCloud, pero limpiar los archivos locales es gratis.
+
+<Button text="Volver arriba" link="#" variant="outline" color="blue" size="sm" />
+
+## Preguntas frecuentes
+
+<Accordion label="¿Por qué df muestra un espacio libre distinto que du?" group="faq" expanded="true">
+
+`df` reporta el uso a nivel de sistema de archivos: lo que ve el kernel. `du` suma los tamaños de archivos individuales. En APFS, divergen por:
+
+- **Clones** — duplicados copy-on-write que comparten bloques hasta que se modifican
+- **Archivos dispersos** — archivos que reportan un tamaño mayor que los bloques que realmente tienen asignados
+- **Espacio purgable** — archivos que macOS marca como eliminables bajo presión de disco
+
+Confía en `df` para saber «qué tan lleno está mi disco» y en `du` para «qué archivos son los más grandes». Responden a preguntas distintas.
+
+</Accordion>
+
+<Accordion label="¿Tengo que conceder acceso total al disco a Terminal?" group="faq">
+
+Sí, desde macOS Mojave (10.14). Sin él, ni siquiera `sudo` puede acceder a `~/Library`, Mail, Mensajes, Fotos y otros directorios protegidos. El script omitirá estas rutas silenciosamente.
+
+Ve a **Ajustes del Sistema > Privacidad y seguridad > Acceso total al disco**, añade tu app de terminal (Terminal.app, Ghostty, WezTerm, etc.) y luego cierra y vuelve a abrir la terminal.
+
+</Accordion>
+
+<Accordion label="¿Cuál es la forma más rápida de encontrar archivos grandes?" group="faq">
+
+Depende de lo que necesites:
+
+- **¿Solo unos pocos archivos grandes?** Usa la búsqueda de Finder (`Cmd+F`, filtra por Tamaño de archivo > 1 GB). Cero configuración.
+- **¿Búsqueda rápida en terminal?** `mdfind "kMDItemFSSize > 1000000000"`: consulta el índice de Spotlight, casi instantáneo.
+- **¿Análisis completo del sistema?** El script Bash de esta guía: exhaustivo, aunque tarda entre 1 y 5 minutos.
+- **¿Navegación interactiva?** Instala `dust` o `gdu` con Homebrew: lo mejor para explorar y eliminar interactivamente.
+
+</Accordion>
+
+<Accordion label="¿Puedo eliminar los snapshots locales de Time Machine?" group="faq">
+
+Sí. Los snapshots locales se guardan en tu disco de arranque y son independientes de tu disco de copia de seguridad de Time Machine. Eliminarlos no afecta a tus copias de seguridad.
+
+```bash
+# List snapshots
+tmutil listlocalsnapshots /
+
+# Thin them (reclaim space)
+sudo tmutil thinlocalsnapshots / 999999999999 4
+```
+
+macOS también elimina los snapshots locales automáticamente cuando hay presión de disco, pero el adelgazamiento manual es seguro si necesitas espacio de inmediato.
+
+</Accordion>
+
+<Accordion label="¿Es seguro ejecutar el script en macOS Tahoe?" group="faq">
+
+Sí. El script usa herramientas POSIX estándar (`find`, `du`, `df`, `sort`) y la opción `-x`, todas compatibles con macOS Sequoia 15.x y el próximo Tahoe (macOS 26). Las rutas de exclusión y el requisito de acceso total al disco son los mismos en ambas versiones.
+
+</Accordion>

@@ -1,0 +1,391 @@
+---
+date: 2024-08-29
+lastmod: 2026-08-05T00:00:00Z
+translationKey: "dokploy-docker-compose-app"
+title: "Cómo desplegar una app de Docker Compose en Dokploy"
+meta_title: "Despliega apps de Docker Compose en Dokploy: guía completa"
+description: "Despliega cualquier app de Docker Compose en Dokploy con esta guía paso a paso. Cubre la pestaña Domains, las etiquetas de Traefik, las variables de entorno y la resolución de problemas."
+image: "@assets/images/24/08/dokploy-docker-compose-app.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["dokploy", "docker-compose", "traefik"]
+canonical: "https://www.bitdoze.com/es/dokploy-app-docker-compose/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import { Picture } from "astro:assets";
+import img1 from "@assets/images/24/08/dns-a-rec.png";
+import img2 from "@assets/images/24/08/dokploy-compose.png";
+import img3 from "@assets/images/24/08/dokploy-env.png";
+import img4 from "@assets/images/24/08/dokploy-domain-add.png";
+
+[Dokploy](https://dokploy.com/) es una Plataforma como Servicio (PaaS) de código abierto y autoalojable para desplegar y gestionar aplicaciones con Docker y Traefik. Tiene más de 36.300 estrellas en GitHub y lanzamientos frecuentes (actualmente en v0.29.x), y es una alternativa gratuita a Vercel, Heroku y Netlify. Para comparaciones, consulta [cómo se compara Dokploy con Coolify y Kamal 2](/es/coolify-vs-dokploy-vs-kamal-2/) o nuestro [resumen de paneles de servidores autoalojados](/best-self-hosted-panels/).
+
+Esta guía explica cómo desplegar cualquier app de Docker Compose en Dokploy. Usaré un stack de Flowise AI + PostgreSQL como ejemplo, pero el mismo flujo de trabajo se aplica a cualquier archivo compose.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/mJY4lXbXsPM"
+  label="Cómo desplegar una app de Docker Compose en Dokploy"
+/>
+
+<Notice type="info" title="Nota sobre el vídeo">
+El vídeo se grabó con una versión anterior de Dokploy. El flujo de trabajo es el mismo, pero la interfaz puede verse ligeramente diferente. La pestaña Domains es ahora el método recomendado para configurar dominios.
+</Notice>
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener todo listo:
+
+<ListCheck>
+- Un VPS con Linux (Ubuntu 22.04+ o Debian 12+). Un Hetzner CX22 a ~4,49 €/mes funciona bien. Puedes conseguir un [VPS económico en Hetzner](https://go.bitdoze.com/hetzner) o un [VPS barato en Hostinger](https://go.bitdoze.com/hostinger-vps)
+- Dokploy instalado y accesible en la URL de su panel. Consulta nuestra guía para [instalar y configurar Dokploy en tu VPS](/dokploy-install/)
+- Docker y Docker Compose v2 instalados (el instalador de Dokploy se encarga de esto)
+- Puertos 80 y 443 abiertos en el firewall del VPS (necesarios para Traefik y Let's Encrypt)
+- Un nombre de dominio con acceso al DNS (para crear un registro A)
+- El archivo Docker Compose de la app que quieres desplegar
+</ListCheck>
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando un servidor alquilado, consulta [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="warning" title="Puertos 80 y 443">
+Si estos puertos están bloqueados por tu firewall o proveedor de cloud, la emisión del certificado de Let's Encrypt fallará silenciosamente. Compruébalo bien antes de continuar.
+</Notice>
+
+<Notice type="info" title="¿No quieres autoalojarlo?">
+Dokploy Cloud está disponible desde 4,50 $/mes por servidor si prefieres no gestionar la infraestructura tú mismo.
+</Notice>
+
+## Ejemplo con Flowise: el archivo Docker Compose que desplegaremos
+
+Aquí está el archivo compose que usaremos a lo largo de esta guía. Ejecuta Flowise AI con un backend PostgreSQL. Esta es una **versión limpia**: sin etiquetas de Traefik y sin `dokploy-network`. Dokploy gestiona la red y el enrutamiento a través de la pestaña Domains o los Isolated Deployments.
+
+```yml
+services:
+  flowise-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - flowise-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flowise:
+    image: flowiseai/flowise:latest
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:${PORT}
+    volumes:
+      - flowiseai:/root/.flowise
+    environment:
+      DEBUG: false
+      PORT: ${PORT}
+      FLOWISE_USERNAME: ${FLOWISE_USERNAME}
+      FLOWISE_PASSWORD: ${FLOWISE_PASSWORD}
+      APIKEY_PATH: /root/.flowise
+      SECRETKEY_PATH: /root/.flowise
+      LOG_LEVEL: info
+      LOG_PATH: /root/.flowise/logs
+      DATABASE_TYPE: postgres
+      DATABASE_PORT: 5432
+      DATABASE_HOST: flowise-db
+      DATABASE_NAME: ${POSTGRES_DB}
+      DATABASE_USER: ${POSTGRES_USER}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: on-failure:5
+    depends_on:
+      flowise-db:
+        condition: service_healthy
+    entrypoint: /bin/sh -c "sleep 3; flowise start"
+
+volumes:
+  flowiseai:
+    driver: local
+  flowise-db-data:
+    driver: local
+```
+
+Algunas cosas a tener en cuenta:
+
+- **Sin sección `networks:`**. Dokploy gestiona la red por ti (a través de la pestaña Domains o los Isolated Deployments).
+- **Sin bloque `labels:`**. El enrutamiento de Traefik se configura en la pestaña Domains, no en el archivo compose.
+- **Sin `container_name`**. Definirlo en Dokploy causa problemas con los logs y las métricas. Dokploy genera sus propios nombres de contenedor.
+- **Sin clave `version:`**. Docker Compose v2 la ignora y puede mostrar un aviso. Si traes tu propio archivo compose con `version: "3.8"`, simplemente elimina esa línea.
+- **Sintaxis `${VAR_NAME}`**. Las variables de entorno se referencian así porque Dokploy escribe las variables definidas en la interfaz en un archivo `.env`. Más sobre esto en la [sección de variables de entorno](#configurar-variables-de-entorno-en-dokploy).
+
+Para repasar la sintaxis de compose, consulta los [comandos esenciales de Docker](/docker-commands/). La documentación oficial tiene más ejemplos en los [docs de Docker Compose de Dokploy](https://docs.dokploy.com/docs/core/docker-compose) y en el [ejemplo oficial](https://docs.dokploy.com/docs/core/docker-compose/example).
+
+## Apunta el dominio a tu servidor (DNS)
+
+Antes de desplegar, apunta tu dominio o subdominio al servidor de Dokploy:
+
+- Añade un registro A en la configuración de tu DNS:
+  - **Nombre**: el subdominio que quieras (p. ej., `flowise` para `flowise.yourdomain.com`)
+  - **Valor**: la dirección IP de tu servidor
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={img1} alt="Registro A de DNS" />
+
+<Notice type="info" title="Validación de DNS">
+Desde Dokploy v0.22.0, la pestaña Domains incluye validación de DNS integrada. Comprueba si tu dominio apunta correctamente a tu servidor antes de desplegar.
+</Notice>
+
+## Método 1: usar la pestaña Domains (recomendado)
+
+Este es el enfoque recomendado por Dokploy. Pegas tu archivo compose tal cual y luego configuras el dominio y el puerto desde la interfaz. Dokploy inyecta las etiquetas de Traefik y la configuración de red automáticamente.
+
+Para más detalles sobre cómo funciona Traefik internamente, consulta [cómo funciona Traefik como proxy inverso en Docker](/es/traefik-proxy-docker/).
+
+### Paso 1: crea el servicio compose
+
+1. En el panel de Dokploy, ve a **Projects** y crea un proyecto nuevo o selecciona uno existente.
+2. Haz clic en **Create Service** → **Compose**.
+3. Dale un nombre (p. ej., `flowise`).
+4. En **General**, selecciona **Raw** como fuente.
+5. Pega el archivo compose limpio de arriba.
+6. Haz clic en **Save**.
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={img2} alt="Compose en Dokploy" />
+
+### Paso 2: añade un dominio
+
+1. Ve a la pestaña **Domains**.
+2. Haz clic en **Add Domain**.
+3. Rellena los campos:
+   - **Domain**: introduce tu dominio (p. ej., `flowise.yourdomain.com`)
+   - **Service Name**: selecciona el servicio del desplegable (p. ej., `flowise`. Es la clave de tu archivo compose)
+   - **Internal Port**: el puerto en el que escucha tu app dentro del contenedor (3000 para Flowise)
+   - **Certificate Provider**: selecciona **Let's Encrypt** para HTTPS automático
+4. Haz clic en **Save**.
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={img4} alt="Añadir dominio en Dokploy" />
+
+Dokploy inyectará las etiquetas de Traefik necesarias en el archivo compose final. No necesitas añadirlas manualmente.
+
+### Paso 3: verifica con Preview Compose
+
+Después de configurar tu dominio, haz clic en el botón **Preview Compose**. Muestra el archivo compose final que Dokploy ejecutará realmente, con todas las etiquetas de Traefik inyectadas, la configuración de red y los ajustes del dominio. Es un paso de verificación crítico. Comprueba que:
+
+- Las etiquetas de Traefik incluyen tu dominio y el puerto correcto
+- Se ha inyectado `dokploy-network` (o una red aislada si activaste esa opción)
+- No se han hecho cambios inesperados en tus servicios
+
+<Notice type="success" title="Listo para desplegar">
+Si Preview Compose muestra correctamente las etiquetas de Traefik y tu dominio, estás listo para desplegar.
+</Notice>
+
+## Método 2: etiquetas de Traefik manuales (avanzado)
+
+Para la mayoría de usuarios, el Método 1 es suficiente. Usa etiquetas de Traefik manuales solo cuando necesites configuración personalizada: middleware (auth, rate limiting), múltiples reglas de host, entrypoints personalizados o configuración TLS no estándar.
+
+### Cuándo usar etiquetas manuales
+
+- Necesitas middleware de Traefik (basic auth, rate limiting, cabeceras personalizadas)
+- Enrutas varios dominios a un solo servicio
+- Necesitas entrypoints o ajustes TLS más allá de lo que ofrece la pestaña Domains
+
+Si nada de esto aplica, quédate con la pestaña Domains.
+
+### Añadir dokploy-network y las etiquetas de Traefik
+
+Con este enfoque, modificas el archivo compose para incluir `dokploy-network` y las etiquetas de Traefik:
+
+```yml
+services:
+  flowise:
+    image: flowiseai/flowise:latest
+    networks:
+      - dokploy-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.flowiseai.rule=Host(`flowise.yourdomain.com`)"
+      - "traefik.http.routers.flowiseai.entrypoints=websecure"
+      - "traefik.http.routers.flowiseai.tls.certResolver=letsencrypt"
+      - "traefik.http.services.flowiseai.loadbalancer.server.port=3000"
+    # ... rest of your service config
+
+networks:
+  dokploy-network:
+    external: true
+```
+
+El formato de las etiquetas de Traefik:
+
+```yml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.<unique-name>.entrypoints=websecure"
+  - "traefik.http.routers.<unique-name>.tls.certResolver=letsencrypt"
+  - "traefik.http.routers.<unique-name>.rule=Host(`app.yourdomain.com`)"
+  - "traefik.http.services.<unique-name>.loadbalancer.server.port=3000"
+```
+
+Sustituye `<unique-name>` por un identificador único para tu servicio, pon tu dominio en `Host()` y el puerto en el que tu app escucha internamente.
+
+Todos los servicios que necesiten comunicarse entre sí (p. ej., la app y su base de datos) deben estar en `dokploy-network`. Para más información sobre Traefik, consulta [Certificado Wildcard GRATIS de Let's Encrypt con Traefik](/es/traefik-certificado-wildcard/).
+
+## Isolated Deployments (pestaña Advanced)
+
+La función Isolated Deployments de Dokploy es una tercera opción para la red. Cuando está activada, Dokploy:
+
+- Crea una **red aislada por app** automáticamente
+- Conecta Traefik a esa red aislada
+- Elimina la necesidad de añadir `dokploy-network` manualmente a cada servicio
+- Evita conflictos de nombres de servicio al ejecutar varias instancias de la misma app
+
+Para activarla: ve a la pestaña **Advanced** de tu servicio compose y activa **Isolated Deployments**.
+
+<Notice type="info" title="Cero modificaciones necesarias">
+Al usar Isolated Deployments junto con la pestaña Domains, tu archivo compose se puede usar tal cual. Sin sección `networks:`, sin etiquetas, sin modificaciones. Solo pega y despliega.
+</Notice>
+
+Está disponible tanto para servicios compose Raw como de proveedor Git. Consulta los [docs de Utilities](https://docs.dokploy.com/docs/core/docker-compose/utilities) para más detalles.
+
+## Configurar variables de entorno en Dokploy
+
+El ejemplo de Flowise usa la sintaxis `${VAR_NAME}` en todo el archivo. Así funciona en Dokploy.
+
+### Cómo funciona el mecanismo del archivo .env
+
+Cuando defines variables de entorno en la pestaña **Environment** de Dokploy, se escriben en un archivo `.env` en el servidor. Tu archivo compose debe referenciarlas con la sintaxis `${VAR_NAME}` (o usar `env_file: - .env`). Esto es diferente de los servicios de aplicación, donde las variables se inyectan directamente en los contenedores.
+
+Para el ejemplo de Flowise, añade esto en la pestaña **Environment**:
+
+```sh
+PORT=3000
+POSTGRES_USER='user'
+POSTGRES_PASSWORD='pass'
+POSTGRES_DB='flowise'
+FLOWISE_USERNAME=bitdoze
+FLOWISE_PASSWORD=bitdoze
+```
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={img3} alt="Variables de entorno en Dokploy" />
+
+<Notice type="warning" title="Las variables no se inyectan automáticamente">
+Las variables de entorno definidas en la interfaz NO se inyectan automáticamente en los contenedores. Debes referenciarlas como `${VAR_NAME}` en tu archivo compose o añadir `env_file: - .env` a la definición del servicio.
+</Notice>
+
+Algunas notas adicionales:
+
+- **Cifrado en reposo**: desde v0.29.12, todas las variables de entorno se cifran con AES-256-GCM.
+- **Variables compartidas**: Dokploy admite variables compartidas a nivel de proyecto (`${{project.VAR_NAME}}`) y de entorno (`${{environment.VAR_NAME}}`). Útil cuando varios servicios del mismo proyecto comparten credenciales. Consulta los [docs de Variables](https://docs.dokploy.com/docs/core/variables).
+
+Para profundizar en las variables de entorno de Docker, consulta [cómo funcionan las variables de entorno de Docker con ARG y ENV](/es/variables-entorno-docker/).
+
+## Despliega y verifica tu app
+
+Después de configurar tu archivo compose, las variables de entorno y el dominio, es hora de desplegar:
+
+1. Ve a **General** y haz clic en **Deploy**.
+2. Cambia a la pestaña **Deployments** para ver los logs de la compilación.
+3. Espera un estado "success".
+
+### Revisar los logs del despliegue
+
+La pestaña Deployments muestra logs en tiempo real. Un despliegue correcto termina con los contenedores en ejecución y Traefik enrutando el tráfico. Si ves errores, los logs apuntarán al problema concreto (tag de imagen incorrecto, variable de entorno ausente, conflicto de puertos, etc.).
+
+### Verificar que la app está en ejecución
+
+Cuando el despliegue termine correctamente, verifícalo:
+
+```sh
+curl -I https://flowise.yourdomain.com
+```
+
+Deberías obtener una respuesta `HTTP/2 200`. El certificado SSL debería ser válido. Traefik lo emite automáticamente a través de Let's Encrypt.
+
+<Notice type="info" title="Tiempo de emisión del SSL">
+Traefik puede tardar hasta 10 segundos en emitir un certificado de Let's Encrypt tras el primer despliegue. Si obtienes un error de certificado inmediatamente, espera un momento e inténtalo de nuevo.
+</Notice>
+
+## Copias de seguridad para apps de Docker Compose
+
+Desde v0.22.0 (mayo de 2025), Dokploy admite copias de seguridad de bases de datos y de volúmenes para servicios de Docker Compose. Si ejecutas algo con datos persistentes, configúralo cuanto antes.
+
+### Copias de seguridad de bases de datos (PostgreSQL)
+
+El ejemplo de Flowise usa PostgreSQL. Dokploy puede respaldar bases de datos PostgreSQL, MariaDB, MySQL y MongoDB dentro de servicios de Docker Compose. Lo configuras en los ajustes de backup del servicio y lo apuntas a un destino compatible con S3.
+
+Para configurar Cloudflare R2 como destino de tus copias de seguridad, consulta cómo [configurar backups de Dokploy con Cloudflare R2](/es/backups-dokploy-cloudflare-r2/).
+
+### Copias de seguridad de volúmenes
+
+Dokploy puede respaldar volúmenes Docker con nombre en almacenamiento compatible con S3. Esto cubre los volúmenes `flowiseai` y `flowise-db-data` de nuestro ejemplo.
+
+<Notice type="warning" title="Solo volúmenes con nombre">
+Las copias de seguridad de volúmenes solo funcionan con volúmenes con nombre (como `flowiseai:`), NO con bind mounts (como `./data:/app/data`). Si tu archivo compose usa bind mounts, necesitarás otra estrategia de backup.
+</Notice>
+
+Consulta los [docs de Volume Backups](https://docs.dokploy.com/docs/core/volume-backups) para los detalles de configuración.
+
+## Resolución de problemas comunes
+
+<Accordion label="El DNS no se ha propagado" group="troubleshooting" expanded="true">
+**Síntoma**: el navegador muestra "server not found" o la validación de DNS de Dokploy falla en la pestaña Domains.
+
+**Causa**: el registro A no está configurado o el TTL aún no ha expirado.
+
+**Solución**: comprueba tu registro DNS:
+```sh
+dig flowise.yourdomain.com +short
+```
+Debería devolver la IP de tu servidor. Si no lo hace, verifica el registro A en tu proveedor de DNS. La propagación del DNS puede tardar desde unos minutos hasta unas horas según tu proveedor.
+</Accordion>
+
+<Accordion label="Puerto incorrecto (502 Bad Gateway)" group="troubleshooting">
+**Síntoma**: obtienes un 502 Bad Gateway o connection refused después de desplegar.
+
+**Causa**: el puerto configurado en la pestaña Domains (o en las etiquetas de Traefik) no coincide con el puerto en el que la app escucha realmente dentro del contenedor.
+
+**Solución**: consulta la documentación de tu app para saber su puerto por defecto. En Flowise es `3000` (controlado por la variable de entorno `PORT`). Asegúrate de que el **Internal Port** de la pestaña Domains coincide.
+</Accordion>
+
+<Accordion label="Los servicios no pueden comunicarse" group="troubleshooting">
+**Síntoma**: la app arranca pero no puede conectarse a su base de datos (p. ej., Flowise no alcanza PostgreSQL).
+
+**Causa**: los servicios no están en la misma red.
+
+**Solución**: si usas la pestaña Domains sin Isolated Deployments, asegúrate de que todos los servicios que necesitan comunicarse están en `dokploy-network`. O activa **Isolated Deployments** en la pestaña Advanced — Dokploy gestiona la red por ti. Verifica también que el nombre de servicio en tu cadena de conexión coincide con la clave del archivo compose (p. ej., `flowise-db`, no `localhost`).
+</Accordion>
+
+<Accordion label="Problemas con el nombre del contenedor" group="troubleshooting">
+**Síntoma**: los logs o las métricas no aparecen en el panel de Dokploy.
+
+**Causa**: hay un `container_name` definido en el archivo compose.
+
+**Solución**: elimina la directiva `container_name`. Dokploy genera sus propios nombres de contenedor para rastrear logs, métricas y despliegues. Definirlo manualmente rompe esto.
+</Accordion>
+
+Para más comandos de depuración, consulta los [comandos esenciales de Docker](/docker-commands/). Para monitorizar tu servidor después del despliegue, [configura la monitorización del servidor con Beszel y Uptime Kuma](/es/beszel-uptime-kuma/).
+
+## Actualizar y mantener tu app compose
+
+Tras el despliegue inicial, con el tiempo necesitarás actualizar imágenes, cambiar variables de entorno o modificar el archivo compose. Dokploy lo hace sencillo. Edita la configuración y vuelve a desplegar.
+
+Para el flujo completo de actualización (incluido cómo manejar tags de imagen, rollbacks y redespliegues), consulta nuestra guía sobre [actualizar tus apps de Docker Compose desplegadas en Dokploy](/es/actualizar-docker-compose-dokploy/).
+
+## Conclusiones
+
+Desplegar una app de Docker Compose en Dokploy se reduce a dos enfoques:
+
+1. **Pestaña Domains (recomendado)**: pega tu archivo compose tal cual, configura el dominio y el puerto en la interfaz y Dokploy se encarga del resto. Sin editar etiquetas, sin configurar redes.
+2. **Etiquetas de Traefik manuales (avanzado)**: para cuando necesitas enrutamiento personalizado, middleware o una configuración TLS no estándar.
+
+Con Isolated Deployments activado, puedes tomar el camino más limpio: cero modificaciones a tu archivo compose. Pega, define las variables de entorno, añade un dominio y despliega.
+
+No te saltes las copias de seguridad. Configura backups de base de datos para cualquier servicio con estado y backups de volúmenes para los datos persistentes. Tarda cinco minutos y te evita pérdidas de datos.
+
+<Button text="Cómo actualizar apps de Docker Compose en Dokploy" link="/es/actualizar-docker-compose-dokploy/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+> Si te interesan más apps autoalojadas, puedes [descubrir más contenedores Docker autoalojados](/es/contenedores-docker-servidor-casa/) o consultar la [sección de self-hosted de toolhunt.net](https://toolhunt.net/sh/).

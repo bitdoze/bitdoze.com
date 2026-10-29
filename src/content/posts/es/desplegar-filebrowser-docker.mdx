@@ -1,0 +1,385 @@
+---
+date: 2024-07-26
+lastmod: 2026-08-02T00:00:00Z
+translationKey: "deploy-filebrowser-docker"
+title: "FileBrowser Quantum con Docker: gestor de archivos autoalojado"
+meta_title: "FileBrowser Quantum con Docker: gestor de archivos autoalojado (2026)"
+description: "Despliega FileBrowser Quantum con Docker Compose: el fork de FileBrowser mantenido activamente."
+image: "@assets/images/24/04/easy-file-management.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["filebrowser", "filebrowser-quantum", "docker"]
+canonical: "https://www.bitdoze.com/es/desplegar-filebrowser-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import { Picture } from "astro:assets";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import imag1 from "@assets/images/24/01/cloudflare-tunel-setup.png";
+
+
+<Notice type="warning" title="Por qué Quantum y no FileBrowser">
+El proyecto FileBrowser original se **archivará el 2026-09-01**. La versión final (v2.63.23) se publicó sin más parches de seguridad planeados, y problemas conocidos como las vulnerabilidades de ejecución de comandos ([#5199](https://github.com/filebrowser/filebrowser/issues/5199)) y las sesiones JWT no revocables ([#5216](https://github.com/filebrowser/filebrowser/issues/5216)) quedarán sin corregir.
+
+**FileBrowser Quantum** es el fork mantenido activamente que tomó el relevo: más de 7.6k estrellas en GitHub, un ciclo de versiones estable, licencia Apache-2.0, y eliminó por completo la función de comandos de shell. Esta guía despliega Quantum desde cero — si ya usas el original, la sección de [notas de migración](#migrar-desde-el-filebrowser-original) explica qué cambia.
+</Notice>
+
+[FileBrowser Quantum](https://github.com/gtsteffaniak/filebrowser) es un gestor de archivos basado en web para servidores autoalojados. Te da una interfaz en el navegador para subir, descargar, previsualizar, renombrar y editar archivos — con el acabado de un producto SaaS moderno y sin suscripciones. Es el fork de FileBrowser que sigue recibiendo actualizaciones, y es lo que yo uso hoy en mi propio servidor.
+
+Esta guía cubre el despliegue completo de FileBrowser Quantum con Docker: despliegue con Docker Compose, múltiples fuentes de archivos, enlaces para compartir con caducidad, acceso mediante proxy inverso, refuerzo de seguridad y cómo lo uso como ventana de archivos a mi setup de agente de IA (un asistente Mastra autoalojado).
+
+## Qué hace diferente a FileBrowser Quantum
+
+Si has usado el FileBrowser original, estos son los cambios que importan:
+
+<ListCheck>
+<ul>
+<li><strong>Múltiples fuentes</strong> — puedes montar varios directorios (workspace, proyectos, multimedia) con reglas de inclusión/exclusión, en lugar de una sola raíz</li>
+<li><strong>Búsqueda indexada en tiempo real</strong> — basada en SQLite, busca nombres de archivo, contenidos y tamaños mientras escribes</li>
+<li><strong>Autenticación moderna</strong> — OIDC, LDAP, JWT, contraseña + 2FA y autenticación por proxy</li>
+<li><strong>Enlaces para compartir con caducidad</strong> — enlaces públicos anónimos con expiración, permisos (ver/editar/subir) e incluso temas personalizados</li>
+<li><strong>Integración con OnlyOffice</strong> — edita documentos de oficina directamente en el navegador</li>
+<li><strong>Tokens de API + documentación Swagger</strong> — tokens de API de larga duración y una API documentada en <code>/swagger</code>, útil para automatización</li>
+<li><strong>Sin comandos de shell</strong> — el ejecutor de comandos se eliminó por completo. Es la mayor mejora de seguridad respecto al original</li>
+</ul>
+</ListCheck>
+
+<Notice type="info" title="El formato de configuración cambió">
+Quantum usa un `config.yaml` en lugar del `settings.json` original, y el esquema de la base de datos es diferente. No puedes cambiar la imagen de Docker en una instalación original existente — el antiguo `filebrowser.db` no es compatible. Migrar significa reconfigurar desde cero (ver más abajo).
+</Notice>
+
+Si estás comparando otras opciones, [Cloudreve es otro gestor de archivos autoalojado sólido](/es/instalar-cloudreve-docker/) que vale la pena revisar.
+
+## Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Un VPS o servidor casero — [Hetzner](https://go.bitdoze.com/hetzner) (desde ~4 €/mes) o [Hostinger](https://go.bitdoze.com/hostinger-vps) funcionan bien, o un [Mini PC como servidor doméstico](/es/mejor-mini-pc-servidor-casa/)</li>
+<li>Docker y Docker Compose v2 (el plugin `docker compose`; `docker-compose` v1 se retiró en abril de 2025)</li>
+<li>Un proxy inverso (Caddy, Traefik, Nginx) o Cloudflare Tunnel para TLS — nunca expongas FileBrowser directamente a internet</li>
+<li>Un dominio o subdominio apuntando a tu servidor</li>
+<li>Opcionalmente, [Dockge](/es/instalar-dockge/) u otro [panel de gestión autoalojado](/best-self-hosted-panels/) para gestionar contenedores desde la UI</li>
+</ul>
+</ListCheck>
+
+_Los precios de los VPS subieron en general en 2026 — si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+> También puedes usar [Traefik como proxy inverso para Docker](/es/traefik-proxy-docker/) — tengo un tutorial completo con Dockge.
+
+## Desplegar FileBrowser Quantum con Docker Compose
+
+### Paso 1: Crear el directorio base
+
+Quantum guarda su configuración, base de datos y caché en un único directorio de datos. Dentro del contenedor es `/home/filebrowser/data`.
+
+```sh
+mkdir -p filebrowser/data && cd filebrowser
+```
+
+### Paso 2: Crear la configuración
+
+<Notice type="info" title="La clave de configuración es server.sources">
+La documentación Docker de Quantum tuvo en algún momento una errata mostrando una clave `sources` de primer nivel. El esquema correcto anida las fuentes bajo `server` — una configuración sin `server.sources` falla la validación de arranque con `Settings.Server.Sources required`.
+</Notice>
+
+Crea `data/config.yaml`:
+
+```yaml
+server:
+  cacheDir: /home/filebrowser/data/tmp # inside the data volume so it persists across restarts
+  sources:
+    - path: /srv/workspace
+      name: "Agent Workspace"
+      config:
+        defaultEnabled: true
+    - path: /srv/projects
+      name: "Projects"
+      config:
+        defaultEnabled: true
+```
+
+Notas sobre la configuración:
+
+- **`path`** es desde el punto de vista del **contenedor** — debe coincidir con el lado derecho de tus montajes de volúmenes.
+- **`name`** es el nombre que se muestra en la barra lateral de la UI.
+- **`defaultEnabled: true`** hace que una fuente esté disponible para los nuevos usuarios por defecto. Sin ella, los usuarios no verán la fuente hasta que les des acceso.
+- **`cacheDir`** debería estar dentro del volumen de datos para que el índice de búsqueda y las miniaturas sobrevivan a los reinicios.
+- No uses un directorio raíz `/` ni incluyas `/var` como fuente — Quantum advierte contra ambas cosas.
+
+### Paso 3: Crear el archivo Docker Compose
+
+```yaml
+services:
+  filebrowser:
+    image: gtstef/filebrowser:stable
+    container_name: filebrowser
+    restart: unless-stopped
+    volumes:
+      - /opt/workspace:/srv/workspace
+      - /opt/projects:/srv/projects
+      - ./data:/home/filebrowser/data
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+```
+
+Qué está pasando aquí:
+
+- **Etiquetas de imagen**: `stable` (60 MB, incluye FFmpeg + vista previa de documentos) o `stable-slim` (15 MB, solo el núcleo). Usa `stable` si quieres vistas previas de medios y miniaturas. También disponible en GHCR como `ghcr.io/gtsteffaniak/filebrowser`.
+- **`./data:/home/filebrowser/data`** — persiste `config.yaml`, `database.db` y la caché `tmp`. Este volumen es todo el estado de la aplicación.
+- **`/opt/workspace:/srv/workspace`** — tu primera fuente. Cambia la ruta del host a donde realmente estén tus archivos.
+- **`8080:80`** — puerto del host : puerto del contenedor. El contenedor escucha en el 80 por defecto (puedes cambiar `server.port` en la configuración, y entonces el healthcheck debe coincidir).
+- **Sin root por defecto**: desde la v1.3 la imagen se ejecuta como el usuario `filebrowser` (UID/GID 1000:1000), no como root. Si tu usuario del host tiene un UID distinto, aplica `chown -R` a los directorios montados según corresponda.
+- **Healthcheck**: la imagen incluye un healthcheck integrado para el puerto 80; lo he hecho explícito para que sea fácil de ajustar si cambias el puerto.
+
+### Paso 4: Iniciar y verificar
+
+```sh
+docker compose up -d
+```
+
+<Notice type="success" title="Verifica el despliegue">
+```sh
+# Container should be Up (healthy)
+docker ps --filter name=filebrowser
+
+# Watch the startup logs
+docker logs -f filebrowser
+
+# Health endpoint returns 200
+curl -f http://localhost:8080/health
+
+# Config and DB were created in the data volume
+ls -la data/
+```
+</Notice>
+
+Inicia sesión en `http://your-server:8080` con las credenciales por defecto — **`admin` / `admin`** — y cambia la contraseña de inmediato.
+
+<Notice type="warning" title="Cambia la contraseña y activa el 2FA ahora">
+Las credenciales de administrador por defecto las conoce todo internet. Tras el primer inicio de sesión: cambia la contraseña y luego activa la **autenticación de dos factores** en los ajustes de usuario. Quantum soporta 2FA TOTP de serie — los bots que escanean cada IP pública encontrarán tu instancia, así que asegúrala antes de apuntarle un dominio.
+</Notice>
+
+### Añadir más fuentes después
+
+Se pueden añadir fuentes sin recrear el contenedor — pero hay una trampa: **Quantum guarda la configuración en caché dentro de `database.db` en el primer arranque**. Si editas `config.yaml` después del primer inicio y nada cambia, ese es el motivo.
+
+```sh
+# Stop the container, clear the cached config, restart to re-init from config.yaml
+docker compose down
+rm -f data/database.db
+rm -rf data/tmp
+docker compose up -d
+```
+
+Esto borra las cuentas de usuario y los ajustes guardados en la base de datos — expórtalos o recréalos si es necesario. Para añadir fuentes en el día a día también hay un **panel de administración en la UI** (Settings → Sources) que actualiza todo en caliente sin tocar el archivo.
+
+## Enlaces para compartir: envía archivos sin cuentas
+
+Compartir es una de las funciones más potentes de Quantum y la razón por la que lo uso a diario. Selecciona cualquier archivo o carpeta → **Share** → y obtienes:
+
+- Enlaces públicos/anónimos — el destinatario no necesita cuenta ni inicio de sesión
+- **Tiempo de caducidad** en cada recurso compartido
+- Permisos por enlace: ver, editar o subir
+- Estilo/tema personalizado para la página de compartir
+
+Esto convierte a Quantum en un servicio de entrega de archivos de andar por casa: clic derecho en un archivo, copia el enlace `https://files.yourdomain.com/s/...` y envíalo donde quieras.
+
+## Acceso remoto seguro con un proxy inverso
+
+<Notice type="warning" title="Nunca expongas el puerto directamente">
+Quantum no tiene TLS propio — termina siempre el TLS en un proxy inverso y mantén privado el puerto del contenedor. Es preferible ejecutar Quantum en una red Docker compartida para ni siquiera publicar un puerto en el host.
+</Notice>
+
+**Opción 1: La misma red Docker que tu proxy (lo que yo hago).**
+
+Elimina la sección `ports:` y conecta ambos contenedores a la red del proxy:
+
+```yaml
+services:
+  filebrowser:
+    image: gtstef/filebrowser:stable
+    container_name: filebrowser
+    restart: unless-stopped
+    networks:
+      - web
+    volumes:
+      - /opt/workspace:/srv/workspace
+      - /opt/projects:/srv/projects
+      - ./data:/home/filebrowser/data
+
+networks:
+  web:
+    external: true
+```
+
+Luego, en Caddy:
+
+```
+files.example.com {
+    reverse_proxy filebrowser:80
+}
+```
+
+`docker compose up -d` y Caddy obtiene un certificado de Let's Encrypt automáticamente. Así es exactamente como funciona mi instancia en `files.ai.bitdoze.com` — sin puerto expuesto en el host, accesible solo a través del proxy.
+
+**Opción 2: Cloudflare Tunnel.**
+
+Si usas Cloudflare, añade un hostname a tu túnel existente apuntando al servicio:
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Configuración de Cloudflare Tunnel" />
+
+Apúntalo a `http://localhost:8080` (o el puerto del host que hayas elegido) y deja que Cloudflare gestione el TLS.
+
+**Opción 3: Traefik.**
+
+Consulta [Traefik como proxy inverso para Docker](/es/traefik-proxy-docker/) o [CloudPanel como proxy inverso](/cloudpanel-setup-dockge/) para los tutoriales completos.
+
+Si recibes un 502/503 a través del proxy, verifica que el contenedor esté en ejecución (`docker ps`) y que el puerto de destino del proxy coincida con el puerto interno del contenedor (80 salvo que hayas cambiado `server.port`).
+
+## Cómo uso FileBrowser Quantum con mi setup de agente de IA
+
+Esta es la parte que cambió mi flujo de trabajo. Ejecuto un asistente de IA autoalojado con [Mastra](https://mastra.ai/) — el mismo asistente que me ayuda a escribir artículos en este blog. Documenté el montaje completo en [Crea tu propio agente de IA con Mastra (archivos, web, navegador)](/es/crear-agente-ia-mastra/), y el código es open source en [github.com/bitdoze/mastra-assistant](https://github.com/bitdoze/mastra-assistant).
+
+El agente vive en el mismo servidor que FileBrowser Quantum, y los dos trabajan juntos en un bucle:
+
+**1. Los archivos del agente son una fuente de Quantum.**
+
+Los directorios de workspace y proyectos de mi agente están montados directamente en Quantum como fuentes. Cuando el agente escribe un borrador, genera una imagen de portada o produce un archivo de audio, lo veo al instante en el navegador — sin SSH, sin terminal. El Markdown se renderiza bien, las imágenes y los PDF se previsualizan de forma nativa, y el audio/vídeo se reproduce en línea (ese es el ffmpeg de la imagen `stable`).
+
+**2. Los enlaces para compartir son el mecanismo de entrega.**
+
+Cuando el agente termina algo — digamos el borrador de un artículo — abro Quantum, hago clic derecho en el archivo y creo un enlace para compartir con caducidad. Ese enlace va a Slack, Discord o un correo, y cualquiera puede verlo sin cuenta. Para mi propio ciclo de revisión, el enlace para compartir también es lo que pego en otros chats de IA cuando quiero una segunda opinión sobre un archivo que produjo el agente.
+
+**3. La dirección inversa: yo deposito archivos de referencia.**
+
+Si quiero que el agente trabaje a partir de una fuente concreta — un brief, un archivo de notas exportado, la captura de un competidor — lo arrastro al directorio de la fuente montada a través de Quantum. El agente lo lee desde la misma ruta en disco. Ambos vemos los mismos archivos; Quantum es simplemente mi ventana amigable al sistema de archivos del agente.
+
+**4. Automatización mediante la API (opcional).**
+
+Quantum expone una API REST documentada con tokens de API de larga duración (`/swagger` cuando la API está activada). Podrías conectar una herramienta del agente que liste o descargue archivos de Quantum programáticamente. Yo lo mantengo simple — el acceso directo a archivos mediante volúmenes montados es más rápido — pero la API está ahí si quieres un setup desacoplado.
+
+**5. Postura de seguridad para el setup del agente.**
+
+- Solo los directorios de workspace y proyectos están montados como fuentes — no `/`, ni todo el directorio home
+- La instancia está detrás del proxy inverso con 2FA activado, sin puerto público
+- Las fuentes que no deberían compartirse se pueden marcar como `private: true` en la configuración (desactiva compartir para esa fuente)
+- Las credenciales y secretos del agente viven fuera de los directorios montados
+
+El resultado: mi asistente de IA hace el trabajo pesado, y Quantum me da una forma sin fricción de ver, revisar y distribuir lo que produce. Si estás construyendo tu propio agente, [empieza con la guía de Mastra](/es/crear-agente-ia-mastra/) y luego conecta Quantum como su front-end de archivos.
+
+## Refuerzo de seguridad para FileBrowser Quantum
+
+<ListCheck>
+<ul>
+<li>Nunca expongas Quantum directamente — usa siempre un proxy inverso con TLS</li>
+<li>Activa el 2FA en la cuenta de administrador y en cualquier usuario con acceso de escritura</li>
+<li>Cambia la contraseña de administrador por defecto de inmediato</li>
+<li>Ejecuta sin root — el usuario `filebrowser` por defecto (1000:1000) desde la v1.3; no vuelvas a root</li>
+<li>Monta solo los directorios que sirves. No montes `/` ni `/var`</li>
+<li>Marca las fuentes sensibles como `private: true` para que no puedan compartirse</li>
+<li>Usa `denyByDefault` + reglas de permiso explícitas para el control de acceso por directorio</li>
+<li>Crea usuarios separados con ámbitos de fuentes restringidos en lugar de compartir el administrador</li>
+<li>Mantén la imagen fijada (`stable` se actualiza; fija una versión concreta si necesitas reproducibilidad)</li>
+<li>Bloquea el acceso directo al puerto del contenedor con reglas de firewall si publicas uno</li>
+</ul>
+</ListCheck>
+
+Si estás detrás de un runtime rootless (Podman, Docker rootless) y Quantum no puede vincular un puerto por debajo de 1024, añade `cap_add: [NET_BIND_SERVICE]` al servicio de compose en lugar de ejecutarlo privilegiado.
+
+Para protección a nivel de VPS más allá de la aplicación, mira [cómo securizar tu VPS con CrowdSec](/es/crowdsec-servidor-seguro/). Para secretos en archivos compose, mira [gestión de secretos en Docker Compose](/es/secretos-docker-compose/).
+
+## Migrar desde el FileBrowser original
+
+<Accordion label="¿Necesito migrar?" group="faq">
+Si el original te funciona y aceptas el riesgo de un proyecto archivado (sin más parches de seguridad), puedes seguir usándolo. Pero los problemas conocidos sin corregir — los bugs de ejecución de comandos y los JWT no revocables — son exactamente el tipo de cosa que envejece mal. Quantum es una mejora estricta: el mismo concepto de UI, mantenido activamente, y eliminó por completo la función de comandos de shell.
+</Accordion>
+
+<Accordion label="¿Qué implica?" group="faq">
+Quantum usa un formato de configuración diferente (`config.yaml` frente a `settings.json`) y un esquema de base de datos diferente, así que no hay actualización directa:
+
+1. Despliega Quantum desde cero siguiendo los pasos anteriores
+2. Monta los mismos directorios del host como fuentes
+3. Recrea tus usuarios (con 2FA esta vez)
+4. Apunta tu proxy inverso al nuevo contenedor
+5. Mantén el contenedor antiguo en marcha hasta haberlo verificado todo — luego detenlo
+</Accordion>
+
+## Solución de problemas
+
+<Accordion label="Los cambios de configuración no se aplican tras editar config.yaml" group="faq">
+Quantum guarda la configuración en caché en `database.db` en el primer arranque. Detén el contenedor, borra `data/database.db` y `data/tmp`, y arranca de nuevo para reinicializar desde el YAML. Ten en cuenta que esto también restablece los usuarios guardados en la base de datos. Prefiere la UI de administración en Settings → Sources para los cambios del día a día.
+</Accordion>
+
+<Accordion label="Error de arranque: Settings.Server.Sources required" group="faq">
+A tu config.yaml le falta la clave `server.sources` (la documentación mostró en su día un `sources` de primer nivel incorrecto). La estructura correcta anida las fuentes bajo `server`:
+
+```yaml
+server:
+  sources:
+    - path: /srv/workspace
+      config:
+        defaultEnabled: true
+```
+</Accordion>
+
+<Accordion label="permission denied en las fuentes o el directorio de datos" group="faq">
+Desde la v1.3 el contenedor se ejecuta como `filebrowser` (1000:1000). Haz que los directorios montados coincidan:
+
+```sh
+chown -R 1000:1000 /opt/workspace /opt/projects
+chown -R 1000:1000 ./data
+```
+
+Si ejecutas con un UID distinto (p. ej. `user: "1001:1001"`), aplica chown a ese en su lugar.
+</Accordion>
+
+<Accordion label="502/503 a través del proxy inverso" group="faq">
+Revisa `docker logs filebrowser`. Causas comunes:
+
+1. Puerto incorrecto — el proxy debe apuntar al puerto interno del contenedor (80 por defecto)
+2. `baseURL` — si sirves Quantum bajo un prefijo de ruta, define el `baseURL` correspondiente en la configuración
+3. El contenedor aún no está saludable — espera al healthcheck (`start_period` es de 10 s)
+</Accordion>
+
+<Accordion label="No se puede vincular el puerto 80/443 dentro del contenedor" group="faq">
+En motores rootless o perfiles de capabilities más estrictos, un usuario sin root no puede vincular puertos privilegiados. Añade `cap_add: [NET_BIND_SERVICE]` al servicio, o simplemente usa un puerto alto en `server.port` y haz proxy hacia él.
+</Accordion>
+
+## Copias de seguridad de FileBrowser Quantum
+
+<Notice type="info" title="Qué respaldar">
+`database.db` contiene todas las cuentas de usuario, contraseñas hasheadas, ajustes de compartición y la caché de configuración. `config.yaml` contiene las definiciones de tus fuentes. Los archivos servidos reales viven en tus directorios montados y necesitan su propia estrategia de copias de seguridad.
+</Notice>
+
+El volumen de datos contiene todo lo específico de la aplicación:
+
+```sh
+# Simple daily backup of the whole data directory
+cp -r filebrowser/data filebrowser/data.bak-$(date +%Y%m%d)
+
+# Or archive it
+tar czf filebrowser-data-$(date +%Y%m%d).tar.gz filebrowser/data
+```
+
+Yo respaldo el directorio `data/` a almacenamiento compatible con S3 con un cron job, y los directorios de las fuentes están cubiertos por la rutina habitual de copias del servidor. Prueba una restauración al menos una vez — una copia de seguridad de la que nunca has restaurado no es una copia de seguridad.
+
+## Conclusión
+
+FileBrowser Quantum es lo que FileBrowser debería haber llegado a ser: el mismo concepto de gestor de archivos autoalojado, mantenido activamente, con múltiples fuentes, autenticación moderna, búsqueda indexada y enlaces para compartir como es debido — y sin la superficie de ataque de los comandos de shell. El setup con Docker Compose son unos pocos archivos y un comando: `docker compose up -d`.
+
+En mi servidor cumple una doble función: gestor de archivos general detrás del proxy inverso, y ventana de archivos a mi [asistente de IA Mastra](/es/crear-agente-ia-mastra/) — navego lo que produce el agente, lo comparto con un enlace y deposito archivos de referencia de vuelta. Si autoalojas agentes de IA, no puedo recomendar esta combinación lo suficiente.
+
+Para [monitorizar el uso de CPU, memoria y disco del servidor](/es/monitorizar-servidor/) tras el despliegue, consulta mi guía de monitorización de servidores.
+
+<Button text="Explorar FileBrowser Quantum" link="https://github.com/gtsteffaniak/filebrowser" variant="solid" color="blue" size="md" icon="arrow-right" />

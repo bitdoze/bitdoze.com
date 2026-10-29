@@ -1,0 +1,625 @@
+---
+date: 2025-02-06
+lastmod: 2026-08-11T00:00:00Z
+translationKey: "ssh-tunneling-linux"
+title: "Cómo hacer SSH Port Forwarding (túneles SSH) en Linux"
+meta_title: "SSH Port Forwarding y túneles en Linux: guía completa"
+description: "Aprende SSH port forwarding en Linux: túneles locales, remotos y dinámicos. Configura túneles persistentes con systemd, SSH config y buenas prácticas de seguridad."
+image: "@assets/images/25/02/ssh-port-forwarding.jpg"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["ssh", "networking", "security"]
+canonical: "https://www.bitdoze.com/es/tuneles-ssh-linux/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+El reenvío de puertos SSH (también llamado tunelización SSH o SSH tunneling) te permite enrutar tráfico de red a través de una conexión SSH cifrada. Resuelve un problema habitual del operador: acceder a una base de datos privada en un VPS, exponer temporalmente un servidor de desarrollo local o navegar de forma segura por una Wi-Fi no fiable, todo ello sin abrir puertos adicionales a Internet.
+
+El reenvío de puertos SSH viene en tres variantes (local, remoto y dinámico), cada una pensada para escenarios distintos. Esta guía cubre las tres, además de los detalles operativos que la mayoría de los tutoriales omiten: mantener los túneles activos con systemd, definir túneles reutilizables en `~/.ssh/config`, encadenar a través de jump hosts y restringir los permisos de reenvío.
+
+
+## Tipos de reenvío de puertos SSH
+
+El reenvío de puertos SSH tiene tres tipos, cada uno pensado para casos de uso concretos. Entender sus diferencias te ayuda a elegir el adecuado.
+
+### Reenvío de puertos local
+
+![Reenvío de puertos local](@assets/images/25/02/local-port-forward.png)
+
+El reenvío de puertos local te permite redirigir un puerto de tu máquina local hacia un puerto concreto de un servidor remoto. Es el tipo más común: úsalo para acceder de forma segura a servicios que se ejecutan en un servidor remoto desde tu máquina local.
+
+- **Cómo funciona**: tu máquina local reenvía el tráfico a un host remoto a través de un túnel SSH.
+- **Caso de uso**: acceder de forma segura a un servidor MySQL remoto desde tu máquina local.
+
+### Reenvío de puertos remoto
+
+![Reenvío de puertos remoto](@assets/images/25/02/remote-port-forward.png)
+
+El reenvío de puertos remoto hace lo contrario. Reenvía un puerto del servidor remoto de vuelta a un puerto concreto de tu máquina local. Esto permite que un usuario o servidor remoto acceda a servicios que se ejecutan localmente en tu sistema.
+
+- **Cómo funciona**: el servidor remoto envía el tráfico de vuelta a la máquina y el puerto local indicados a través del túnel SSH.
+- **Caso de uso**: exponer un servidor web de desarrollo local para que puedan acceder a él personas remotas.
+
+### Reenvío de puertos dinámico (proxy SOCKS)
+
+![Reenvío de puertos dinámico](@assets/images/25/02/dinamic-port-forward.png)
+
+El reenvío de puertos dinámico crea un servidor proxy SOCKS en tu máquina local que enruta dinámicamente el tráfico hacia distintos destinos a través del túnel SSH. Es útil para navegar de forma segura o para saltarse restricciones de red.
+
+- **Cómo funciona**: se abre un único puerto local como proxy SOCKS. Configuras las aplicaciones cliente (por ejemplo, navegadores web) para que enruten el tráfico a través de ese proxy.
+- **Caso de uso**: saltarse restricciones de contenido por región o proteger la navegación en Wi-Fi públicas.
+
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener:
+
+1. **Acceso SSH a un servidor remoto**. Un nombre de usuario y contraseña válidos, o preferiblemente un par de claves SSH. Si aún no tienes un VPS, [Hetzner](https://go.bitdoze.com/hetzner) ofrece servidores cloud asequibles desde ~4 EUR/mes. Consulta nuestra guía sobre [cómo configurar un VPS para acceso remoto](/es/vps-configuracion-codificacion-ia/) si empiezas desde cero.
+
+_Los precios de los VPS subieron en 2026 en todos los proveedores — si estás replanteándote un servidor alquilado, mira [qué ha cambiado y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+2. **OpenSSH instalado** — La mayoría de distribuciones Linux lo incluyen. Compruébalo con:
+   ```bash
+   ssh -V
+   ```
+   Si no está instalado: `sudo apt install openssh-client` (Ubuntu/Debian) o `sudo yum install openssh` (CentOS).
+
+3. **Configuración de red y firewall** — Asegúrate de que los puertos que vas a usar no están bloqueados. Para el reenvío remoto de puertos, el servidor SSH debe permitirlo: revisa `AllowTcpForwarding` en `/etc/ssh/sshd_config`.
+
+4. **Conocer los puertos** — Debes saber en qué puertos se ejecutan tus servicios (MySQL: 3306, PostgreSQL: 5432, HTTP: 80, HTTPS: 443).
+
+<Notice type="info" title="Generación de claves: usa Ed25519, no RSA">
+Ed25519 es el valor por defecto de OpenSSH desde la versión 9.5 (octubre de 2023). Es más rápido y genera claves más pequeñas que RSA. Si vas a configurar claves SSH por primera vez:
+
+```bash
+ssh-keygen -t ed25519 -C "your-comment"
+```
+
+RSA-4096 sigue funcionando en sistemas antiguos. Usa `ssh-keygen -t rsa -b 4096` solo si tu servidor de destino no soporta Ed25519.
+
+Para una guía completa de endurecimiento, consulta [cómo proteger tu servidor SSH](/secure-ssh-server-linux/).
+</Notice>
+
+
+## Cómo hacer reenvío de puertos SSH
+
+<Notice type="info" title="Las opciones -f y -N">
+Todos los comandos de túnel siguientes incluyen dos opciones que usarás siempre:
+
+- **`-N`**: no ejecuta un comando remoto. Sin ella, SSH abre una shell interactiva que no necesitas.
+- **`-f`**: pasa a segundo plano tras la autenticación. Sin ella, el túnel bloquea tu terminal.
+
+Para explorar de forma interactiva (pruebas), omite `-f` para poder ver la salida. Para uso en producción, incluye siempre ambas.
+</Notice>
+
+### Reenvío de puertos local
+
+Reenvía un puerto local a un servicio en una máquina remota:
+
+```bash
+ssh -f -N -L [local_port]:[remote_host]:[remote_port] user@remote-server
+```
+
+- `[local_port]` — Puerto de tu máquina local (p. ej., 3306).
+- `[remote_host]` — Dirección del host remoto (normalmente `127.0.0.1` si el servicio se ejecuta en el propio servidor remoto).
+- `[remote_port]` — Puerto del servicio en el host remoto.
+- `user@remote-server` — Usuario SSH y dirección del servidor remoto.
+
+**Ejemplo** — Reenvía el MySQL remoto (puerto 3306) a tu máquina local:
+
+```bash
+ssh -f -N -L 3306:127.0.0.1:3306 user@remote-server
+```
+
+**Comprueba que el túnel funciona:**
+
+```bash
+# Confirm the port is listening locally
+ss -tuln | grep 3306
+
+# Test the connection
+mysql -h 127.0.0.1 -P 3306 -u username -p
+```
+
+### Reenvío de puertos remoto
+
+Expón un servicio local a un servidor remoto:
+
+```bash
+ssh -f -N -R [remote_port]:[local_host]:[local_port] user@remote-server
+```
+
+- `[remote_port]` — Puerto del servidor remoto (p. ej., 8080).
+- `[local_host]` — Dirección de tu host local (normalmente `127.0.0.1`).
+- `[local_port]` — Puerto del servicio en tu máquina local (p. ej., 80 para un servidor web).
+
+**Ejemplo** — Expone un servidor web local (puerto 80) en el servidor remoto en el puerto 8080:
+
+```bash
+ssh -f -N -R 8080:127.0.0.1:80 user@remote-server
+```
+
+**Comprueba** — En el servidor remoto:
+
+```bash
+ss -tuln | grep 8080
+curl http://localhost:8080
+```
+
+<Notice type="warning" title="El reenvío remoto necesita GatewayPorts configurado">
+Para que el puerto reenviado sea accesible desde fuera del servidor remoto (no solo desde localhost), el servidor SSH necesita `GatewayPorts` configurado. Consulta la sección [Buenas prácticas de seguridad para túneles SSH](#buenas-prácticas-de-seguridad-para-túneles-ssh) para ver la forma segura de configurarlo.
+</Notice>
+
+### Reenvío de puertos dinámico (proxy SOCKS)
+
+Configura un proxy SOCKS en tu máquina local:
+
+```bash
+ssh -f -N -D [local_port] user@remote-server
+```
+
+- `[local_port]` — Puerto de tu máquina local para el proxy SOCKS (p. ej., 1080).
+
+**Ejemplo:**
+
+```bash
+ssh -f -N -D 1080 user@remote-server
+```
+
+**Comprueba** — Configura tu navegador para usar el proxy SOCKS5 en `127.0.0.1:1080` y luego visita `https://ifconfig.me` para confirmar que tu tráfico sale por el servidor remoto.
+
+
+## Uso de ~/.ssh/config para túneles reutilizables
+
+Escribir comandos SSH largos cada vez cansa rápido. Define tus túneles en `~/.ssh/config` y arráncalos con un único comando corto.
+
+<Tabs>
+<Tab name="Reenvío local">
+```ssh-config
+# ~/.ssh/config
+
+Host db-tunnel
+    HostName remote-server.example.com
+    User deploy
+    LocalForward 5432 127.0.0.1:5432
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    ExitOnForwardFailure yes
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Arranca el túnel:
+```bash
+ssh -f -N db-tunnel
+```
+
+Ahora `localhost:5432` conecta con el servidor PostgreSQL remoto.
+</Tab>
+<Tab name="Reenvío remoto">
+```ssh-config
+# ~/.ssh/config
+
+Host expose-local-app
+    HostName public-vps.example.com
+    User deploy
+    RemoteForward 8080 127.0.0.1:3000
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    ExitOnForwardFailure yes
+```
+
+Arranca el túnel:
+```bash
+ssh -f -N expose-local-app
+```
+
+Tu aplicación local en el puerto 3000 es ahora accesible en `public-vps.example.com:8080`.
+</Tab>
+<Tab name="Reenvío dinámico (SOCKS)">
+```ssh-config
+# ~/.ssh/config
+
+Host vpn-tunnel
+    HostName vps.example.com
+    User deploy
+    DynamicForward 1080
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    ExitOnForwardFailure yes
+```
+
+Arranca el túnel:
+```bash
+ssh -f -N vpn-tunnel
+```
+
+Configura tu navegador con el proxy SOCKS5 `127.0.0.1:1080`.
+</Tab>
+</Tabs>
+
+**Comprueba que tu configuración se resuelve correctamente:**
+
+```bash
+ssh -G db-tunnel
+```
+
+Esto vuelca la configuración resuelta — verifica que `localforward`, `hostname` y `user` son correctos.
+
+
+## Túneles SSH persistentes
+
+Los túneles mueren silenciosamente cuando los timeouts de NAT o del firewall cortan conexiones TCP inactivas. Es el principal quebradero de cabeza operativo con los túneles SSH. Así es como hacer que sobrevivan.
+
+### Mantener los túneles activos con ServerAliveInterval
+
+La directiva del lado del cliente `ServerAliveInterval` envía paquetes keepalive a intervalos regulares para evitar que las conexiones inactivas caduquen.
+
+**Valores recomendados en `~/.ssh/config`:**
+
+```ssh-config
+ServerAliveInterval 60
+ServerAliveCountMax 3
+```
+
+Esto envía un keepalive cada 60 segundos. Si tres keepalives consecutivos quedan sin respuesta (180 segundos en total), SSH cierra la conexión.
+
+También puedes pasarlas como opciones:
+
+```bash
+ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -f -N -L 5432:127.0.0.1:5432 user@host
+```
+
+<Notice type="warning" title="ClientAliveInterval frente a ServerAliveInterval">
+Es fácil confundirlas:
+
+- **`ServerAliveInterval`**: lado del cliente. El **cliente** le pregunta al servidor "¿sigues ahí?". Es lo que quieres para los túneles. Va en `~/.ssh/config` o como opción `-o`.
+- **`ClientAliveInterval`**: lado del servidor. El **servidor** le pregunta al cliente "¿sigues ahí?". Va en `/etc/ssh/sshd_config`. El artículo original la mostraba como opción del cliente, lo cual era incorrecto.
+
+Para mantener los túneles SSH vivos, usa `ServerAliveInterval` en el cliente.
+</Notice>
+
+### ExitOnForwardFailure: no falles en silencio
+
+Si un reenvío de puerto no consigue hacer bind (puerto ya en uso, permiso denegado), SSH se conecta igualmente **sin el túnel**. Crees que funciona, pero el tráfico no se está reenviando.
+
+`ExitOnForwardFailure yes` hace que SSH termine con un error en lugar de conectar silenciosamente sin el túnel.
+
+```bash
+ssh -o ExitOnForwardFailure=yes -f -N -L 8080:localhost:80 user@host
+```
+
+O en `~/.ssh/config`:
+
+```ssh-config
+Host my-tunnel
+    HostName host.example.com
+    ExitOnForwardFailure yes
+    LocalForward 8080 localhost:80
+```
+
+Inclúyela siempre. Evita el modo de fallo silencioso más común de los túneles SSH.
+
+### Ejecutar túneles SSH como servicios systemd
+
+Esta es la forma aburrida y fiable de mantener un túnel vivo entre reinicios. No necesitas `autossh`: el `Restart=always` de systemd gestiona los reinicios, y `ServerAliveInterval` detecta las conexiones muertas.
+
+**Crea el archivo de servicio:**
+
+```ini
+# /etc/systemd/system/ssh-tunnel-db.service
+
+[Unit]
+Description=SSH Tunnel to production database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+ExecStart=/usr/bin/ssh -N -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+    -L 5432:127.0.0.1:5432 tunnel-user@db-host.example.com
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Actívalo y arráncalo:**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ssh-tunnel-db
+```
+
+**Comprueba:**
+
+```bash
+systemctl status ssh-tunnel-db
+ss -tuln | grep 5432
+```
+
+<Notice type="success" title="No necesitas autossh">
+El `Restart=always` de systemd combinado con `ServerAliveInterval` gestiona la reconexión. Cuando SSH detecta una conexión muerta (tres keepalives sin respuesta), termina. systemd reinicia el servicio tras 15 segundos. `autossh` sigue funcionando, pero a menudo es innecesario en sistemas modernos.
+</Notice>
+
+**Fallo habitual:** el usuario del servicio necesita acceso a la clave SSH. Si el túnel no arranca, revisa:
+
+```bash
+sudo journalctl -u ssh-tunnel-db -n 20
+```
+
+Asegúrate de que el archivo de clave tiene los permisos correctos:
+
+```bash
+sudo chmod 600 /home/deploy/.ssh/id_ed25519
+sudo chown deploy:deploy /home/deploy/.ssh/id_ed25519
+```
+
+
+## Tunelización a través de jump hosts (ProxyJump)
+
+Un escenario habitual: tu base de datos vive en un servidor privado al que solo se accede a través de un bastión/jump host. SSH puede encadenar a través del bastión con la opción `-J` (requiere OpenSSH 7.3+, disponible en Ubuntu 18.04+, Debian 10+ y todas las distribuciones actuales).
+
+**Comando:**
+
+```bash
+ssh -J jump-user@bastion.example.com \
+    -f -N \
+    -L 5432:127.0.0.1:5432 \
+    db-user@private-db.internal
+```
+
+Esto conecta primero con el bastión y luego abre un túnel a través de él hasta el servidor de base de datos privado.
+
+**En `~/.ssh/config`:**
+
+```ssh-config
+Host db-via-bastion
+    HostName private-db.internal
+    User db-user
+    ProxyJump jump-user@bastion.example.com
+    LocalForward 5432 127.0.0.1:5432
+    ServerAliveInterval 60
+    ExitOnForwardFailure yes
+```
+
+Y luego simplemente:
+
+```bash
+ssh -f -N db-via-bastion
+```
+
+<Notice type="info" title="ProxyJump sustituye a ProxyCommand">
+`-J` (ProxyJump) es el enfoque moderno. El patrón antiguo `ProxyCommand ssh jump-host nc %h %h` sigue funcionando, pero es más difícil de configurar y menos eficiente. Si usas OpenSSH 7.3+, usa `-J`.
+
+Para profundizar, consulta nuestra guía sobre [SSH ProxyJump y jump hosts](/es/ssh-proxyjump-jumphost/).
+</Notice>
+
+
+## Buenas prácticas de seguridad para túneles SSH
+
+Los túneles reenvían tráfico por diseño, lo que significa que un reenvío mal configurado puede exponer servicios privados a Internet. Así es como protegerlo todo.
+
+### GatewayPorts: no frente a clientspecified frente a yes
+
+La directiva `GatewayPorts` en `/etc/ssh/sshd_config` controla si los reenvíos de puertos remotos son accesibles desde fuera del servidor.
+
+```ssh-config
+# In /etc/ssh/sshd_config on the remote server:
+
+# GatewayPorts no              # default: forwarded ports only on localhost (safest)
+# GatewayPorts clientspecified # client chooses the bind address per connection
+# GatewayPorts yes             # ⚠️ binds to ALL interfaces (0.0.0.0)
+```
+
+| Valor | Comportamiento | Cuándo usarlo |
+|-------|----------|-------------|
+| `no` (por defecto) | Los puertos reenviados solo son accesibles desde localhost en el servidor remoto | La mayoría de los casos — es seguro |
+| `clientspecified` | El cliente decide la dirección de bind por conexión | **Recomendado** cuando necesitas acceso externo selectivo |
+| `yes` | Siempre hace bind a todas las interfaces (0.0.0.0) | Solo redes de confianza — nunca en un VPS público |
+
+<Notice type="warning" title="GatewayPorts yes expone los puertos a Internet">
+En un VPS público, `GatewayPorts yes` vincula los puertos reenviados a 0.0.0.0, haciéndolos accesibles desde cualquier lugar de Internet. Usa `clientspecified` en su lugar, y vincula a interfaces concretas en tu comando SSH cuando sea necesario.
+</Notice>
+
+Tras cambiarlo, reinicia el demonio SSH:
+
+```bash
+sudo systemctl restart sshd
+```
+
+### Autenticación con claves SSH
+
+Usa siempre pares de claves SSH en lugar de contraseñas. Genera una clave Ed25519:
+
+```bash
+ssh-keygen -t ed25519 -C "your-comment"
+```
+
+Copia la clave pública al servidor remoto:
+
+```bash
+ssh-copy-id user@remote-server
+```
+
+Desactiva la autenticación por contraseña en `/etc/ssh/sshd_config` del servidor:
+
+```ssh-config
+PasswordAuthentication no
+PubkeyAuthentication yes
+```
+
+### Restringir el reenvío con PermitOpen y PermitListen
+
+Para cuentas de túnel dedicadas, restringe qué puertos se pueden reenviar:
+
+```ssh-config
+# In /etc/ssh/sshd_config
+
+Match User tunnel-user
+    PermitOpen 127.0.0.1:5432
+    PermitListen 127.0.0.1:8080
+    AllowTcpForwarding yes
+```
+
+- `PermitOpen` limita a qué hosts/puertos puede el usuario reenviar tráfico (para `-L`).
+- `PermitListen` limita en qué hosts/puertos puede el usuario escuchar (para `-R`). Disponible desde OpenSSH 7.8.
+
+Esto es crítico cuando creas una cuenta de usuario específicamente para túneles de base de datos.
+
+### Granularidad de AllowTcpForwarding
+
+El valor por defecto `AllowTcpForwarding yes` (o `all`) permite reenvío tanto local como remoto. Puedes restringirlo:
+
+| Valor | Permitido |
+|-------|---------|
+| `yes` / `all` | Tanto `-L` como `-R` |
+| `local` | Solo `-L` (reenvío local) |
+| `remote` | Solo `-R` (reenvío remoto) |
+| `no` | Ninguno |
+
+Disponible desde OpenSSH 6.2.
+
+### Crear un usuario solo de túnel con bloques Match
+
+Para túneles de base de datos en producción, crea un usuario que solo pueda reenviar puertos — sin acceso a shell:
+
+```ssh-config
+# In /etc/ssh/sshd_config
+
+Match User tunnel-only
+    AllowTcpForwarding remote
+    PermitListen 127.0.0.1:8080
+    PermitOpen 127.0.0.1:5432
+    ForceCommand /bin/false
+    X11Forwarding no
+    PermitTunnel no
+```
+
+Este usuario puede configurar reenvíos remotos en el puerto 8080 y abrir túneles hacia 127.0.0.1:5432, y nada más. Incluso si la clave SSH se ve comprometida, el radio de impacto es limitado.
+
+Para un endurecimiento más amplio del servidor, consulta [cómo proteger un VPS con CrowdSec](/es/crowdsec-servidor-seguro/).
+
+### Firewalls
+
+Mantén un firewall bien configurado tanto en las máquinas locales como en las remotas:
+
+```bash
+sudo ufw enable
+sudo ufw allow ssh
+```
+
+<Notice type="warning" title="Docker se salta UFW">
+Si ejecutas Docker en el servidor remoto, ten en cuenta que [Docker se salta tu firewall](/es/docker-evita-firewall/) insertando sus propias reglas de iptables. Un puerto expuesto vía Docker Compose está abierto a Internet sin importar las reglas de UFW. Consulta [cómo proteger un servidor Docker con UFW](/es/informe-seguridad-bsi-docker-ufw/) para ver la solución.
+</Notice>
+
+
+## Solución de problemas en túneles SSH
+
+### Comprueba que el túnel está escuchando
+
+```bash
+# Replace 5432 with your port
+ss -tuln | grep 5432
+```
+
+Salida esperada — una línea que muestra `LISTEN` en `127.0.0.1:5432`.
+
+### Prueba la conectividad
+
+```bash
+curl -v http://localhost:8080
+# or for non-HTTP services:
+telnet localhost 5432
+```
+
+Para comprobar puertos remotos concretamente, consulta [cómo comprobar puertos remotos con nc](/check-remote-port-in-linux-nc/).
+
+### Depura con el registro detallado
+
+Añade `-v` para una salida de depuración básica, `-vvv` para máxima verbosidad:
+
+```bash
+ssh -v -N -L 8080:localhost:80 user@host
+```
+
+Esto muestra el handshake SSH, los detalles de autenticación y la configuración del reenvío. Si el túnel no consigue hacer bind, verás el error aquí.
+
+### Revisa los logs de SSH
+
+```bash
+# On the server
+sudo journalctl -u ssh -f
+# or
+sudo tail -f /var/log/auth.log
+```
+
+### Fallos habituales
+
+| Síntoma | Causa | Solución |
+|---------|-------|-----|
+| `bind: Address already in use` | El puerto está en uso | `ss -tuln \| grep <puerto>`, mata el proceso o elige otro puerto |
+| `Permission denied` en puertos bajos (&lt;1024) | Usuario sin root | Usa un puerto >1024 o configura una redirección con iptables |
+| El túnel conecta pero el puerto no escucha | Falta `-N` o el reenvío falló en silencio | Añade `ExitOnForwardFailure yes` |
+| El túnel muere tras unos minutos inactivo | Timeout de NAT/firewall | Añade `ServerAliveInterval 60` |
+| `Connection refused` desde el remoto | Firewall bloqueando, o `AllowTcpForwarding no` | Revisa `sshd_config`, revisa `ufw status` |
+| `Warning: remote port forwarding failed` | `GatewayPorts` no configurado, o puerto en uso en el remoto | Revisa `GatewayPorts` en sshd_config, comprueba el puerto en el remoto |
+
+<Accordion label="¿Cómo mato un túnel SSH en segundo plano?" group="faq">
+
+Encuentra el proceso del túnel:
+
+```bash
+ps aux | grep 'ssh -f -N'
+```
+
+Mátalo por PID:
+
+```bash
+kill <PID>
+```
+
+O mata todos los túneles que coincidan a la vez:
+
+```bash
+pkill -f 'ssh -f -N -L 5432'
+```
+
+Si el túnel se ejecuta como servicio systemd, deténlo con:
+
+```bash
+sudo systemctl stop ssh-tunnel-db
+```
+</Accordion>
+
+<Accordion label="¿Por qué restringir PermitOpen y PermitListen?" group="faq">
+
+Sin `PermitOpen` y `PermitListen`, un usuario con acceso SSH puede reenviar **cualquier** puerto hacia **cualquier** host alcanzable desde el servidor. Si un atacante compromete la clave SSH del usuario del túnel, podría alcanzar servicios internos, bases de datos o interfaces de gestión.
+
+Restringir estas directivas limita el radio de impacto — la clave comprometida solo da acceso a los puertos que has permitido explícitamente. Es defensa en profundidad: aunque la clave se filtre, el daño queda contenido.
+</Accordion>
+
+
+## Conclusión
+
+El reenvío de puertos SSH es una herramienta esencial para cualquier operador Linux. Los tres tipos (local, remoto y dinámico) cubren la mayoría de los escenarios de acceso a la red sin exponer puertos extra públicamente.
+
+Qué ha cubierto esta guía:
+
+- Los tres tipos de reenvío de puertos SSH y cuándo usar cada uno.
+- Comandos prácticos con las opciones `-f -N` para sesiones solo de túnel.
+- Definiciones reutilizables en `~/.ssh/config` para no reescribir comandos.
+- Túneles persistentes con servicios systemd y `ServerAliveInterval`, sin necesidad de `autossh`.
+- Encadenamiento a través de jump hosts con ProxyJump para patrones de acceso con bastión.
+- Endurecimiento de seguridad: matices de `GatewayPorts`, restricciones con `PermitOpen`/`PermitListen` y usuarios solo de túnel.
+- Solución de problemas: comandos de verificación, registro detallado y fallos habituales.
+
+Los túneles SSH son la herramienta de acceso rápido de tu kit de red. Para exposición permanente de servicios, mira proxies inversos dedicados o VPN de malla. Empieza por lo básico, haz funcionar un túnel, verifícalo con `ss` y `curl`, y luego endurécelo con las prácticas de seguridad anteriores.
+
+> **¿Buscas más opciones de tunelización?** Los túneles SSH son geniales para acceso rápido, pero si necesitas túneles persistentes para exponer servicios, echa un vistazo a [Pangolin](/es/pangolin-alternativa-cloudflare-tunnels/) (alternativa autoalojada a Cloudflare Tunnels) o a nuestra [comparativa de VPN de malla](/es/netbird-vs-headscale-vs-tailscale/) para conectar redes enteras con WireGuard. Si quieres autoalojar tu propia red compatible con Tailscale, consulta [Headscale](/es/headscale-tailscale-autoalojado/).

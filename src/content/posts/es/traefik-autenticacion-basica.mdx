@@ -1,0 +1,491 @@
+---
+date: 2024-08-02
+lastmod: 2026-08-03T00:00:00Z
+translationKey: "traefik-basic-authentication"
+title: "Autenticación Básica en Traefik: Protege Tus Servicios Docker"
+meta_title: "Autenticación Básica en Traefik: Protege Tus Servicios Docker"
+description: "Aprende a añadir autenticación básica en Traefik para proteger tus servicios Docker. Guía paso a paso con hashing bcrypt, etiquetas de Docker Compose y…"
+image: "@assets/images/24/08/traefik-basic-authentication.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["traefik", "docker", "security"]
+canonical: "https://www.bitdoze.com/es/traefik-autenticacion-basica/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Si ejecutas servicios Docker autoalojados detrás de Traefik, probablemente tengas algunos endpoints que no tienen autenticación propia: el panel de Traefik, un contenedor whoami, quizá algunas herramientas internas de desarrollo. Exponerlos a internet sin ningún control de acceso es un riesgo que no necesitas asumir.
+
+El middleware de autenticación básica de Traefik añade un aviso de usuario/contraseña delante de cualquier servicio con solo un par de etiquetas Docker. No sustituye a una autenticación propia a nivel de aplicación, pero para herramientas de desarrollo y servicios internos es una primera capa rápida.
+
+Esta guía cubre la configuración completa: generar contraseñas bcrypt seguras, añadir etiquetas de autenticación en Docker Compose, usar `usersFile` para configuraciones con varios servicios, personalizar el aviso de inicio de sesión, encadenar middlewares para defensa en profundidad y proteger el propio panel de Traefik. Todo está pensado para Traefik v3.x (la rama estable actual).
+
+Si buscas más contenedores Docker que proteger, echa un vistazo a los [mejores contenedores Docker autoalojados para un home server](/es/contenedores-docker-servidor-casa/).
+
+![Middleware de autenticación básica de Traefik protegiendo servicios Docker con un aviso de inicio de sesión](@assets/images/24/08/traefik-basic-authentication.jpeg)
+
+## Entendiendo el middleware de autenticación básica de Traefik
+
+El middleware de Traefik se sitúa entre el cliente y tu servicio backend. Cuando llega una petición, Traefik la pasa por la cadena de middlewares antes de reenviarla al backend. La autenticación básica es uno de los muchos tipos de middleware. Intercepta la petición, comprueba las credenciales y deja pasar la petición o devuelve una respuesta `401 Unauthorized`.
+
+El flujo es así:
+
+1. **El cliente envía la petición** a `https://myapp.example.com`
+2. **Traefik comprueba los middlewares:** encuentra un middleware de autenticación básica en esta ruta
+3. **¿Sin credenciales?** Traefik devuelve `401 Unauthorized` con una cabecera `WWW-Authenticate`
+4. **El navegador muestra el aviso de inicio de sesión:** el usuario introduce usuario y contraseña
+5. **El cliente reenvía la petición** con la cabecera `Authorization: Basic <base64-encoded>`
+6. **Traefik verifica el hash** contra las entradas `htpasswd` configuradas
+7. **¿Credenciales válidas?** Traefik reenvía la petición al backend
+8. **¿Credenciales inválidas?** Traefik devuelve `401` de nuevo
+
+Las credenciales de autenticación básica van codificadas en Base64, no cifradas. Eso significa que cualquiera que intercepte el tráfico (sin HTTPS) puede decodificarlas sin esfuerzo. Usa siempre la autenticación básica sobre HTTPS. Si tus servicios están detrás de Traefik, ya deberías tener TLS configurado.
+
+<Notice type="info" title="Cuándo NO usar la autenticación básica">
+Si tu aplicación tiene autenticación propia (Grafana, Portainer, Nextcloud), prefiere la autenticación nativa de la app en lugar de envolverla dos veces con la autenticación básica de Traefik. La autenticación básica es ideal para herramientas de desarrollo sin autenticación integrada: el panel de Traefik, contenedores whoami, utilidades internas sencillas. No hay mecanismo de cierre de sesión. El navegador guarda las credenciales en caché hasta que cierras la pestaña.
+</Notice>
+
+## Cómo configurar la autenticación básica de Traefik en Docker Compose
+
+Esto asume que Traefik ya se ejecuta en Docker con el proveedor de Docker activado. Si todavía no lo has configurado, consulta primero la guía de [Traefik como proxy inverso en Docker](/es/traefik-proxy-docker/).
+
+### Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Traefik v3.x ejecutándose en Docker con el proveedor de Docker activado</li>
+<li>Docker Compose v2 instalado</li>
+<li>Un servicio ya expuesto a través de Traefik con una ruta HTTPS funcionando</li>
+<li>Un nombre de dominio con el DNS apuntando a tu VPS</li>
+<li>Certificados de Let's Encrypt o Cloudflare configurados. Consulta [certificados wildcard en Traefik](/es/traefik-certificado-wildcard/)</li>
+<li>Redirección de HTTP a HTTPS configurada. Consulta [redirección HTTP a HTTPS en Traefik](/es/traefik-redirigir-http-https/)</li>
+<li><code>apache2-utils</code> (Debian/Ubuntu) o <code>httpd-tools</code> (RHEL/Fedora) instalado para <code>htpasswd</code></li>
+</ul>
+</ListCheck>
+
+### Paso 1: Genera contraseñas bcrypt con htpasswd
+
+<Notice type="warning" title="Usa bcrypt, no MD5">
+El método antiguo usaba `htpasswd -nb`, que genera hashes APR1/MD5. Son criptográficamente débiles. Usa siempre `htpasswd -nB` para bcrypt (prefijo `$2y$`). La documentación oficial de Traefik ahora recomienda bcrypt.
+</Notice>
+
+Instala la utilidad `htpasswd`:
+
+```sh
+# Debian/Ubuntu
+sudo apt update && sudo apt install apache2-utils
+
+# RHEL/Fedora
+# sudo dnf install httpd-tools
+```
+
+Genera un hash bcrypt:
+
+<Tabs>
+<Tab name="Interactivo (recomendado)">
+```sh
+# The interactive prompt keeps the password out of your shell history
+echo $(htpasswd -nB admin) | sed -e 's/\$/\$\$/g'
+```
+
+Te pedirá que escribas la contraseña. La salida se ve así:
+
+```
+admin:$$2y$$05$$...
+```
+</Tab>
+<Tab name="Comando rápido de una línea">
+```sh
+# Fine for testing. Avoid in production, password ends up in shell history.
+echo $(htpasswd -nBC 12 admin MySecurePass) | sed -e 's/\$/\$\$/g'
+```
+</Tab>
+</Tabs>
+
+Qué está pasando aquí:
+
+- **`-nB`:** `-n` imprime en stdout en lugar de un archivo, `-B` usa bcrypt
+- **`-C 12`:** factor de coste opcional (2^12 rondas). El valor por defecto suele ser 5. Un valor más alto es más lento pero más resistente a la fuerza bruta. 12 es un valor razonable para producción.
+- **`sed -e 's/\$/\$\$/g'`:** duplica cada `$` porque Docker Compose interpreta `$VAR` como sustitución de variables de entorno. Sin esto, el hash queda corrupto al arrancar.
+
+<Notice type="info" title="Cuándo no necesitas el escape $$">
+El doblado de `$$` solo es necesario dentro de las etiquetas de `docker-compose.yml`. Si usas un `usersFile` (archivo de texto plano, cubierto en el paso 4), escribes el hash con un solo `$` porque el archivo no se evalúa como YAML. Herramientas como el módulo `docker_container` de Ansible tampoco necesitan el doblado. Consulta [variables de entorno en Docker Compose](/es/variables-entorno-docker/) para más información.
+</Notice>
+
+### Paso 2: Añade las etiquetas de autenticación básica a tu servicio Docker
+
+Necesitas dos etiquetas por servicio: una para referenciar el middleware y otra para definirlo.
+
+```yaml
+services:
+  nginx:
+    image: nginx:latest
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - traefik-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.nginx.rule=Host(`nginx.example.com`)
+      - traefik.http.routers.nginx.entrypoints=https
+      - traefik.http.services.nginx.loadbalancer.server.port=80
+      # Basic auth middleware
+      - traefik.http.routers.nginx.middlewares=nginx-auth
+      - traefik.http.middlewares.nginx-auth.basicauth.users=${TRAEFIK_USER_PASS}
+      - traefik.http.middlewares.nginx-auth.basicauth.realm=Restricted Area
+      - traefik.http.middlewares.nginx-auth.basicauth.removeheader=true
+networks:
+  traefik-net:
+    external: true
+```
+
+Puntos clave:
+
+- **El nombre del middleware debe coincidir** entre la referencia del router (`nginx-auth`) y la definición del middleware (`nginx-auth`). Esta es la causa n.º 1 de los errores de «la autenticación no funciona». Una errata aquí hace que Traefik ignore el middleware sin avisar.
+- **Usa nombres de middleware únicos por servicio.** Si dos servicios usan el mismo nombre de middleware con listas de usuarios distintas, uno sobrescribirá al otro sin avisar.
+- **Pon las etiquetas entre comillas.** Sin comillas, YAML puede fallar con los caracteres especiales.
+
+**Comprueba que funciona:**
+
+```sh
+# Should return 401 Unauthorized
+curl -I https://nginx.example.com
+
+# Should return 200 with correct credentials
+curl -I -u admin:yourpassword https://nginx.example.com
+```
+
+### Paso 3: Guarda las credenciales en un archivo .env
+
+Escribir el hash de la contraseña directamente en `docker-compose.yml` funciona, pero mete credenciales en el control de versiones y hace que rotarlas sea un dolor. Muévelas a un archivo `.env` en su lugar.
+
+<Notice type="info" title="¿Por qué .env en lugar de valores fijos?">
+Mantiene las credenciales fuera del control de versiones, facilita la rotación y separa la configuración de los secretos. Para entornos de producción, considera los [secretos de Docker Compose](/es/secretos-docker-compose/) o un vault para un control aún más estricto.
+</Notice>
+
+```sh
+# .env (in the same directory as docker-compose.yml)
+TRAEFIK_USER_PASS=admin:$$2y$$05$$KJ3RixvQ.Zabc123...rest_of_hash
+```
+
+Fíjate en el doblado de `$$`. Docker Compose sigue evaluando este archivo como sustitución de variables de entorno. Tu `docker-compose.yml` lo referencia con `${TRAEFIK_USER_PASS}`, como se muestra en el paso 2.
+
+### Paso 4: Usa usersFile para varios servicios
+
+Cuando tienes varios servicios que comparten las mismas credenciales, las etiquetas `users` en línea se vuelven repetitivas. El enfoque con `usersFile` te permite mantener un único archivo de texto plano que Traefik lee al arrancar.
+
+Crea el archivo de usuarios:
+
+```sh
+# ./traefik-data/users.txt
+# Each line is username:hash, standard htpasswd format
+# NO $$ doubling needed here, this is a plain text file, not YAML
+admin:$2y$05$KJ3RixvQ.Zabc123...
+viewer:$2y$05$AnotherHash...
+```
+
+Móntalo en el contenedor de **Traefik** (no en el contenedor del servicio):
+
+```yaml
+# In Traefik's docker-compose.yml
+services:
+  traefik:
+    image: traefik:v3.3
+    volumes:
+      - ./traefik-data/users.txt:/etc/traefik/users.txt:ro
+      # ... other volumes
+```
+
+Referéncialo en las etiquetas del servicio:
+
+```yaml
+# In any service's docker-compose.yml
+labels:
+  - traefik.http.routers.myapp.middlewares=myapp-auth
+  - traefik.http.middlewares.myapp-auth.basicauth.usersfile=/etc/traefik/users.txt
+  - traefik.http.middlewares.myapp-auth.basicauth.realm=My App
+```
+
+<Notice type="warning" title="Móntalo en el contenedor de Traefik">
+El error n.º 1 de la comunidad: `usersFile` debe ser legible por el contenedor de **Traefik**, no por el contenedor del servicio. Traefik lee el archivo al arrancar. Si lo montas en el contenedor equivocado, obtendrás un error de configuración silencioso y la autenticación no se aplicará.
+
+Comprueba que el archivo está bien montado:
+
+```sh
+docker exec traefik cat /etc/traefik/users.txt
+```
+</Notice>
+
+**Nota sobre precedencia:** si defines `users` y `usersFile` en el mismo middleware, los valores de `users` tienen prioridad sobre `usersFile` en el Traefik v3.x actual. De v3.1 a v3.3, `usersFile` tenía prioridad — el cambio se produjo en una versión posterior de v3.x, así que el comportamiento depende de tu versión.
+
+### Paso 5: Personaliza el aviso de inicio de sesión con `realm`
+
+Por defecto, el diálogo de autenticación básica del navegador muestra «traefik» como nombre del realm. Puedes personalizarlo con la opción `realm`:
+
+```yaml
+labels:
+  - "traefik.http.middlewares.my-auth.basicauth.realm=My App - Restricted Access"
+```
+
+Es una pequeña mejora de UX, pero hace que el aviso parezca intencionado y no el de fábrica. Los usuarios ven «My App - Restricted Access» en lugar de «traefik» en el diálogo de inicio de sesión.
+
+### Paso 6: Elimina la cabecera Authorization por seguridad
+
+Por defecto, Traefik reenvía la cabecera `Authorization` (que contiene las credenciales codificadas en Base64) a tu servicio backend. Si tu backend no la necesita, quítala:
+
+```yaml
+labels:
+  - "traefik.http.middlewares.my-auth.basicauth.removeheader=true"
+```
+
+Por qué importa: si tu servicio backend registra las cabeceras de las peticiones (y la mayoría lo hace), no quieres credenciales acabando en esos logs. Defensa en profundidad: elimina lo que no necesitas.
+
+### Paso 7: Pasa el nombre de usuario autenticado a los backends
+
+Si tu backend necesita saber quién se autenticó, usa `headerField` para establecer una cabecera personalizada con el nombre de usuario:
+
+```yaml
+labels:
+  - "traefik.http.middlewares.my-auth.basicauth.headerField=X-WebAuth-User"
+```
+
+Esto añade `X-WebAuth-User: <username>` a las peticiones proxied. Útil para logging, comportamiento por usuario o control de acceso sencillo en aplicaciones sin autenticación propia.
+
+## Encadenar middlewares de Traefik para defensa en profundidad
+
+La autenticación básica por sí sola es una sola capa. Para servicios expuestos a internet, encadénala con limitación de tasa y listas blancas de IPs.
+
+<Notice type="info" title="Sintaxis para encadenar middlewares">
+Usa referencias de middleware separadas por comas: `my-auth@docker,rate-limit@docker`. El orden importa. Traefik los aplica de izquierda a derecha. Pon primero los middlewares que fallan más rápido (límite de tasa, lista blanca de IPs) antes que los más costosos (autenticación).
+</Notice>
+
+### Autenticación básica + limitación de tasa
+
+```yaml
+labels:
+  - traefik.enable=true
+  - traefik.http.routers.myapp.rule=Host(`myapp.example.com`)
+  - traefik.http.routers.myapp.entrypoints=https
+  - traefik.http.routers.myapp.middlewares=rate-limit@docker,my-auth@docker
+  # Rate limiting
+  - traefik.http.middlewares.rate-limit.ratelimit.average=100
+  - traefik.http.middlewares.rate-limit.ratelimit.burst=50
+  # Basic auth
+  - traefik.http.middlewares.my-auth.basicauth.users=${TRAEFIK_USER_PASS}
+  - traefik.http.middlewares.my-auth.basicauth.removeheader=true
+  - traefik.http.middlewares.my-auth.basicauth.realm=My App
+```
+
+Esto limita el servicio a una media de 100 peticiones/segundo con picos de hasta 50, y exige autenticación.
+
+### Autenticación básica + lista blanca de IPs
+
+```yaml
+labels:
+  - traefik.http.routers.myapp.middlewares=local-only@docker,my-auth@docker
+  # Allow only private networks
+  - traefik.http.middlewares.local-only.ipallowlist.sourcerange=10.0.0.0/8,192.168.0.0/16
+  # Basic auth
+  - traefik.http.middlewares.my-auth.basicauth.users=${TRAEFIK_USER_PASS}
+```
+
+Nota: `ipWhiteList` pasó a llamarse `ipAllowList` en Traefik v3. Si migras desde v2, actualiza los nombres de las etiquetas.
+
+Para una seguridad de servidor más amplia incluyendo la integración con CrowdSec, consulta [cómo securizar un VPS con CrowdSec](/es/crowdsec-servidor-seguro/).
+
+### Proteger solo rutas específicas
+
+Caso de uso: proteger `/admin` pero dejar `/public` abierto. Define dos routers en el mismo host:
+
+```yaml
+labels:
+  # Public router — no auth
+  - traefik.http.routers.myapp.rule=Host(`myapp.example.com`)
+  - traefik.http.routers.myapp.entrypoints=https
+  # Admin router — with auth, higher priority
+  - traefik.http.routers.myapp-admin.rule=Host(`myapp.example.com`) && PathPrefix(`/admin`)
+  - traefik.http.routers.myapp-admin.entrypoints=https
+  - traefik.http.routers.myapp-admin.priority=10
+  - traefik.http.routers.myapp-admin.middlewares=admin-auth
+  - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_USER_PASS}
+```
+
+El router más específico (`/admin`) necesita un valor de prioridad más alto para coincidir primero. La prioridad por defecto de Traefik se calcula a partir de la longitud de la regla, pero los valores explícitos son más fiables.
+
+## Proteger el panel de Traefik con autenticación básica
+
+Uno de los casos de uso más comunes: securizar el propio panel de Traefik. Añade estas etiquetas al contenedor de **Traefik**:
+
+```yaml
+services:
+  traefik:
+    image: traefik:v3.3
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      # ... other args
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.dashboard.rule=Host(`traefik.example.com`)
+      - traefik.http.routers.dashboard.service=api@internal
+      - traefik.http.routers.dashboard.entrypoints=https
+      - traefik.http.routers.dashboard.middlewares=dashboard-auth
+      - traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_USERS}
+      - traefik.http.middlewares.dashboard-auth.basicauth.realm=Traefik Dashboard
+      - traefik.http.middlewares.dashboard-auth.basicauth.removeheader=true
+    networks:
+      - traefik-net
+```
+
+Usa una variable de entorno distinta para las credenciales del panel (`TRAEFIK_DASHBOARD_USERS`): no compartas la misma contraseña entre todos tus servicios.
+
+**Comprueba:** abre `https://traefik.example.com` en tu navegador. Deberías ver un aviso de inicio de sesión. Tras introducir las credenciales, el panel de Traefik debería cargar.
+
+## Problemas comunes y solución de errores
+
+<Accordion label="401 Unauthorized: las credenciales no funcionan" group="faq" expanded="false">
+**Síntoma:** el aviso de inicio de sesión aparece, pero las credenciales siempre se rechazan.
+
+**Causas habituales:**
+- Hash generado con `htpasswd -nb` (MD5) en lugar de `htpasswd -nB` (bcrypt). Regenéralo con bcrypt.
+- Contraseña incorrecta: el hash de `.env` no coincide con lo que escribes.
+- `$$` no duplicado en el archivo `.env`: Docker Compose eliminó los caracteres `$` del hash.
+- Formato de hash incorrecto: Traefik espera `usuario:hash`, no solo el hash.
+
+**Solución:** regenera y verifica:
+
+```sh
+# Generate a fresh bcrypt hash
+echo $(htpasswd -nBC 12 admin) | sed -e 's/\$/\$\$/g'
+
+# Test with curl (should return 200)
+curl -I -u admin:yourpassword https://myapp.example.com
+```
+</Accordion>
+
+<Accordion label="404 Not Found: el aviso de autenticación no aparece" group="faq" expanded="false">
+**Síntoma:** no hay aviso de inicio de sesión, solo un 404.
+
+**Causas habituales:**
+- El nombre del middleware no coincide entre la referencia del router y la definición del middleware. Es el error más común.
+
+```yaml
+# WRONG — names don't match:
+- "traefik.http.routers.myapp.middlewares=traefik-auth"
+- "traefik.http.middlewares.traefiknas-auth.basicauth.users=..."
+
+# RIGHT — names match exactly:
+- "traefik.http.routers.myapp.middlewares=myapp-auth"
+- "traefik.http.middlewares.myapp-auth.basicauth.users=..."
+```
+
+- Etiquetas en el contenedor equivocado: las etiquetas deben ir en el contenedor del servicio, no en el de Traefik (salvo que estés configurando la autenticación del panel).
+- El router no coincide con la petición: revisa la regla `Host()` y los `entrypoints`.
+</Accordion>
+
+<Accordion label="usersFile no se carga" group="faq" expanded="false">
+**Síntoma:** la autenticación no funciona con `usersFile`, pero sí con `users` en línea.
+
+**Causa:** el archivo está montado en el contenedor del servicio en lugar del contenedor de Traefik. Traefik lee el archivo, no tu backend.
+
+**Solución:** comprueba que el archivo es legible dentro de Traefik:
+
+```sh
+docker exec traefik cat /etc/traefik/users.txt
+```
+
+Si el archivo no está, móntalo en el `docker-compose.yml` de Traefik:
+
+```yaml
+volumes:
+  - ./traefik-data/users.txt:/etc/traefik/users.txt:ro
+```
+</Accordion>
+
+<Accordion label="Errores de configuración: el middleware no se aplica" group="faq" expanded="false">
+**Síntoma:** la autenticación funciona en un servicio pero no en otro, o el middleware parece ignorado.
+
+**Causas habituales:**
+- Nombres de middleware duplicados entre servicios: si dos servicios definen un middleware llamado `auth`, uno sobrescribe al otro sin avisar. Usa nombres únicos: `nginx-auth`, `grafana-auth`, etc.
+- Etiquetas en el contenedor equivocado: las etiquetas deben ir en el servicio que necesita autenticación, no en un contenedor proxy compartido.
+- Erratas en las claves de las etiquetas: `basicauth` y no `basicAuth`, `usersfile` y no `usersFile` (las etiquetas no distinguen mayúsculas, pero sé consistente).
+
+**Comprueba:** revisa la configuración detectada por Traefik:
+
+```sh
+docker logs traefik 2>&1 | grep -i "middleware"
+```
+
+O revisa el panel (cuando puedas acceder) en la pestaña Middleware.
+</Accordion>
+
+<Accordion label="Hash bcrypt incompatible: la autenticación siempre falla" group="faq" expanded="false">
+**Síntoma:** el hash parece correcto, pero la autenticación siempre lo rechaza.
+
+**Causa:** la imagen Docker `httpd:alpine` puede producir hashes bcrypt incompatibles en algunas versiones.
+
+**Solución:** genera el hash con `apache2-utils` en el host o en un contenedor Alpine completo:
+
+```sh
+# On the host (Debian/Ubuntu)
+sudo apt install apache2-utils
+echo $(htpasswd -nBC 12 admin) | sed -e 's/\$/\$\$/g'
+
+# Or via Docker
+docker run --rm -it alpine:latest sh -c "apk add --no-cache apache2-utils && htpasswd -nBC 12 admin"
+```
+</Accordion>
+
+### Lista rápida de verificación
+
+Después de configurar la autenticación, ejecuta estos comandos para confirmar que todo funciona:
+
+```sh
+# Should return 401 Unauthorized (no credentials)
+curl -I https://myapp.example.com
+
+# Should return 200 OK (with correct credentials)
+curl -I -u admin:yourpassword https://myapp.example.com
+
+# Check Traefik logs for auth-related entries
+docker logs traefik 2>&1 | grep -i "authentication"
+```
+
+## Limitaciones de la autenticación básica
+
+<Notice type="warning" title="La autenticación básica es una primera capa, no una solución completa">
+La autenticación básica tiene limitaciones reales. Conócelas antes de confiar en ella para algo sensible:
+
+- **Sin mecanismo de cierre de sesión** — el navegador guarda las credenciales en caché hasta que cierras la pestaña
+- **Sin soporte de MFA** — solo contraseña de un factor
+- **Sin gestión de sesiones** — las credenciales se envían en cada petición
+- **Sin permisos granulares** — el acceso es todo o nada
+- **Las credenciales van en Base64, no cifradas** — sin HTTPS, son legibles sin esfuerzo
+
+Para algo realmente sensible (paneles de producción, aplicaciones de cara al usuario), usa un proxy de autenticación como Authelia o Authentik, o la autenticación nativa de la app. La autenticación básica es una buena primera capa para herramientas de desarrollo, utilidades internas y servicios sin autenticación propia.
+</Notice>
+
+## Conclusión
+
+El middleware de autenticación básica de Traefik es una forma rápida de añadir control de acceso a servicios Docker que no tienen autenticación propia. Con hashing de contraseñas bcrypt, el enfoque `usersFile` para credenciales compartidas y el encadenamiento de middlewares con limitación de tasa o listas blancas de IPs, obtienes una primera capa de protección sólida.
+
+Esto es lo que hemos visto:
+
+- Generar contraseñas bcrypt seguras con `htpasswd -nB`
+- Añadir etiquetas de autenticación a servicios de Docker Compose
+- Usar archivos `.env` y `usersFile` para gestionar credenciales
+- Personalizar el aviso de inicio de sesión con `realm`
+- Eliminar la cabecera `Authorization` con `removeHeader`
+- Pasar el nombre de usuario autenticado a los backends con `headerField`
+- Encadenar middlewares para defensa en profundidad
+- Proteger el panel de Traefik
+
+Si todavía estás configurando Traefik, empieza con la guía de [Traefik como proxy inverso en Docker](/es/traefik-proxy-docker/) y [configura certificados wildcard](/es/traefik-certificado-wildcard/). Para más servicios que proteger detrás de autenticación, consulta los [mejores contenedores Docker para un home server](/es/contenedores-docker-servidor-casa/). Si prefieres una plataforma de despliegue gestionada, echa un vistazo a [autoalojar con Dokploy](/dokploy-install/).
+
+¿Necesitas un VPS fiable donde ejecutar todo esto? [Hetzner](https://go.bitdoze.com/hetzner) ofrece hosting VPS asequible con un rendimiento sólido para stacks Docker autoalojados.
+
+_Los precios de los VPS subieron en toda la línea en 2026 — si estás replanteándote un servidor alquilado, consulta [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._

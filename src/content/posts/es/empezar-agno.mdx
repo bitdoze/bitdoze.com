@@ -1,0 +1,577 @@
+---
+date: 2025-03-14
+lastmod: 2026-08-19T00:00:00Z
+translationKey: "agno-get-start"
+title: "Primeros pasos con los agentes de Agno: uv, RAG y memoria"
+meta_title: "Tutorial de agentes de Agno: primeros pasos con uv, RAG y memoria"
+description: "Aprende a crear agentes de Agno en Python con esta guía paso a paso. Configura uv, añade búsqueda web, memoria y RAG con LanceDB, y crea equipos multiagente."
+image: "@assets/images/25/03/agno-get-started.jpg"
+categories: ["ai"]
+authors: ["Dragos"]
+series: ["Agno Agents Tutorials", "1"]
+tags: ["ai-agents", "agno", "rag"]
+canonical: "https://www.bitdoze.com/es/empezar-agno/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Quieres un agente de IA que busque en la web, recuerde tus preferencias y rebusque en PDFs. [Agno](https://www.agno.com) es un framework Python de código abierto para crear **agentes de Agno** que hacen exactamente eso. Combínalo con **`uv`**, el gestor de paquetes basado en Rust de Astral (entre 10 y 100 veces más rápido que `pip`), y puedes tener agentes funcionando esta misma noche.
+
+Esta guía es una renovación completa para **Agno 2.x**. A fecha de agosto de 2026, la última versión estable es **2.8.6** (la v3.0.0a1 está en alfa si quieres vivir al límite). Si has visto tutoriales antiguos de Agno (incluida la versión original de marzo de 2025 de este artículo), la API recibió una revisión importante en la v2.0. Viejos conocidos como `SqliteAgentStorage`, `PDFUrlKnowledgeBase` y `Agent(team=[...])` han desaparecido, sustituidos por un conjunto de herramientas más limpio. Todo lo que sigue está verificado contra la versión real.
+
+Primero configuraremos `uv` y luego construiremos un agente de Agno que empieza como un simple chatbot y crece hasta convertirse en un sistema de **Generación Aumentada por Recuperación (RAG)** con memoria, impulsado por LanceDB y DuckDuckGo. Terminaremos con un equipo de dos agentes que se coordinan en preguntas complejas. Fragmentos de código, desglose de costes y solución de problemas incluidos.
+
+<Notice type="info" title="Actualizado para Agno 2.x">
+Este artículo se publicó originalmente en marzo de 2025 con Agno 1.x. Ha sido reescrito y verificado con **Agno 2.8.6** (agosto de 2026). El vídeo incrustado a continuación muestra la API antigua en acción. El código de esta guía está actualizado.
+</Notice>
+
+
+## Primeros pasos con los agentes de Agno
+
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/ynsbfbuO2As"
+  label="Agentes de Agno, UV y RAG: tu arma secreta"
+/>
+
+
+### Paso 1: Configura tu entorno con uv
+
+Antes de instalar Agno, necesitas un gestor de paquetes de Python rápido. **uv** viene del equipo de Astral (los mismos detrás de `ruff`) y le da mil vueltas a `pip`.
+
+Puedes consultar más sobre [cómo empezar con uv](/es/empezar-uv/).
+
+#### Instalación de uv
+
+Para macOS/Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Para Windows (PowerShell):
+
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+Comprueba que está vivo:
+
+```bash
+uv --version  # Expect "uv 0.12" or newer
+```
+
+#### Inicialización de un proyecto
+
+Inicializa el proyecto:
+
+<Notice type="warning" title="uv 0.12+ cambió la estructura por defecto">
+A partir de uv 0.12.0, `uv init` crea un proyecto **empaquetado** por defecto (estructura src/ con sistema de compilación). Para este tutorial usamos una estructura plana con `main.py`, así que pasa `--no-package`. Si lo olvidas, tu código irá en `src/agno_adventure/main.py` en su lugar.
+</Notice>
+
+```bash
+uv init --no-package agno-adventure
+cd agno-adventure
+```
+
+Esto genera una estructura de proyecto ordenada: `pyproject.toml` para las dependencias, `.python-version`, `main.py` donde escribir el código, un `README.md` y un repositorio `git` nuevo. Fija Python 3.12 por coherencia (¿necesitas [instalar Python en Mac](https://www.bitdoze.com/install-upgrade-python-mac/) primero?):
+
+```bash
+uv python pin 3.12
+```
+
+#### Configuración del entorno
+
+Ahora, crea un entorno virtual:
+
+```bash
+uv venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+```
+
+Instala lo esencial. Agno divide sus integraciones en extras opcionales, así que solo instalas lo que necesitas:
+
+```bash
+uv add "agno[openai,lancedb,pdf,ddg,sqlite]" typer rich
+```
+
+Esa única línea instala:
+- **`agno`**: el propio framework, más:
+  - `openai`: el proveedor de modelos de OpenAI (los modelos GPT son el predeterminado de Agno)
+  - `lancedb`: nuestra base de datos vectorial para el RAG de más adelante
+  - `pdf`: el lector de PDF (`pypdf` internamente)
+  - `ddg`: búsqueda web con DuckDuckGo (a través del paquete moderno `ddgs`)
+  - `sqlite`: almacenamiento de sesiones en SQLite (`sqlalchemy` y compañía)
+- **`typer`** y **`rich`**: para la CLI interactiva que construiremos en el Paso 5
+
+Agno necesita una clave de API de OpenAI, así que configúrala:
+
+```bash
+export OPENAI_API_KEY="sk-your-key-here"
+```
+
+**Consejo profesional:** Guarda tus claves en un archivo `.env`. `uv run` carga automáticamente `.env` desde el directorio de tu proyecto, así que no necesitas herramientas adicionales. Solo añade `OPENAI_API_KEY=tu-clave-aquí` a `.env` y ejecuta los scripts con `uv run python main.py`.
+
+
+### Paso 2: Tu primer agente de Agno
+
+Vamos a construir tu primer agente. Agno es un framework Python de código abierto (~40k estrellas en GitHub, licencia Apache-2.0) que hace sencillo crear agentes de IA. Nuestro primer agente es un chatbot simple.
+
+#### El código
+
+Edita `main.py`:
+
+```python
+from agno.agent import Agent
+
+agent = Agent(
+    model="openai:gpt-5.5",
+    description="You're a cheerful AI pal who loves a good chat!",
+    markdown=True
+)
+
+agent.print_response("Hey! What's cooking today?", stream=True)
+```
+
+Ejecútalo:
+
+```bash
+uv run python main.py
+```
+
+<Notice type="info" title="Consejo: añade debug_mode=True">
+Añade `debug_mode=True` a cualquier constructor de Agent para ver las llamadas a herramientas sin procesar, los prompts del modelo y los tiempos en la salida del terminal. Ideal para aprender qué ocurre bajo el capó.
+</Notice>
+
+#### Cómo funciona
+
+- **`Agent`**: la clase central. Defines la personalidad (vía `description`), el modelo y las herramientas.
+- **`model="openai:gpt-5.5"`**: Agno 2.x usa referencias de modelo en forma de cadena como `"proveedor:id-de-modelo"`. La cadena se resuelve a la clase de modelo correcta internamente (para OpenAI corresponde a `OpenAIResponses`). Puedes cambiar a cualquier proveedor: `"anthropic:claude-sonnet-4-5"`, `"google:gemini-3.5-flash"`, `"ollama:llama3.1:8b"`, etc. El estilo antiguo basado en clases (`from agno.models.openai import OpenAIChat`) sigue importándose por compatibilidad, pero las referencias de cadena son más limpias.
+- **`description`**: define la personalidad del agente. Aquí es un chatbot amigable.
+- **`markdown=True`**: formatea las respuestas con Markdown.
+- **`print_response`**: transmite la respuesta en tiempo real.
+
+Obtendrás una respuesta como «¡Hola! Solo estoy aquí para animar tu día. ¿Qué hay en el menú?» Es básico, pero funciona.
+
+#### Más sobre Agno
+
+Agno es ligero y rápido. Maneja chatbots simples y agentes complejos con múltiples herramientas sin abstracciones pesadas. Puedes añadir herramientas, memoria y bases de conocimiento de forma incremental. Si TypeScript es más lo tuyo, puedes [crear un agente de IA con Mastra](/es/crear-agente-ia-mastra/) en su lugar. Pero el enfoque Python-first de Agno funciona muy bien para el prototipado rápido.
+
+Desde la v2.0, Agno también incluye **AgentOS**, un runtime que sirve tus agentes como APIs REST con trazado, aislamiento de sesiones y RBAC. Lo veremos más adelante.
+
+#### Solución de problemas
+
+- **"ModuleNotFoundError"**: ¿Olvidaste un paquete? Ejecuta `uv add "agno[openai]"` e inténtalo de nuevo.
+- **Agente silencioso**: Revisa tu `OPENAI_API_KEY`. Sin clave, no hay chat.
+
+
+### Paso 3: Añadir herramientas de búsqueda web con DuckDuckGo
+
+El agente puede chatear pero no puede buscar nada. Vamos a añadirle la búsqueda web de **DuckDuckGo**.
+
+#### El código
+
+Actualiza `main.py`:
+
+```python
+from agno.agent import Agent
+from agno.tools.duckduckgo import DuckDuckGoTools
+
+agent = Agent(
+    model="openai:gpt-5.5",
+    description="You're a web-savvy AI explorer!",
+    tools=[DuckDuckGoTools()],
+    markdown=True
+)
+
+agent.print_response("What's the buzz in New York right now?", stream=True)
+```
+
+Ejecútalo:
+
+```bash
+uv run python main.py
+```
+
+#### Cómo funciona
+
+- **`DuckDuckGoTools`**: da a tu agente búsqueda web. Decide cuándo usarla en función de la pregunta.
+- **Llamadas a herramientas en el terminal**: el antiguo parámetro `show_tool_calls=True` desapareció en Agno 2.x. Cuando transmites una respuesta, el impresor de la CLI muestra las llamadas a herramientas a medida que ocurren. Para un detalle de traza completo, añade `debug_mode=True` al `Agent` o ejecuta el agente a través de AgentOS e inspecciona la UI de trazas.
+- **Salida**: Espera algo como «*Llamando a DuckDuckGo…* ¡Aquí tienes lo último de Nueva York!». Ahora es un conversador que conoce el mundo.
+
+#### El poder de las herramientas de Agno
+
+El sistema de herramientas de Agno es modular. `DuckDuckGoTools` es solo una opción: Agno soporta un conjunto creciente de herramientas que puedes combinar, desde APIs hasta funciones Python personalizadas (solo pasa cualquier función en `tools=[...]`). También puedes integrar herramientas vía [Model Context Protocol (MCP)](/es/introduccion-mcp-principiantes/), el estándar emergente para la interoperabilidad de herramientas; consulta [Agno con Context7 MCP](/es/agno-herramientas-mcp-context7/) para un ejemplo práctico.
+
+Si necesitas una API de búsqueda web con más control (resultados estructurados, paginación, geolocalización), [TinyFish Web Search API](https://go.bitdoze.com/tinyfish) merece un vistazo para agentes en producción que superan los límites de tasa de DuckDuckGo.
+
+#### Solución de problemas
+
+- **Sin resultados web**: Asegúrate de que el extra `ddg` está instalado — ejecuta `uv add "agno[ddg]"`.
+- **¿Atascado?**: Los límites de tasa podrían ser el culpable. Añade `debug_mode=True` al `Agent` para ver en profundidad qué lo está frenando.
+
+
+### Paso 4: Memoria de Agno que perdura
+
+Nuestro agente tiene carisma pero lo olvida todo en un parpadeo. Vamos a darle una mejora de memoria con el **almacenamiento respaldado por SQLite** de Agno, convirtiéndolo en un compañero leal.
+
+#### El código
+
+Crea `memory_agent.py`:
+
+```python
+from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
+from rich.pretty import pprint
+
+agent = Agent(
+    model="openai:gpt-5.5",
+    description="You're an AI with a memory like an elephant!",
+    user_id="dragos",
+    db=SqliteDb(db_file="tmp/agent_storage.db"),
+    add_history_to_context=True,
+    num_history_runs=3,
+    update_memory_on_run=True,
+    session_id="my_chat_session",
+    markdown=True
+)
+
+agent.print_response("I love spicy Thai food. What's your favorite cuisine?")
+agent.print_response("What did I just say I love?")
+
+# Inspect what the agent remembers
+pprint(agent.get_session_messages(session_id="my_chat_session"))
+pprint(agent.get_user_memories(user_id="dragos"))
+```
+
+Ejecútalo:
+
+```bash
+uv run python memory_agent.py
+```
+
+#### Cómo funciona
+
+La API de memoria recibió una gran limpieza en Agno 2.x: la antigua clase `SqliteAgentStorage` y todo el paquete `agno.storage` han desaparecido. Este es el nuevo modelo:
+
+<Notice type="info" title="Memoria vs historial vs estado">
+Agno separa tres conceptos limpiamente. **Memoria** = hechos extraídos sobre un usuario, delimitados por `user_id`, compartidos entre sesiones. **Historial de chat** = mensajes y llamadas a herramientas de ejecuciones anteriores, delimitados por `session_id`, para continuidad conversacional. **Estado de sesión** = datos de aplicación (carritos, listas de tareas, contadores) gestionados por tu código o herramientas.
+</Notice>
+
+- **`db=SqliteDb(db_file=...)`**: Almacena sesiones, historial de chat y memorias extraídas en una base de datos SQLite. Sin servicio adicional.
+- **`user_id="dragos"`**: Delimita la extracción de memoria a un usuario específico. Sin él, las memorias no se recuperarán de forma fiable entre sesiones.
+- **`add_history_to_context=True` + `num_history_runs=3`**: Introduce las últimas ejecuciones (cada una con todos sus mensajes) en el prompt, dando contexto conversacional. Sustituyen a los antiguos `add_history_to_messages` / `num_history_responses`.
+- **`update_memory_on_run=True`**: Activa la **memoria automática**: tras cada ejecución, Agno extrae hechos duraderos sobre el usuario (preferencias, objetivos) y los almacena indexados por `user_id`. La alternativa es la **memoria agéntica** (`enable_agentic_memory=True`), donde el propio modelo decide cuándo inspeccionar, crear o actualizar memorias durante una ejecución. Elige un modo por agente.
+- **`session_id`**: Vincula las interacciones bajo una sesión: usa el mismo ID y es como retomar justo donde lo dejaste.
+- **`get_session_messages()` / `get_user_memories()`**: La forma v2 de mirar dentro: historial de chat y hechos extraídos, respectivamente. El antiguo atributo `agent.memory.messages` ya no existe.
+- **`search_knowledge=True`**: En realidad es el valor por defecto cuando hay una base de `knowledge` configurada en el agente, así que no necesitas especificarlo explícitamente, pero mantenerlo ahí es inofensivo y deja clara la intención.
+
+Pregunta sobre comida tailandesa y luego pon a prueba su memoria. Declarará orgulloso: «¡Te encanta la comida tailandesa picante!». ¡Memoria desbloqueada!
+
+Este patrón es la base de agentes del mundo real como un [bot de Discord con IA y Agno](/es/crear-tu-propio-agente-ia/) que recuerda a los usuarios entre conversaciones.
+
+#### Solución de problemas
+
+- **Amnesia**: ¿Mismo `session_id`? ¿Mismo `user_id`? Revisa ambos: la memoria se delimita por `user_id` y el historial por `session_id`.
+- **Sin almacenamiento**: Ejecuta `uv add "agno[sqlite]"` — es la columna vertebral del almacenamiento SQLite.
+- **Directorio inexistente**: Ejecuta `mkdir tmp` si el directorio `tmp/` aún no existe.
+
+**Consejo profesional:** Para proyectos más grandes, cambia `SqliteDb` por `PostgresDb` de `agno.db.postgres` con `uv add "agno[postgres]"`. Puedes [desplegar una base de datos vectorial Postgres](https://www.bitdoze.com/deploy-pgvector-pgadmin-docker/) con pgvector para combinar búsqueda vectorial y almacenamiento de sesiones en una sola base de datos.
+
+
+### Paso 5: RAG con LanceDB — el conocimiento es tu superpoder
+
+Es hora de convertir a tu agente en un **experto en cocina tailandesa** con **RAG** (Generación Aumentada por Recuperación). Usando LanceDB, extraerá recetas de PDFs y las respaldará con ingenio web, ¡en modo interactivo!
+
+#### El código
+
+Crea `rag_agent.py`:
+
+```python
+import typer
+from rich.prompt import Prompt
+
+from agno.agent import Agent
+from agno.knowledge.knowledge import Knowledge
+from agno.knowledge.embedder.openai import OpenAIEmbedder
+from agno.knowledge.reader.pdf_reader import PDFReader
+from agno.vectordb.lancedb import LanceDb, SearchType
+from agno.tools.duckduckgo import DuckDuckGoTools
+
+# LanceDB Vector DB
+vector_db = LanceDb(
+    table_name="recipes",
+    uri="tmp/lancedb",
+    search_type=SearchType.hybrid,
+    embedder=OpenAIEmbedder(id="text-embedding-3-small"),
+)
+
+# Knowledge Base
+knowledge = Knowledge(
+    vector_db=vector_db,
+    readers=[PDFReader()],
+)
+
+def lancedb_agent(user: str = "user"):
+    agent = Agent(
+        model="openai:gpt-5.5",
+        description="You're a Thai cuisine expert with web backup!",
+        user_id=user,
+        knowledge=knowledge,
+        search_knowledge=True,
+        tools=[DuckDuckGoTools()],
+        instructions=[
+            "Search the knowledge base for Thai recipes first.",
+            "Use DuckDuckGo if more info is needed."
+        ],
+        markdown=True
+    )
+
+    print(f"Session ID: {agent.session_id}\n")
+
+    while True:
+        message = Prompt.ask(f"[bold] :sunglasses: {user} [/bold]")
+        if message in ("exit", "bye"):
+            break
+        agent.print_response(message, stream=True)
+
+if __name__ == "__main__":
+    # Load the PDF into the knowledge base (idempotent - safe to run every time)
+    knowledge.insert(url="https://agno-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf")
+    typer.run(lancedb_agent)
+```
+
+Ejecútalo:
+
+```bash
+uv run python rag_agent.py
+```
+
+<Notice type="info" title="Alternativa CLI integrada">
+Si no quieres incorporar `typer` y `rich`, puedes usar `agent.cli_app()` en su lugar: te da un bucle de chat interactivo básico sin dependencias adicionales.
+</Notice>
+
+#### Cómo funciona
+
+La API de conocimiento se reestructuró por completo en Agno 2.x: `PDFUrlKnowledgeBase` desapareció. Esta es la nueva forma:
+
+- **`Knowledge`**: La única clase de base de conocimiento (de `agno.knowledge.knowledge`). Combina una base de datos vectorial, lectores opcionales e ingesta de contenido.
+- **`readers=[PDFReader()]`**: Indica a la base de conocimiento cómo analizar PDFs (el extra `pdf` instala `pypdf` internamente). Los lectores ahora viven en `agno.knowledge.reader`: hay versiones listas para PDF, DOCX, CSV, Markdown, Excel, YouTube, Wikipedia y más.
+- **`knowledge.insert(url=...)`**: El sustituto en v2 de `knowledge_base.load(recreate=True)`: descarga el archivo, lo analiza con el lector correspondiente, lo trocea y lo incrusta en la base de datos vectorial. Es **idempotente por defecto** (`upsert=True`), así que reejecutar el script no duplicará contenido. También puedes insertar por `path=` local, `text_content=` en crudo o incluso `topics=` para una carga basada en consultas.
+- **`LanceDb` + `SearchType.hybrid`**: La búsqueda híbrida combina búsquedas por palabra clave y semánticas para una precisión máxima; y como LanceDB pasó a la búsqueda de texto completo nativa, ya no necesitas el paquete `tantivy`.
+- **`OpenAIEmbedder`**: Se movió en v2: ahora vive en `agno.knowledge.embedder.openai`. Misma idea: convierte texto en embeddings usando `text-embedding-3-small`.
+- **`search_knowledge=True`**: El flag de v2 que permite al agente buscar en su base de conocimiento durante una ejecución (RAG agéntico: el agente decide cuándo recuperar). En realidad es el valor por defecto cuando `knowledge` está configurado.
+- **`typer`/`Prompt`**: Mantiene el chat activo hasta que digas «bye»: ¡perfecto para cazar recetas!
+- **Salida**: Pregunta «¿Cómo hago sopa de coco con pollo y galanga?». Rebuscará en el PDF y luego navegará por la web si es necesario.
+
+#### La ventaja RAG de Agno
+
+RAG combina la recuperación (desde LanceDB) con la generación (vía GPT), convirtiendo a tu agente en un ninja del conocimiento. Agno soporta más de 20 bases de datos vectoriales, desde opciones locales como LanceDB y ChromaDB hasta servicios gestionados como Pinecone y Weaviate, y te permite cambiarlas modificando unas pocas líneas.
+
+#### Solución de problemas
+
+- **El PDF no carga**: Verifica la URL y ejecuta `uv add "agno[pdf,lancedb]"`.
+- **Errores de embeddings**: `OpenAIEmbedder` necesita la misma `OPENAI_API_KEY` que el modelo de chat: revisa tu `.env`.
+- **Sin prompt de chat**: Ejecuta `uv add typer rich` para las bondades interactivas (o usa `agent.cli_app()`).
+- **Contenido duplicado**: No te preocupes: `insert()` hace upsert por defecto, así que reejecutar es seguro.
+
+**Consejo profesional:** Añade más fuentes a `knowledge.insert()` — libros de cocina, guías de viaje, documentos en markdown — para crear un imperio de conocimiento personalizado.
+
+
+### Paso 6: Equipos multiagente — dúo de chef e investigador
+
+¿Por qué quedarse con un agente cuando puedes tener un **dúo dinámico**? Vamos a emparejar un chef tailandés con un investigador web para una colaboración puramente mágica.
+
+#### El código
+
+Crea `team_agent.py`:
+
+```python
+from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
+from agno.knowledge.knowledge import Knowledge
+from agno.knowledge.embedder.openai import OpenAIEmbedder
+from agno.knowledge.reader.pdf_reader import PDFReader
+from agno.vectordb.lancedb import LanceDb, SearchType
+from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.team import Team, TeamMode
+
+# Shared knowledge base
+vector_db = LanceDb(
+    table_name="recipes",
+    uri="tmp/lancedb",
+    search_type=SearchType.hybrid,
+    embedder=OpenAIEmbedder(id="text-embedding-3-small"),
+)
+knowledge = Knowledge(vector_db=vector_db, readers=[PDFReader()])
+knowledge.insert(url="https://agno-public.s3.amazonaws.com/recipes/ThaiRecipes.pdf")
+
+# Chef Agent
+chef = Agent(
+    name="ThaiChef",
+    role="Thai cuisine expert",
+    model="openai:gpt-5.5",
+    knowledge=knowledge,
+    search_knowledge=True,
+    instructions=["Provide detailed Thai recipes from the knowledge base."],
+    markdown=True
+)
+
+# Researcher Agent
+researcher = Agent(
+    name="WebResearcher",
+    role="Web info gatherer",
+    model="openai:gpt-5.5",
+    tools=[DuckDuckGoTools()],
+    instructions=["Search the web for supplementary info when asked."],
+    markdown=True
+)
+
+# Team Leader
+team = Team(
+    name="Thai Team",
+    members=[chef, researcher],
+    mode=TeamMode.coordinate,
+    db=SqliteDb(db_file="tmp/team_storage.db"),
+    instructions=[
+        "Ask ThaiChef for recipes first.",
+        "If more context is needed, consult WebResearcher.",
+        "Blend their inputs into a cohesive answer."
+    ],
+    markdown=True
+)
+
+team.print_response("Tell me about Thai chicken soup and its cultural significance.", stream=True)
+```
+
+Ejecútalo:
+
+```bash
+uv run python team_agent.py
+```
+
+#### Cómo funciona
+
+La colaboración multiagente obtuvo una clase dedicada en Agno 2.x: `Agent(team=[...])` desapareció. Saluda a `agno.team.Team`:
+
+- **`Team(members=[...])`**: El líder del equipo coordina a sus agentes miembros, delegando tareas según sus `role`s y sintetizando resultados. Los miembros pueden ser incluso equipos anidados.
+- **`TeamMode`**: Hace explícitos los estilos de colaboración: `coordinate` (por defecto; descomponer el trabajo, delegar, sintetizar), `route` (enviar a un único especialista), `broadcast` (la misma tarea a todos los miembros) o `tasks` (bucle de lista de tareas hasta terminar).
+- **`ThaiChef`**: Gurú de recetas, extrayendo del PDF vía LanceDB: `OpenAIEmbedder` produce los embeddings y `search_knowledge=True` le permite recuperar durante las ejecuciones.
+- **`WebResearcher`**: Sabueso web, desenterrando contexto cultural con DuckDuckGo.
+- **`db=SqliteDb(...)`**: Mantiene las sesiones y el historial del equipo al día entre ejecuciones.
+- **Salida**: Obtendrás una receta *y* una historia, como «¡Esta sopa es un clásico tailandés, ligada a antiguas tradiciones herbales!».
+
+Para una configuración multiagente más avanzada, mira cómo construir un [escuadrón de investigación con IA en Agno](/es/agno-squad/) usando Streamlit y múltiples agentes especializados.
+
+#### Solución de problemas
+
+- **Equipo mudo**: Añade `debug_mode=True` al `Team` para espiar la charla de delegación.
+- **Problema de almacenamiento**: Asegúrate de que el import de `SqliteDb` está ahí y de que `tmp/` existe.
+- **Inicio lento**: `knowledge.insert()` hace upsert por defecto, así que puedes sacar la inserción del camino crítico (o protegerla con una comprobación de archivo) una vez cargado el PDF.
+
+
+## Cuánto cuesta — precios de la API de un vistazo
+
+Recorrer este tutorial no tiene por qué arruinarte. Esto es lo que te espera a fecha de agosto de 2026:
+
+| Modelo | Entrada (por 1M de tokens) | Salida (por 1M de tokens) | Ventana de contexto |
+|---|---|---|---|
+| `gpt-5.4-mini` | $0.75 | $3.00 | 1,000,000 |
+| `gpt-5.6-luna` | $1.00 | $6.00 | 1,000,000 |
+| `gpt-5.5` | $5.00 | $30.00 | 1,050,000 |
+| `gpt-5.6-sol` | $5.00 | $30.00 | 1,050,000 |
+
+**Mi recomendación para aprender:** cambia todos los ejemplos ejecutables a `"openai:gpt-5.4-mini"`. Es el predeterminado documentado de Agno, y todo el tutorial te costará menos de 0,10 $. Reserva `gpt-5.5` o `gpt-5.6-sol` para cuando estés construyendo algo de verdad.
+
+Los embeddings (`text-embedding-3-small`) se facturan aparte de los tokens de chat: son tirados de precio para los volúmenes de este tutorial.
+
+<Notice type="warning" title="Vigila tu gasto">
+Establece límites de uso de OpenAI en [platform.openai.com/usage](https://platform.openai.com/usage), especialmente antes de ejecutar el ejemplo del equipo multiagente: hace varias llamadas de agente por petición.
+</Notice>
+
+
+## Notas de producción: telemetría, seguridad y despliegue
+
+### Desactivar la telemetría (opcional)
+
+Agno envía un evento de telemetría por ejecución de agente (solo la elección del proveedor del modelo: no se envían prompts, mensajes ni salidas). Si prefieres excluirte:
+
+```bash
+export AGNO_TELEMETRY=false
+```
+
+Añádelo a tu archivo `.env` para hacerlo permanente en el proyecto.
+
+### AgentOS — publica tu agente como una API REST
+
+Una vez que tu agente funciona en local, puedes servirlo como una API REST de producción con **AgentOS**, el runtime integrado de Agno que añade streaming, trazado, aislamiento de sesiones y RBAC basado en JWT:
+
+```bash
+uv add "agno[os]"
+```
+
+```python
+from agno.os import AgentOS
+
+# Assuming you have an `agent` and `db` already defined
+agent_os = AgentOS(agents=[agent], db=db)
+agent_os.serve(port=7777)
+```
+
+Esto te da una API REST en `http://localhost:7777` y una UI de trazas. También puedes gestionar agentes desde el plano de control en la nube en [os.agno.com](https://os.agno.com).
+
+<Notice type="error" title="Advertencia de seguridad">
+El quickstart local de AgentOS se ejecuta **sin autenticación**. No expongas el puerto 7777 a la Internet pública sin configurar primero Security y Auth. Trátalo como cualquier otro servidor de desarrollo sin autenticación: solo localhost hasta que lo endurezcas.
+</Notice>
+
+**Despliegue:** Cuando estés listo para ejecutar esto en un VPS, puedes [desplegar un proyecto Python con uv](/es/dokploy-python-railpack-uv/) con Dokploy y Docker. Para hosting barato y fiable, yo miraría un [VPS de Hetzner](https://go.bitdoze.com/hetzner) (desde unos 4,50 €/mes) o un [droplet de DigitalOcean](https://go.bitdoze.com/do): ambos manejan un despliegue ligero de AgentOS sin despeinarse.
+
+_Los precios de los VPS subieron en todos los proveedores en 2026: si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+
+## Conclusión: tu viaje con Agno despega
+
+Acabas de pasar de cero a construir agentes de IA reales. Con la velocidad vertiginosa de **uv**, configuraste un entorno profesional en segundos. Luego, con **Agno 2.x**, creaste un agente que chatea, navega por la web, recuerda con SQLite, domina RAG con LanceDB y se une a un equipo para tareas complejas.
+
+**Puntos clave:**
+- **uv**: Configuración todo en uno que sustituye a `pip`, `venv` y más — con carga automática de `.env` integrada.
+- **Agentes de Agno**: Ligeros, modulares y rápidos, con memoria, herramientas y RAG que hacen útiles a tus agentes desde el primer momento.
+- **Equipos multiagente**: Coordina agentes especializados que abordan juntos las grandes preguntas.
+
+**¿Qué sigue?** Algunas direcciones que vale la pena perseguir:
+
+1. **Sumérgete en los extras de Agno**: entradas multimodales (imágenes, audio, vídeo), workflows (pipelines de agentes deterministas) y más de 100 toolkits preconstruidos. Prueba a construir [Agno Workflows](/es/equipo-escritura-agno-workflow/) para pipelines estructurados.
+2. **Explora `agent.cli_app()`**: un bucle de chat interactivo integrado que sustituye el patrón typer/rich sin dependencias adicionales.
+3. **Publícalo con AgentOS**: convierte tu agente en una API REST de producción con trazado y RBAC (consulta las notas de producción anteriores).
+
+Agno 3.0 también está en alfa (`v3.0.0a1`), así que el framework avanza rápido. Merece la pena vigilar el changelog.
+
+Ahora ve a preparar esa sopa de pollo tailandesa de la que tu agente no para de hablar. Tienes el código, las habilidades y las herramientas: ve a construir algo.
+
+<Button text="Explora Agno Workflows" link="/es/equipo-escritura-agno-workflow/" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Crea un escuadrón de investigación" link="/es/agno-squad/" variant="outline" color="blue" size="md" icon="arrow-right" />
+
+
+## Preguntas frecuentes
+
+<Accordion label="¿Qué versión de Python soporta Agno?" group="faq" expanded="true">
+Agno requiere Python >=3.9, &lt;4. Este tutorial fija Python 3.12 por coherencia, pero cualquier versión 3.9+ funcionará. Si necesitas ayuda configurando Python, aquí tienes cómo [instalar Python en Mac](https://www.bitdoze.com/install-upgrade-python-mac/).
+</Accordion>
+
+<Accordion label="¿Puedo usar un modelo local en lugar de OpenAI?" group="faq">
+Sí. Usa `"ollama:llama3.1:8b"` (o cualquier modelo que tengas descargado en Ollama) como cadena de modelo. Necesitas Ollama ejecutándose en local: no hace falta clave de API. El compromiso: los modelos locales son más lentos y la calidad depende de tu hardware, pero pagas cero por token.
+</Accordion>
+
+<Accordion label="¿Cuánto cuesta hacer este tutorial?" group="faq">
+Con `gpt-5.4-mini` (el predeterminado de Agno), menos de 0,10 $ por todo el recorrido, incluidos los pasos de RAG y multiagente. Con `gpt-5.5`, espera unos pocos dólares según la longitud de la salida. Los embeddings (`text-embedding-3-small`) añaden fracciones de céntimo para este volumen.
+</Accordion>
+
+<Accordion label="¿La telemetría de Agno es opt-out?" group="faq">
+Sí. Establece `AGNO_TELEMETRY=false` en tu entorno o archivo `.env`. Agno solo envía la elección del proveedor del modelo: nunca prompts, salidas ni datos personales.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre Agno y otros frameworks como Mastra o CrewAI?" group="faq">
+Agno es Python-first, ligero (~sin abstracciones pesadas) e incluye AgentOS para el despliegue de serie. Mastra es TypeScript-first y es una buena opción si ya estás en el ecosistema Node: aquí tienes cómo [crear un agente de IA con Mastra](/es/crear-agente-ia-mastra/). CrewAI y LangGraph son frameworks de orquestación más pesados, con más abstracciones integradas pero también más boilerplate. El punto dulce de Agno es «añade lo que necesitas, omite lo que no».
+</Accordion>
