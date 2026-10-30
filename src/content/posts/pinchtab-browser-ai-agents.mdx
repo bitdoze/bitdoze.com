@@ -1,126 +1,351 @@
 ---
 date: 2026-02-17T00:00:00Z
+lastmod: 2026-10-30T00:00:00Z
 translationKey: "pinchtab-browser-ai-agents"
-title: "Pinchtab: Browser Control via HTTP for AI Agents"
-description: "Pinchtab is a 12MB Go binary that gives any AI agent browser control over a plain HTTP API using accessibility trees."
+title: "Pinchtab: Browser Control for AI Agents via HTTP (2026)"
+meta_title: "Pinchtab Browser Automation API for AI Agents (2026)"
+description: "Pinchtab is a ~30MB Go binary that gives AI agents browser control over HTTP. Covers accessibility trees, Docker deployment, MCP, and security defaults."
 image: "../../assets/images/26/02/pinchtab-browser-ai-agents.webp"
+imageAlt: "Pinchtab giving AI agents browser control over HTTP: REST API request hitting a Chrome instance with an accessibility tree snapshot"
 categories: ["ai"]
 authors: ["Dragos"]
 tags: ["ai-agents", "browser-automation", "pinchtab"]
 ---
 
 import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
 
 If you've tried giving an AI agent browser access, you already know the problem. Playwright MCP ties you to Node. Browser Use needs Python. OpenClaw's browser backend only works inside its own ecosystem. Switch agents, or try to fire off a quick curl request to inspect a page, and you're rewriting the integration from scratch.
 
-[Pinchtab](https://github.com/pinchtab/pinchtab) takes a different approach: it's just an HTTP server. A 12MB Go binary with no Node, no Python, no dependencies. It launches its own Chrome and exposes everything—navigation, clicks, form fills, screenshots, accessibility snapshots—through a plain REST API. Whatever agent you're using speaks HTTP, and that's the whole integration story.
+[Pinchtab](https://github.com/pinchtab/pinchtab) takes a different approach: it gives you browser control for AI agents over plain HTTP. A ~30MB Go binary with no Node, no Python, no dependencies. It launches its own Chrome and exposes navigation, clicks, form fills, screenshots, and accessibility snapshots through a plain REST API. Whatever agent you're using already speaks HTTP. That's the whole integration story. As of v0.15.2 (Aug 2026), the project has over 10,000 GitHub stars.
+
+<Notice type="info" title="Updated for v0.15.2">
+This is a major rewrite of the February 2026 version. The configuration system, security defaults, and Docker model have all changed since then. If you followed the old guide, jump to the migration box in the Configuring section. The `BRIDGE_*` environment variables no longer exist.
+</Notice>
+
+## What is Pinchtab?
+
+Pinchtab is a standalone Go HTTP server that gives you browser control for AI agents. It launches Chrome instances, exposes navigation, actions, snapshots, and captures over a REST API, and requires no Node or Python runtime. It's MIT licensed, currently at v0.15.2 (released 2026-08-26), with 10,472 stars and 785 forks on GitHub. Security-supported versions are v0.14.0 and later.
 
 ## Why accessibility trees over screenshots
 
-Most people reach for screenshots first because it's obvious: take a picture, send it to a vision model, done. The problem is cost. A 10-step task using screenshots runs about $0.06. The same task with accessibility trees costs around $0.015.
+For AI browser automation, most people reach for screenshots first because it's obvious: take a picture, send it to a vision model, done. The problem is cost and reliability. A vision model guesses coordinates from pixels. Accessibility trees give you stable node refs (`e0`, `e1`, `e2`…) tied to the actual DOM elements. Click `e5` and you hit the right button, regardless of how the page renders.
 
-The real difference shows up at scale. Run that same task 1,000 times and screenshots cost $60; accessibility trees cost $15. Run a 50-page monitoring job:
+Since v0.15.1, refs denote a specific DOM node rather than a row index. They survive changes to `filter`, `selector`, or `depth` parameters and only expire when you navigate to a new document. That means you can take a filtered snapshot, interact, then take a broader snapshot without losing your place.
 
-| Method | ~Tokens | Est. cost |
-|--------|---------|-----------|
-| Screenshots (vision) | ~100,000 | $0.30 |
-| Full a11y snapshot | ~525,000 | $0.16 |
-| Pinchtab `?filter=interactive` | ~180,000 | $0.05 |
-| Pinchtab `/text` | ~40,000 | $0.01 |
+The cost difference compounds quickly. Pinchtab's `/text` endpoint pulls readable content at around 800 tokens per page using Mozilla's Readability library (the same thing behind Firefox Reader View). The README bills that as 5-13x cheaper than screenshots for read-heavy work. The 50-page job below shows where each method lands in raw tokens.
 
-Pinchtab's `/text` endpoint pulls readable content at around 800 tokens per page using Mozilla's Readability library (the same thing behind Firefox Reader View). That's 5x cheaper than a full accessibility snapshot and 13x cheaper than screenshots. For read-heavy work, the difference compounds quickly.
+| Method | ~Tokens (50-page job) | Relative cost |
+|--------|----------------------|---------------|
+| Screenshots (vision) | ~100,000 | Highest |
+| Full a11y snapshot | ~525,000 | High |
+| Pinchtab `?filter=interactive` | ~180,000 | Low |
+| Pinchtab `/text` | ~40,000 | Lowest |
 
-There's also a reliability argument. Vision models guess coordinates from pixels. Accessibility trees give you stable node refs (`e0`, `e1`, `e2`...) tied to the actual DOM elements. Click `e5` and you hit the right button, regardless of how the page renders.
+Pinchtab's own benchmark against agent-browser (self-published, small sample sizes of 5/3/2 runs with ~25-30% variance, so take it as directional) shows 9.5-20.3% lower end-to-end agent-loop cost on the Anthropic API. The win comes from batching click+snapshot into a single round trip via `--snap`. For teams choosing models alongside their browser stack, the [cheapest AI models under $1/M tokens](/best-cheap-models-hermes-agent/) matter just as much as the token count per page.
 
-## The full API
+## Pinchtab's architecture: server, instances, and profiles
 
-Pinchtab covers more than basic navigation and clicking:
+Pinchtab v0.15.x is no longer a single-bridge tool. It's a control plane that manages multiple Chrome instances, each with its own isolated profile. Here are the four concepts you need:
+
+- The **server** is the control plane on port 9867. It's the HTTP API surface your agents talk to, and one server manages everything.
+- An **instance** is a running Chrome process. Each instance has its own profile and its own internal port (e.g. 9868). You can run several instances side by side, one for "work" tasks and one for "scraping", with complete cookie and session isolation.
+- A **profile** is persistent browser state (cookies, localStorage, saved logins). Log in once through a profile and every subsequent instance using that profile keeps the session. Named profiles are managed via `POST /profiles` and stored under `profiles.baseDir`.
+- The **bridge** is the single-instance runtime the server spawns. You won't interact with it directly; the server handles lifecycle.
+
+```
+agents / CLI / MCP
+        │
+        ▼
+┌─────────────────────────┐
+│  Pinchtab server :9867  │  ← control plane, REST API
+└────────┬────────┬───────┘
+         │        │
+         ▼        ▼
+  ┌──────────┐ ┌──────────┐
+  │Instance A│ │Instance B│   ← Chrome processes
+  │profile:  │ │profile:  │
+  │  "work"  │ │"scraping"│
+  │  :9868   │ │  :9869   │
+  └──────────┘ └──────────┘
+         │        │
+         ▼        ▼
+    ~/.pinchtab/  (state, profiles)
+```
+
+The primary user journey is to install Pinchtab once as a daemon so all your agents share one control plane:
+
+```bash
+pinchtab daemon install
+pinchtab daemon
+```
+
+This runs a user-level background service. Agents connect to `http://127.0.0.1:9867`, and the server spawns or reuses Chrome instances as needed. Multi-instance browser control with isolated browser profiles for AI agents is the headline capability that separates Pinchtab from a simple CDP wrapper.
+
+## Getting started
+
+<ListCheck>
+<ul>
+<li>Linux, macOS, or ARM64 (Raspberry Pi works)</li>
+<li>No Node or Python required for the Go binary path</li>
+<li>Chrome or Chromium (auto-detected; Docker image bundles its own)</li>
+<li>Port 9867 available (configurable)</li>
+</ul>
+</ListCheck>
+
+Pick your install method:
+
+<Tabs>
+<Tab name="curl (macOS/Linux)">
+```bash
+curl -fsSL https://pinchtab.com/install.sh | bash
+```
+</Tab>
+<Tab name="Homebrew">
+```bash
+brew install pinchtab/tap/pinchtab
+```
+</Tab>
+<Tab name="npm (Node 18+)">
+```bash
+npm install -g pinchtab
+```
+</Tab>
+<Tab name="Docker">
+```bash
+docker run -d --name pinchtab \
+  -p 127.0.0.1:9867:9867 \
+  -v pinchtab-data:/data \
+  --shm-size=2g \
+  pinchtab/pinchtab:v0.15.2
+```
+Full Docker deployment covered below.
+</Tab>
+<Tab name="Source (Go 1.26+)">
+```bash
+git clone https://github.com/pinchtab/pinchtab.git
+cd pinchtab
+go build -o pinchtab ./cmd/pinchtab
+```
+</Tab>
+</Tabs>
+
+### First run and verification
+
+Running `pinchtab` with no arguments triggers security setup (auto-generates an auth token) and prints status. Then install the daemon and do a smoke test:
+
+```bash
+pinchtab daemon install
+pinchtab daemon
+
+# Get the auto-generated token
+export PINCHTAB_TOKEN=$(pinchtab config token --stdout)
+
+# Smoke test: navigate and snapshot in one round trip
+pinchtab nav https://pinchtab.com --snap
+
+# Check health (requires the token)
+pinchtab health
+```
+
+Verify each step:
+
+- `pinchtab --version` prints the version. If it says `v0.15.2` you're current.
+- `pinchtab nav https://pinchtab.com --snap` should return a page snapshot. If you get a 401, the token isn't set in your environment.
+- `pinchtab health` should report server and Chrome status. If it says `status: running`, you're good.
+
+Failure modes:
+- `curl | bash` install fails on unusual distros → fall back to `brew` or `npm`.
+- `go build` fails → check you're on Go 1.26+ (`go version`). The build target is `./cmd/pinchtab`, not the repo root.
+- Port 9867 already in use → `pinchtab config set server.port 9868` (or whichever port is free).
+- macOS browser weirdness → `pinchtab doctor browsers`. Prefer Chrome for Testing over your daily Chrome to avoid profile conflicts.
+
+## Configuring Pinchtab
+
+All configuration lives in a nested JSON file at `~/.pinchtab/config.json` (configVersion 0.8.0 shape). The `BRIDGE_*` environment variables from earlier versions are gone. See the migration note below.
+
+Manage the config through the CLI:
+
+```bash
+pinchtab config init                # create ~/.pinchtab/config.json
+pinchtab config show                # print effective config
+pinchtab config get server.port     # read a single key
+pinchtab config set server.token "$(openssl rand -hex 32)"
+pinchtab config validate            # check for errors after edits
+```
+
+Only five environment variables survive, and they override the config file (env > file):
+
+| Variable | Purpose |
+|----------|---------|
+| `PINCHTAB_CONFIG` | Path to the config file |
+| `PINCHTAB_TOKEN` | Runtime override of `server.token` |
+| `PINCHTAB_URL` | Base URL for CLI/MCP when targeting a remote server |
+| `PINCHTAB_RATE_LIMIT_MAX` | Per-client request cap per 10-second window |
+| `PINCHTAB_STATE_KEY` | Encryption key for the state file |
+
+Common config keys:
+
+```bash
+# Server
+pinchtab config set server.port "9867"
+pinchtab config set server.stateDir "~/.pinchtab"
+
+# Instance defaults (applied to new Chrome instances)
+pinchtab config set instanceDefaults.mode "headless"
+pinchtab config set instanceDefaults.stealthLevel light       # light | medium | full (anti-bot opt-in)
+pinchtab config set instanceDefaults.blockImages true
+pinchtab config set instanceDefaults.blockAds true             # new since the old BRIDGE_* era
+pinchtab config set instanceDefaults.humanize false            # default: raw CDP, fast and deterministic
+
+# Browser
+pinchtab config set browser.binary "/usr/bin/chromium"
+
+# Security gates (all default false; enable only what you need)
+pinchtab config set security.allowEvaluate true
+pinchtab config set security.allowedDomains '["example.com"]'  # widen IDPI allowlist deliberately
+
+# Review posture at any time
+pinchtab security
+pinchtab security up    # restore recommended safe defaults
+```
+
+<Notice type="warning" title="Migrating from the February 2026 version?">
+Everything changed. The old `BRIDGE_*` env vars are dead and silently ignored. Here's the mapping:
+<br /><br />
+<code>BRIDGE_PORT</code> → <code>server.port</code> · <code>BRIDGE_TOKEN</code> → <code>server.token</code> · <code>BRIDGE_HEADLESS</code> → <code>instanceDefaults.mode</code> · <code>BRIDGE_STEALTH</code> → <code>instanceDefaults.stealthLevel</code> · <code>BRIDGE_PROFILE</code> → named profiles (<code>POST /profiles</code>) · <code>BRIDGE_BLOCK_IMAGES</code> → <code>instanceDefaults.blockImages</code> · <code>BRIDGE_BLOCK_MEDIA</code> → <code>instanceDefaults.blockMedia</code> · <code>BRIDGE_NO_ANIMATIONS</code> → <code>instanceDefaults.noAnimations</code> · <code>BRIDGE_TIMEZONE</code> → <code>instanceDefaults.timezone</code> · <code>CHROME_BINARY</code> → <code>browser.binary</code> · <code>CHROME_FLAGS</code> → <code>browser.extraFlags</code> · <code>CDP_URL</code> → attach mode (<code>POST /instances/attach</code>, gated by <code>security.attach.enabled</code>, default false).
+<br /><br />
+Also changed: <code>humanType</code>/<code>humanClick</code> action kinds no longer exist (use <code>"humanize": true</code> on <code>kind:"type"</code> or <code>kind:"click"</code>); <code>seccomp=unconfined</code> is no longer needed for Docker; <code>/health</code> now requires the auth token; and query-string auth has been removed entirely.
+</Notice>
+
+## The Pinchtab REST API
+
+Pinchtab exposes a browser automation API over plain HTTP. Every route, including `/health`, requires an `Authorization: Bearer <token>` header. Here are the core endpoints:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Check if the server and Chrome are responsive |
-| `GET` | `/tabs` | List all open tabs with their IDs |
+| `GET` | `/health` | Server and Chrome status (requires token) |
+| `GET` | `/tabs` | List open tabs |
 | `GET` | `/snapshot` | Accessibility tree as JSON or text |
 | `GET` | `/screenshot` | JPEG screenshot with quality control |
 | `GET` | `/text` | Readable page text (Readability or raw innerText) |
-| `POST` | `/navigate` | Go to a URL in a tab |
+| `POST` | `/navigate` | Go to a URL |
 | `POST` | `/action` | Click, type, fill, press, focus, hover, select, scroll |
-| `POST` | `/evaluate` | Run arbitrary JavaScript |
+| `POST` | `/evaluate` | Run JavaScript (gated: `security.allowEvaluate`, default false) |
 | `POST` | `/tab` | Open or close tabs |
-| `POST` | `/tab/lock` | Lock a tab for exclusive agent access |
-| `POST` | `/tab/unlock` | Release a tab lock |
-| `POST` | `/cookies` | Inject session cookies programmatically |
+| `POST` | `/lock` / `/unlock` | Tab-scoped locking: `POST /tabs/{id}/lock` / `unlock` |
+| `POST` | `/cookies` | Inject cookies (gated: `security.allowCookies`, default false) |
 
-The `/tab/lock` endpoint is worth noting if you run multiple agents at once. One agent locks a tab, does its work, unlocks it. No competing writes to the same browser context.
+Tab-scoped forms exist for most routes: `/tabs/{id}/snapshot`, `/tabs/{id}/action`, etc. The flat routes (`/navigate`, `/snapshot`, `/action`) target the current tab and still work exactly as they always have.
 
 ### Snapshot query parameters
 
-The snapshot endpoint has several options that cut token usage significantly:
+The snapshot endpoint has several options that cut token usage significantly. All five of these still work as documented:
 
 ```bash
-# Only interactive elements — ~75% fewer nodes
-curl "localhost:9867/snapshot?filter=interactive"
+# Only interactive elements: ~75% fewer nodes
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  "localhost:9867/snapshot?filter=interactive"
 
-# Compact one-line-per-node format — 56-64% fewer tokens than JSON
-curl "localhost:9867/snapshot?format=compact"
+# Compact one-line-per-node format: 56-64% fewer tokens than JSON
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  "localhost:9867/snapshot?format=compact"
 
 # Only changes since the last snapshot
-curl "localhost:9867/snapshot?diff=true"
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  "localhost:9867/snapshot?diff=true"
 
 # Limit to a specific section of the page
-curl "localhost:9867/snapshot?selector=main"
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  "localhost:9867/snapshot?selector=main"
 
 # Cap output at roughly N tokens
-curl "localhost:9867/snapshot?maxTokens=2000"
+curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  "localhost:9867/snapshot?maxTokens=2000"
 ```
 
-Combining `filter=interactive` with `format=compact` gives you the smallest possible payload for action-oriented tasks. Use `diff=true` for pages that update incrementally—polling a live dashboard, for example—so you're only sending what actually changed.
+Combining `filter=interactive` with `format=compact` gives you the smallest possible payload for action-oriented tasks. Use `diff=true` for pages that update incrementally (polling a live dashboard, for example) so you're only sending what changed. Since v0.15.1, node refs are tied to DOM identity and survive filter/selector/depth changes, expiring only on navigation to a new document.
 
 ### Human-like actions
 
-Beyond standard click and type, Pinchtab has `humanClick` and `humanType` actions that add realistic delays and movement patterns. Useful when you're hitting sites with behavioral bot detection that watches interaction timing.
+The old `humanClick` and `humanType` action kinds no longer exist. Human-like input is now a per-action flag on standard `click` and `type` actions:
 
 ```bash
 curl -X POST localhost:9867/action \
-  -d '{"kind":"humanType","ref":"e12","text":"hello world"}'
+  -H "Authorization: Bearer $PINCHTAB_TOKEN" \
+  -d '{"kind":"type","ref":"e12","text":"hello world","humanize":true}'
 ```
 
-## Configuration
+When `humanize` is omitted, the behavior follows `instanceDefaults.humanize`, which defaults to `false`: raw CDP input, fast and deterministic. Turn on `humanize` per-action when you need realistic delays and movement patterns to get past behavioral bot detection. For stronger anti-bot evasion, `instanceDefaults.stealthLevel` accepts `light` (default, minimal normalization), `medium`, or `full` (canvas/WebGL/font spoofing, explicit opt-in).
 
-All configuration comes through environment variables:
+### New endpoints: captures, recordings, audits
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BRIDGE_PORT` | `9867` | HTTP port |
-| `BRIDGE_TOKEN` | *(none)* | Bearer token for auth |
-| `BRIDGE_HEADLESS` | `false` | Run Chrome without a window |
-| `BRIDGE_STEALTH` | `light` | `light` (webdriver patch) or `full` (canvas/WebGL/font spoofing) |
-| `BRIDGE_PROFILE` | `~/.pinchtab/chrome-profile` | Chrome profile directory |
-| `BRIDGE_STATE_DIR` | `~/.pinchtab` | State and session storage |
-| `BRIDGE_BLOCK_IMAGES` | `false` | Skip image downloads |
-| `BRIDGE_BLOCK_MEDIA` | `false` | Block images, fonts, CSS, video |
-| `BRIDGE_NO_ANIMATIONS` | `false` | Freeze CSS animations globally |
-| `BRIDGE_TIMEOUT` | `15` | Action timeout in seconds |
-| `BRIDGE_NAV_TIMEOUT` | `30` | Navigation timeout in seconds |
-| `BRIDGE_TIMEZONE` | *(system)* | Chrome timezone (e.g. `America/New_York`) |
-| `CDP_URL` | *(none)* | Connect to an existing Chrome instead of launching one |
-| `CHROME_BINARY` | *(auto)* | Path to Chrome or Chromium |
-| `CHROME_FLAGS` | *(none)* | Extra Chrome launch flags |
+Pinchtab's API surface has grown a lot since February 2026. The additions worth knowing:
 
-`BRIDGE_BLOCK_MEDIA` is the aggressive version—it skips everything except HTML and JavaScript. Useful for bulk scraping where page fidelity doesn't matter. `BRIDGE_NO_ANIMATIONS` helps if you're snapshotting pages mid-animation and getting inconsistent results.
+| Endpoint | What it does |
+|----------|-------------|
+| `GET /capture` | Paired screenshot + accessibility snapshot in one call |
+| `GET /annotate` | Screenshot with numbered overlays tied to actionable refs |
+| `POST /record/start` / `/record/stop` | Video recording (gif, webm, mp4) |
+| `GET /screencast` | Live screencast stream |
+| `GET /network` | Network log; `?broken=true` filters for failed requests |
+| `POST /network/route` | Request interception |
+| `GET /console` / `GET /errors` | Console messages and page errors |
+| `GET /storage` | LocalStorage / sessionStorage inspection |
+| `POST /state` | Save/load browser state |
+| `POST /wait` | Wait for text/selector conditions (incl. `--not-text`) |
+| `POST /frame` | Scope subsequent calls to an iframe |
+| `POST /emulation/*` | Viewport, geolocation, offline, media emulation |
+| `POST /solve` | Challenge solver hooks (AutoSolver, disabled by default) |
+| `GET /pdf` | Print-to-PDF |
+| `POST /scrape` | Structured site scrape |
+| `GET /a11y/audit` | Accessibility audit score |
+| `GET /timing` | Core Web Vitals |
+| `GET /metrics` | Server metrics |
+| `GET /openapi.json` | Machine-readable API spec |
 
-You can also generate a config file if you prefer JSON over environment variables:
+Two CLI tools built on top of this API deserve a mention. `pinchtab audit <url> --sitemap --sample-size N --output-dir ./audit` produces a full site audit (report.json + screenshots) covering console errors, broken assets, a11y scores, Core Web Vitals, and rule-based security findings. And `pinchtab compare <live> <staging> --fail-on-diff` works as a CI gate: if staging drifts from live, the build fails.
+
+## MCP server and agent integrations
+
+Pinchtab ships a built-in browser MCP server, so any MCP-compatible agent can use it without writing custom HTTP glue. The MCP integration includes tools like `pinchtab_screenshot`, `pinchtab_scrape`, and navigation controls (back/forward/reload since v0.15.1). If no server is running, the MCP tools auto-start one.
+
+If you're new to the protocol, read [how the Model Context Protocol works](/mcp-introduction-beginners/) first.
+
+The npm package ships an agent skill and auto-copies it into detected agent homes (`~/.claude/skills`, `~/.cursor/skills`, `~/.windsurf/skills`, `~/.codex/skills`, and OpenClaw). Manage skill installation with:
 
 ```bash
-pinchtab config init   # creates ~/.pinchtab/config.json
-pinchtab config show   # shows current effective config
+pinchtab skill status
+pinchtab skill update --force
 ```
 
-Environment variables override the config file, so it works fine alongside Docker secrets or `.env` files.
+For OpenClaw users, there's an official plugin. If you're [self-hosting OpenClaw on a VPS or Mac mini](/clawdbot-setup-guide/):
 
-## Docker deployment
+```bash
+openclaw plugins install @pinchtab/pinchtab
+```
 
-The simplest way to run Pinchtab on a server. Chrome needs `seccomp=unconfined` in a container, which is the main reason you'd want to isolate it from the rest of your stack.
+Grok Build users can install via:
+
+```bash
+grok plugin install pinchtab --trust
+```
+
+When targeting a remote Pinchtab server from the CLI or MCP, set `PINCHTAB_URL` or use the `--server` flag.
+
+## Pinchtab Docker deployment
+
+<Notice type="warning" title="Affiliate Disclosure">
+Some links in this guide are affiliate links. If you buy through them, I may earn a small commission at no extra cost to you. This helps keep the guides tested and updated.
+</Notice>
+
+For Pinchtab Docker deployments, the official image (`pinchtab/pinchtab:v0.15.2`, ~334MB) bundles Chromium and runs headless-only. Headed mode refuses to launch in the container since there's no X11. If you want to self-host Pinchtab on a server, this is the cleanest path. A €4-6/mo [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) (CX22 class, 2 vCPU / 4GB RAM) runs Pinchtab comfortably. Chrome uses about 1 to 1.5GB with a few tabs open, so budget 2GB minimum, 4GB for multi-instance. A budget [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) with NVMe works too.
+
+The old `seccomp=unconfined` requirement is gone. The container layer itself is the security boundary: the image runs as a non-root `pinchtab` user with `HOME=/data`, and the compose file drops all capabilities, uses a read-only filesystem, and keeps the default seccomp profile. Chrome runs `--no-sandbox` inside the container precisely because that boundary exists.
 
 ### Basic docker-compose setup
 
@@ -128,54 +353,102 @@ The simplest way to run Pinchtab on a server. Chrome needs `seccomp=unconfined` 
 # docker-compose.yml
 services:
   pinchtab:
-    image: pinchtab/pinchtab:latest
+    image: pinchtab/pinchtab:v0.15.2
     container_name: pinchtab
     restart: unless-stopped
-    security_opt:
-      - seccomp:unconfined
-    mem_limit: 2g
-    cpus: "2.0"
-    environment:
-      - BRIDGE_PORT=9867
-      - BRIDGE_HEADLESS=true
-      - BRIDGE_STEALTH=full
-      - BRIDGE_TOKEN=${PINCHTAB_TOKEN}
-      - BRIDGE_BLOCK_IMAGES=true
-      - BRIDGE_NO_ANIMATIONS=true
-    volumes:
-      - pinchtab-data:/data
     ports:
       - "127.0.0.1:9867:9867"
+    volumes:
+      - pinchtab-data:/data
+    environment:
+      PINCHTAB_TOKEN: ${PINCHTAB_TOKEN:-}
+    shm_size: "2gb"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid,nodev
+      - /run:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    cpus: "2.0"
 
 volumes:
   pinchtab-data:
 ```
 
-A few things to note here. The port binding `127.0.0.1:9867:9867` only exposes the service on localhost, not to the network. The memory limit matters: Chrome with a few tabs open will easily use 1-1.5GB. Setting `BRIDGE_BLOCK_IMAGES=true` helps keep memory usage lower if you're doing content-only tasks.
+<Notice type="warning" title="shm_size is not optional">
+Chrome tabs will crash randomly without 2GB of shared memory. The `shm_size: "2gb"` line is the difference between a stable deployment and mysterious renderer OOMs. Don't remove it.
+</Notice>
+
+Key points about this compose file:
+
+- The port binding `127.0.0.1:9867:9867` keeps the service off the public network. The official compose uses `"9867:9867"`. Tighten it.
+- The token is auto-generated on first boot. Read it with `docker exec pinchtab pinchtab config token --stdout`. If you want to supply your own, use [Docker Compose secrets](/docker-compose-secrets/) for `PINCHTAB_TOKEN`. The image supports Docker secrets natively.
+- If you mount your own config via `PINCHTAB_CONFIG`, set `server.token` in it or pass `-e PINCHTAB_TOKEN=...`. Otherwise the server refuses to start.
+- Config persistence lives in the `pinchtab-data` volume under `/data` (the image sets `HOME=/data`, so config lands at `/data/.config/pinchtab/config.json`).
+
+### Verify deployment
+
+<ListCheck>
+<ul>
+<li><code>docker exec pinchtab pinchtab health</code> returns server status</li>
+<li>Token retrieved: <code>TOKEN=$(docker exec pinchtab pinchtab config token --stdout)</code></li>
+<li>Authenticated health check passes (see below)</li>
+<li>Chrome reports <code>"status":"running"</code> (not just dashboard up)</li>
+<li>One smoke test: <code>nav</code> + <code>--snap</code> returns a snapshot</li>
+</ul>
+</ListCheck>
+
+```bash
+# Fetch the auto-generated token
+TOKEN=$(docker exec pinchtab pinchtab config token --stdout)
+
+# Authenticated health check
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9867/health
+
+# Wait for Chrome to be ready (not just the dashboard)
+until curl -sf -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9867/health \
+  | grep -q '"status":"running"'; do sleep 1; done
+```
+
+Two-stage readiness: `/health` returning 200 means the dashboard is up, but Chrome may not be ready yet. Before Chrome is ready, API requests return HTTP 503. Poll for `.defaultInstance.status == "running"` before your first navigate.
+
+Failure modes:
+- 503 on every call → Chrome isn't ready yet. Use the readiness poll above.
+- 401 → token missing or wrong. Check the `Authorization` header.
+- OOM kills → raise `mem_limit`.
+- Chrome tabs dying randomly → missing `shm_size: "2gb"`.
 
 ### Behind a Caddy reverse proxy
 
 If you want to expose Pinchtab over HTTPS with a domain:
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yml (add Caddy alongside Pinchtab)
 services:
   pinchtab:
-    image: pinchtab/pinchtab:latest
+    image: pinchtab/pinchtab:v0.15.2
     container_name: pinchtab
     restart: unless-stopped
-    security_opt:
-      - seccomp:unconfined
-    mem_limit: 2g
-    cpus: "2.0"
-    environment:
-      - BRIDGE_PORT=9867
-      - BRIDGE_HEADLESS=true
-      - BRIDGE_STEALTH=full
-      - BRIDGE_TOKEN=${PINCHTAB_TOKEN}
-      - BRIDGE_BLOCK_IMAGES=true
+    ports:
+      - "127.0.0.1:9867:9867"
     volumes:
       - pinchtab-data:/data
+    environment:
+      PINCHTAB_TOKEN: ${PINCHTAB_TOKEN:-}
+    shm_size: "2gb"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,noexec,nosuid,nodev
+      - /run:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    cpus: "2.0"
     networks:
       - proxy
 
@@ -209,75 +482,122 @@ pinchtab.yourdomain.com {
 }
 ```
 
-Caddy handles TLS automatically. With `BRIDGE_TOKEN` set, requests need an `Authorization: Bearer <token>` header, so the API isn't open to the public even with HTTPS.
+Caddy handles TLS automatically. With `PINCHTAB_TOKEN` set, requests need an `Authorization: Bearer <token>` header, so the API isn't open even with HTTPS.
+
+Two proxy-related settings to know:
+- `server.trustProxyHeaders`: leave this off unless your proxy correctly rebuilds `Forwarded` and `X-Forwarded-*` headers.
+- `server.cookieSecure`: defaults to `auto`; force `true` behind TLS. The dashboard warns when served over plain HTTP on a non-loopback bind.
+
+If you prefer [Traefik as an alternative reverse proxy](/traefik-proxy-docker/), the pattern is the same. Just swap the Caddy service. For the dashboard specifically, see [exposing an agent dashboard safely behind Caddy](/hermes-dashboard-guide/).
+
+Verify through the domain:
 
 ```bash
-curl -H "Authorization: Bearer $PINCHTAB_TOKEN" \
-  https://pinchtab.yourdomain.com/health
+curl -H "Authorization: Bearer $TOKEN" https://pinchtab.yourdomain.com/health
 ```
 
-<Notice type="info" title="Build from source vs prebuilt image">
-The official `docker-compose.yml` in the repo uses `build: .` which compiles from source. If you want the prebuilt image, use `image: pinchtab/pinchtab:latest` instead. Check the [releases page](https://github.com/pinchtab/pinchtab/releases) for available tags.
-</Notice>
+A 502 means the Pinchtab container isn't on the `proxy` network.
 
 ## Security concerns and mitigations
 
-Pinchtab gives an AI agent full control of a real Chrome browser, including any accounts you've logged into through that browser. The README is direct about this: "Think of Pinchtab like giving someone your unlocked laptop." Here's what that means in practice and how to handle it.
+Pinchtab gives an AI agent full control of a real Chrome browser, including any accounts you've logged into through that browser. The project's own framing is direct:
 
-### No auth by default
+<Notice type="warning" title="Think of Pinchtab like giving someone your unlocked laptop">
+An agent with Pinchtab access can do anything a human with that browser can do. The security posture has changed since February 2026. Pinchtab is now safe by default (bind 127.0.0.1, auto-generated token, capability gates off, IDPI strict on). The risk has moved to deliberately weakening that posture or misunderstanding what the defaults protect.
+</Notice>
 
-Out of the box, Pinchtab accepts requests from anyone who can reach port 9867. On a shared network or a server with a public IP, that means anyone.
+Supported security versions are **v0.14.0+ only** (per SECURITY.md). Run `pinchtab security` at any time to see your current posture; `pinchtab security up` restores recommended defaults.
 
-**Mitigation:** Always set `BRIDGE_TOKEN`. Once set, every request needs `Authorization: Bearer <token>` or it gets a 401. Treat this token like a password—generate something long and random, store it in an environment variable or secret manager, never hardcode it.
+### Auth is on by default
+
+The token is auto-generated during first-run setup. Query-string auth has been removed entirely. The dashboard uses a server-side `HttpOnly` session cookie with login rate limiting and re-authentication elevation for sensitive actions.
+
+Default bind is `127.0.0.1`, not `0.0.0.0`. The one exception is inside Docker: the entrypoint writes `bind: 0.0.0.0` into the managed config so port publishing works. Your actual exposure depends on the `-p` host mapping, which is why the compose above uses `127.0.0.1:9867:9867`. This is also where [how published Docker ports can bypass your firewall](/docker-bypasses-firewall/) becomes relevant: Docker's `-p` publishing can override your host firewall expectations.
+
+The misconfiguration risk is setting `server.bind = 0.0.0.0` and opening the firewall. If you must expose the API, do it through a reverse proxy with TLS and rate limiting. For manual token rotation:
 
 ```bash
-# Generate a token
-openssl rand -hex 32
+pinchtab config set server.token "$(openssl rand -hex 32)"
 ```
 
-### Pinchtab binds to all interfaces
+The most common failure mode for old readers: a 401 on `/health` because the `Authorization` header is missing. Every route requires it now.
 
-By default, the server listens on `0.0.0.0`, not just localhost. On a cloud server this means port 9867 is reachable from anywhere if your firewall allows it.
+### IDPI and the navigation allowlist
 
-**Mitigation:** Either bind the port to localhost only (as shown in the docker-compose above with `127.0.0.1:9867:9867`), or set a firewall rule that blocks external access to port 9867. Using a reverse proxy like Caddy or Nginx adds another layer and lets you handle TLS properly.
+Indirect Prompt Injection defense (IDPI) is on by default in strict mode. It scans extracted content for injection patterns and wraps output as untrusted. More importantly for getting started: **it restricts navigation to a local-only website allowlist by default**. Your agent cannot browse the public internet until you explicitly allow domains.
+
+This changes first-run expectations. If `pinchtab nav https://example.com` refuses, that's IDPI working as designed. Widen the allowlist deliberately:
+
+```bash
+pinchtab config set security.allowedDomains '["example.com", "docs.example.com"]'
+```
+
+<Notice type="warning" title="Your agent can't browse the public internet yet">
+IDPI strict mode ships with a local-only navigation allowlist. This is the single most surprising v0.15 behavior if you're upgrading from the old version. Widen `security.allowedDomains` for just the domains your agents need.
+</Notice>
+
+Capability gates all default to `false`. Enable only what a workflow needs:
+
+| Gate | What it unlocks |
+|------|----------------|
+| `security.allowEvaluate` | `POST /evaluate` (JavaScript execution) |
+| `security.allowCookies` | `POST /cookies` (cookie injection) |
+| `security.allowMacro` | Macro recording/playback |
+| `security.allowScreencast` | Live screencast |
+| `security.allowDownload` | File downloads |
+| `security.allowUpload` | File uploads |
+| `security.allowStateExport` | State export |
+| `security.allowNetworkIntercept` | Request interception |
+| `security.allowMemory` | Memory inspection |
+| `security.allowClipboard` | Clipboard access |
+| `security.allowFileScheme` | `file://` URL access |
+| `security.attach.enabled` | Remote Chrome attach (loopback allowlist default) |
+| `autosolver.enabled` | Challenge solving (incl. Cloudflare Turnstile) |
+
+Also relevant: `PINCHTAB_RATE_LIMIT_MAX` caps requests per client per 10-second window, `security.trustedProxyCIDRs` handles SSRF-guard bypass behind known proxies, and the dashboard ships with CSP and HSTS headers.
+
+For server-level hardening alongside Pinchtab's own posture, look at [securing a VPS with CrowdSec](/crowdsec-secure-server/).
 
 ### The Chrome profile holds live sessions
 
-When you log into a site through Pinchtab's Chrome window, that session persists in `~/.pinchtab/chrome-profile/`. Cookies, saved passwords, auth tokens. An agent with API access can use those sessions to act as you on any site you're logged into.
+When you log into a site through Pinchtab's Chrome, that session persists in the profile directory. Cookies, auth tokens, saved state. An agent with API access can use those sessions to act as you on any site you're logged into. This hasn't changed. The profiles model just gives you better isolation tools.
 
-**Mitigation:**
-- Use a dedicated Chrome profile with only the accounts your agents actually need
-- Don't log personal accounts (email, banking, social) into the Pinchtab profile unless you specifically need them automated
-- Treat `~/.pinchtab/` as sensitive and restrict file permissions: `chmod 700 ~/.pinchtab`
-- In Docker, use a named volume and avoid mounting it read-only (Pinchtab needs to write state), but don't mount it somewhere accessible to other containers
-
-### The `seccomp=unconfined` requirement
-
-Chrome needs a relaxed seccomp profile to run in a container. This is a real privilege: it removes a layer of kernel syscall filtering.
-
-**Mitigation:** This is harder to fully mitigate without building a custom seccomp profile for Chromium. The practical approach is to isolate the Pinchtab container—don't run it on the same network as containers with database access or other sensitive services. Keep it in its own network segment that only your agent service can reach.
+Mitigation:
+- Use dedicated profiles (via `POST /profiles` or `profiles.baseDir`) with only the accounts your agents need
+- Don't log personal accounts (email, banking, social) into agent-managed profiles
+- Treat `~/.pinchtab/` as sensitive: `chmod 700 ~/.pinchtab`
+- In Docker, state persists in the `pinchtab-data` volume under `/data`. Don't mount it somewhere other containers can reach
 
 ### Agent trust model
 
-An agent with Pinchtab access can do anything a human with that browser can do. If your agent takes arbitrary instructions from users or external inputs, prompt injection is a real concern: a malicious website could include instructions in its content that trick the agent into taking unintended actions.
+An agent with Pinchtab access can do anything a human with that browser can do. If your agent takes arbitrary instructions from users or external inputs, prompt injection is a real concern: a malicious website could embed instructions that trick the agent into unintended actions. IDPI is the first line of defense, but it's not a substitute for scoping.
 
-**Mitigation:**
-- Scope what your agent is allowed to do. If it only needs to read pages, don't give it action capabilities
-- Log all `/action` and `/navigate` calls so you can audit what happened
-- Consider running agents against a sandboxed profile with no real accounts for untrusted inputs
-- Rate-limit your Pinchtab endpoint—add rate limiting in Caddy or Nginx if you're exposing it to external agents
-
-<Notice type="warning" title="Don't skip the token">
-Running Pinchtab without `BRIDGE_TOKEN` on any internet-connected server is a serious risk. Anyone who finds the port has full browser control. Set the token before anything else.
-</Notice>
+Mitigation:
+- Scope what your agent can do. If it only needs to read pages, don't enable `allowEvaluate` or `allowCookies`
+- Log all `/action` and `/navigate` calls for auditing
+- Use agent sessions (`POST /sessions {agentId, grants?}`) for per-agent auth scoping
+- Use auto-handoff (`/tabs/{id}/handoff` / `resume`) as the human escape hatch. Paused handoff blocks action routes, and status is visible in the dashboard
+- Run untrusted-input agents against a sandboxed profile with no real accounts
+- Rate-limit at the reverse proxy level for external agents
 
 ## A typical agent workflow
 
+The flat routes haven't changed. Here's a working Python example updated for v0.15.x:
+
 ```python
 import httpx
+import os
 
 BASE = "http://localhost:9867"
-HEADERS = {"Authorization": "Bearer your-token"}
+HEADERS = {"Authorization": f"Bearer {os.environ['PINCHTAB_TOKEN']}"}
+
+# Wait for Chrome to be ready (not just the dashboard)
+import time
+for _ in range(30):
+    r = httpx.get(f"{BASE}/health", headers=HEADERS)
+    if r.json().get("defaultInstance", {}).get("status") == "running":
+        break
+    time.sleep(1)
 
 # Navigate to a page
 httpx.post(f"{BASE}/navigate", json={"url": "https://example.com"}, headers=HEADERS)
@@ -294,54 +614,103 @@ text = httpx.get(f"{BASE}/text", headers=HEADERS)
 print(text.text)
 ```
 
-Node refs are stable within a snapshot. After a click that loads a new page, take a fresh snapshot—refs on the new page are independent. For pages that update without a full load (React, Vue SPAs), use `?diff=true` to see what changed rather than re-fetching the whole tree.
+Note that `/evaluate` returns a refusal unless `security.allowEvaluate=true`. If your workflow needs JavaScript execution, enable the gate explicitly.
+
+For pages that update without a full load (React, Vue SPAs), use `?diff=true` to see what changed rather than re-fetching the whole tree. Node refs survive filter/selector/depth changes (since v0.15.1) and expire only on navigation.
+
+The CLI batches action+snapshot into a single round trip with `--snap` and `--snap-diff`, which is where the cost savings come from:
+
+```bash
+pinchtab nav https://example.com --snap
+pinchtab click e5 --snap
+```
 
 For multi-agent setups where several agents share a browser instance, use tab locking:
 
 ```bash
 # Lock tab 1 for exclusive use
-curl -X POST localhost:9867/tab/lock -d '{"tabId": 1}'
+curl -X POST localhost:9867/tabs/1/lock \
+  -H "Authorization: Bearer $PINCHTAB_TOKEN"
 
 # ... do your work ...
 
 # Release it
-curl -X POST localhost:9867/tab/unlock -d '{"tabId": 1}'
+curl -X POST localhost:9867/tabs/1/unlock \
+  -H "Authorization: Bearer $PINCHTAB_TOKEN"
 ```
+
+If you want to wire Pinchtab's HTTP API into a real agent framework, [build your own AI agent with Mastra](/build-ai-agent-mastra/) walks through the full loop.
 
 ## When it fits well
 
-Pinchtab is a good fit for agents that need to browse the web but don't need to be tightly coupled to a browser testing framework. Specifically:
+Pinchtab is a good fit for AI browser automation where agents need to browse the web without being tightly coupled to a browser testing framework. Specifically:
 
 - Web scraping and content monitoring at any scale
 - Form automation (sign-ups, data entry, multi-step workflows)
 - Authenticated scraping after a one-time login setup
-- Agents running in bash scripts, Go programs, or any language with HTTP support
-- Setups where you want to switch between different agent frameworks without changing browser integration
+- Agents running in bash, Go, Python, or any language with HTTP support
+- Setups where you want to share one browser control plane across many agents (multi-instance + locking + sessions)
+- CI quality gates using `pinchtab audit` and `pinchtab compare`
+- Switching between agent frameworks without changing the browser integration
 
-It's not the right tool for pixel-accurate visual testing (Playwright is better there), or for sites where the accessibility tree is sparse or unreliable. Some single-page apps built with custom components don't expose much useful ARIA data, and a full screenshot becomes the more practical option.
+It's not the right tool for pixel-accurate visual testing (Playwright is better there) or for sites where the accessibility tree is sparse. Some SPAs built with custom components don't expose much ARIA data, and a full screenshot becomes the more practical option.
 
-## Getting started
+If you don't want to self-host, [BrightData's MCP for AI web scraping](/brightdata-mcp-guide/) covers scraping-heavy use cases with a managed proxy network, and [Bright Data's web data platform](https://go.bitdoze.com/brightdata) handles scraping at scale. For a managed browser API without any infrastructure, [TinyFish's managed browser and web-fetch APIs for AI agents](https://go.bitdoze.com/tinyfish) give you one API key and zero server management. The tradeoff is cost per request versus a €5/mo VPS running Pinchtab 24/7.
 
-```bash
-# Docker (easiest, no Chrome install needed)
-docker run -d \
-  -p 127.0.0.1:9867:9867 \
-  --security-opt seccomp=unconfined \
-  -e BRIDGE_TOKEN=your-secret-token \
-  -e BRIDGE_HEADLESS=true \
-  pinchtab/pinchtab:latest
+## Troubleshooting and failure modes
 
-curl -H "Authorization: Bearer your-secret-token" http://localhost:9867/health
+<ListCheck>
+<ul>
+<li><code>pinchtab doctor</code> passes (run <code>pinchtab doctor browsers</code> on macOS)</li>
+<li><code>pinchtab health</code> with token returns <code>"status":"running"</code></li>
+<li>Readiness poll completes before first navigate</li>
+<li><code>pinchtab config validate</code> reports no errors</li>
+<li><code>pinchtab security</code> posture matches expectations</li>
+<li>Smoke test: <code>pinchtab nav https://example.com --snap</code> returns a snapshot</li>
+</ul>
+</ListCheck>
 
-# Build from source (requires Go 1.25+ and Chrome installed)
-git clone https://github.com/pinchtab/pinchtab.git
-cd pinchtab
-go build -o pinchtab .
-BRIDGE_HEADLESS=true BRIDGE_TOKEN=your-secret-token ./pinchtab
-```
+Consolidated failure modes and fixes:
 
-The GitHub repo has an [OpenClaw skill](https://github.com/pinchtab/pinchtab/tree/main/skill/pinchtab) that can install and configure Pinchtab automatically if you're using an agent that supports skills.
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| 401 on every route | Token required on all routes including `/health` | Export `PINCHTAB_TOKEN` or add `Authorization: Bearer` header |
+| 503 on all requests | Chrome not ready (dashboard up ≠ Chrome up) | Poll `.defaultInstance.status == "running"` before first navigate |
+| 404 with `browser_crashed` | Chrome crashed; instance auto-relaunches but all tabs are gone | Rebuild state; watch the `crashes` block in `/health`, not just `status` |
+| 400 with "did you mean" hints | `/action` refuses unexpressible parameters instead of dispatching a click | Read the hint, then fix the parameter name or kind |
+| Refusal with `details.hint` / `details.remedy` | Gated capability or IDPI allowlist | Read the remedy field; enable the gate or widen `security.allowedDomains` |
+| Agent can't reach a public site | IDPI local-only allowlist | `pinchtab config set security.allowedDomains '["domain.com"]'` |
+| Chrome tabs dying / renderer OOM | `shm_size` too low or `mem_limit` too low | Set `shm_size: "2gb"` and `mem_limit: 2g` minimum |
+| Config not picked up in Docker | Mounted config without `server.token` → server refuses to start | Set `server.token` in config or pass `-e PINCHTAB_TOKEN=...` |
+| Weird browser behavior on macOS | Profile conflict with daily Chrome | `pinchtab doctor browsers`; use Chrome for Testing |
+
+## FAQ
+
+<Accordion label="Did the old BRIDGE_* environment variables stop working?" group="faq" expanded="true">
+Yes. The `BRIDGE_*` env vars from the early 2026 version are dead and silently ignored. Configuration is now a nested JSON file at `~/.pinchtab/config.json` managed via `pinchtab config get/set/show/validate`, plus five `PINCHTAB_*` environment variables that override it. See the migration box in the Configuring section for the full old-to-new mapping.
+</Accordion>
+
+<Accordion label="Why does /health return 401 now?" group="faq">
+Auth is on by default since the security overhaul. The token is auto-generated during first-run setup. Export it with `export PINCHTAB_TOKEN=$(pinchtab config token --stdout)` and include `Authorization: Bearer $PINCHTAB_TOKEN` on every request. There's no way to disable auth and there shouldn't be. The old "no auth by default" posture is gone.
+</Accordion>
+
+<Accordion label="Why can't my agent reach example.com?" group="faq">
+IDPI (Indirect Prompt Injection defense) ships in strict mode with a local-only navigation allowlist. Your agent literally cannot browse the public internet until you widen `security.allowedDomains`. This is deliberate: it prevents prompt-injected pages from redirecting your agent to arbitrary sites. Widen the allowlist only for domains your agents need: `pinchtab config set security.allowedDomains '["example.com"]'`.
+</Accordion>
+
+<Accordion label="Do I still need seccomp=unconfined for Docker?" group="faq">
+No. The `seccomp=unconfined` requirement has been removed entirely. The official Docker image is hardened by default: non-root user, `cap_drop: ALL`, `read_only: true`, `no-new-privileges`, and the default seccomp profile. Chrome runs `--no-sandbox` inside the container precisely because the container boundary is the security layer. The old workaround is obsolete.
+</Accordion>
+
+<Accordion label="What does Pinchtab cost to run?" group="faq">
+Pinchtab itself is MIT licensed with no telemetry and no subscription. Your costs are a VPS (€4-10/mo for a 2 vCPU / 2-4GB box that runs it comfortably) plus model token costs. Accessibility trees keep token usage low: `/text` runs about 800 tokens per page versus thousands for screenshots, so the model bill is manageable even for heavy automation.
+</Accordion>
 
 ---
+
+Pinchtab at v0.15.2 (Aug 2026) is a different tool from the one I wrote about in February. It's now a proper browser control plane: multi-instance, safe by default, with a dashboard, MCP server, and audit tooling. The core pitch hasn't changed: one Go binary, plain HTTP, accessibility trees that keep token costs sane. The project moves fast (15 minor releases in 8 months), so pin your version and check the [release notes](https://github.com/pinchtab/pinchtab/releases) before upgrading.
+
+<Button text="Pinchtab on GitHub" link="https://github.com/pinchtab/pinchtab" variant="solid" color="blue" size="md" icon="arrow-right" />
+<Button text="Full documentation" link="https://pinchtab.com/docs/" variant="outline" color="blue" size="md" />
 
 *Pinchtab is MIT licensed. Source on [GitHub](https://github.com/pinchtab/pinchtab).*
