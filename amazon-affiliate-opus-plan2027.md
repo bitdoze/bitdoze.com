@@ -31,6 +31,7 @@ _Revision 2026-11-04: the 10 articles and the retrofits finished since Oct 23 ar
 | B5 | Zigbee Coordinator & Thread Border Router | `best-zigbee-coordinator-home-assistant` | Oct 30 | 18 impressions |
 | B8 | Best Mini PC for OPNsense / pfSense | `best-mini-pc-opnsense` | Oct 30 | 29 impressions |
 | B9 | Best Travel Router (WireGuard & Tailscale) | `best-travel-router-wireguard-tailscale` | Oct 30 | 34 impressions, 2 clicks |
+| N1 | Best NAS for Plex | `best-nas-for-plex` | Nov 5 | — |
 
 Retrofits finished: R1 (home-server hub "mini server" framing), R2 (NAS "Drives to buy with it" block), R3 (UPS split and "UPS for a NAS" H2), R4 (CalDigit TS5 alternatives and TB5 hubs), R6 October pass (EN + ES), R7 hardware boxes on six posts. 47 of the 101 Appendix C slugs are now in `src/data/affiliate-links.json`. Three more belonged to finished articles and were dropped (`beelink-mini-s13-pro` shipped as `beelink-mini-s13`, same ASIN; `rpi-ai-hat-plus` and `thirdreality-zigbee-plug-gen3-4pack` went unused). The remaining 51 stay in Appendix C. `best-tech-gadgets-2027` (Oct 24) is a general gadget list, not the S1 programmer/homelab gift guide, so S1 stays open.
 
