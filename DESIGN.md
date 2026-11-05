@@ -43,7 +43,7 @@ typography:
     lineHeight: 1.375
   body:
     fontFamily: "'Aleo Variable', ui-serif, Georgia, serif"
-    fontSize: "1.125rem → 1.25rem (md) → 1.3125rem (2xl)"
+    fontSize: "1.0625rem → 1.125rem (md) → 1.1875rem (2xl)"
     fontWeight: 400
     lineHeight: 1.7
   label:
@@ -177,7 +177,7 @@ Article sizes are defined on `[data-post-body]` in `global.css`, not through pro
 - **Section (H2)** (700, 24px → 32px, line-height 1.2, -0.02em), with a hairline divider above every H2 after the first.
 - **Subsection (H3)** (650, 20px → 23px, line-height 1.3). **H4** (650, 18px, line-height 1.35).
 - **Title** (700, 1.25rem, line-height 1.375): card titles, clipped to two lines.
-- **Body** (400, 18px mobile → 20px from md → 21px from 2xl, line-height 1.7). Source Sans 3 has a smaller x-height than OS system faces, so it runs about 1–2px larger for the same optical size. The measure is ~46 characters on phones and ~78 on desktop.
+- **Body** (400, 17px mobile → 18px from md → 19px from 2xl, line-height 1.7) in softened reading ink `#4b5563` (`--color-text-reading`, ~7.5:1 on Paper); prose links render in the same ink at weight 500 — the underline and blue wash carry the link signal. Aleo's large x-height means these sizes read a step bigger than their px value. The measure is ~48 characters on phones and ~75 on desktop.
 - **Label** (500, 0.75rem, line-height 1.5): tag chips, dates, metadata.
 - **Code** (400, 13px mobile → 14px blocks; 0.8em inline chips at weight 450).
 
