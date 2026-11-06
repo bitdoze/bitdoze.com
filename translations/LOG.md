@@ -287,3 +287,174 @@ Tracks EN→ES article translation progress. Regenerate the link/title lookup wi
 | 2026-10-29 | traefik-basic-authentication | traefik-autenticacion-basica | 491 lines; 25 code blocks byte-equal; 4 ES links, 5 stayed EN (subagent) |
 | 2026-10-29 | traefik-wildcard-certificate | traefik-certificado-wildcard | 694 lines; 40 code blocks byte-equal; 5 ES links, 7 stayed EN (subagent) |
 | 2026-10-29 | podman-vs-docker | podman-vs-docker | 629 lines; 28 code blocks byte-equal; 6 ES links, 4 stayed EN (subagent) |
+
+## Queue update — 2026-11-05 — COMPLETE
+
+Regenerated `index.json`: **395 EN posts, 318 translated, 77 pending, 29 stale.**
+`status: "pending"` = no ES file; `stale: true` (+ `staleSince`) = EN file committed after the
+ES file's last commit — these need a **diff-sync**, not a full re-translation.
+
+**Outcome:** all 8 added posts translated and all 29 stale pairs diff-synced on 2026-11-05
+(see "Done — run 2026-11-05" below; index still shows `stale: true` until the batch is
+committed — the flag compares commit dates, and these ES edits are uncommitted).
+Remaining queue after this run: **69 pending** (older posts, newest-first per HANDOVER).
+
+### Added (new pending — ALL TRANSLATED ✓)
+
+- best-free-dictation-apps → mejores-apps-dictado-gratis ✓
+- best-nas-for-plex → mejor-nas-plex-jellyfin ✓
+- hex-dictation → hex-dictado-local-gratis ✓
+- best-das-enclosure-homelab → mejor-carcasa-das-homelab ✓
+- best-mac-mini-dock → mejor-dock-mac-mini ✓
+- best-mini-pc-opnsense → mejor-mini-pc-opnsense ✓
+- best-travel-router-wireguard-tailscale → mejor-router-viaje-wireguard-tailscale ✓
+- best-zigbee-coordinator-home-assistant → mejor-coordinador-zigbee-home-assistant ✓
+
+### Stale (EN updated after ES sync — ALL SYNCED ✓)
+
+| EN last edit | EN slug | ES slug |
+|---|---|---|
+| 2026-11-05 | best-fish-shell-plugins | mejores-plugins-fish-shell |
+| 2026-11-05 | best-mini-pc-plex-jellyfin | mejor-mini-pc-plex-jellyfin |
+| 2026-11-05 | best-nas-homelab-docker-proxmox | mejores-nas-homelab-docker-proxmox |
+| 2026-11-05 | best-open-source-grok-bot-alternatives | mejores-alternativas-grok-bot-open-source |
+| 2026-11-05 | best-terminal-multiplexers | mejores-multiplexores-terminal |
+| 2026-11-05 | black-friday-home-server-deals | ofertas-black-friday-servidor-casa |
+| 2026-11-05 | fish-shell-abbreviations-vs-aliases | fish-shell-abreviaturas-vs-alias |
+| 2026-11-05 | fish-shell-autocomplete-suggestions | fish-shell-autocompletado-sugerencias |
+| 2026-11-05 | fish-shell-history-persistence | fish-shell-historial-persistencia |
+| 2026-11-05 | fluidvoice-mac-dictation | fluidvoice-dictado-mac |
+| 2026-11-05 | meetily-self-hosted-ai-meeting-assistant | meetily-asistente-reuniones-ia-autoalojado |
+| 2026-11-05 | nanoclaw-deploy-guide | guia-despliegue-nanoclaw |
+| 2026-11-05 | nullclaw-deploy-guide | guia-despliegue-nullclaw |
+| 2026-11-05 | nvm-fish-shell | nvm-fish-shell |
+| 2026-11-05 | self-host-jellyfin | autoalojar-jellyfin |
+| 2026-11-02 | fish-shell-vs-zsh | fish-shell-vs-zsh-comparacion |
+| 2026-11-01 | best-openclaw-dashboards | mejores-dashboards-openclaw |
+| 2026-11-01 | fish-shell-macos-setup | fish-shell-macos-configuracion |
+| 2026-11-01 | fish-shell-starship-prompt | fish-shell-configurar-starship |
+| 2026-11-01 | picoclaw-setup-guide | guia-configuracion-picoclaw |
+| 2026-11-01 | superlogical-rex | superlogical-rex |
+| 2026-10-30 | best-2-5-10gbe-switch-homelab | mejores-switches-2-5-10gbe-homelab |
+| 2026-10-30 | best-home-assistant-hardware | mejor-hardware-home-assistant |
+| 2026-10-30 | best-mac-mini-for-openclaw | mejor-mac-mini-openclaw |
+| 2026-10-30 | best-mini-pc-proxmox | mejores-mini-pc-proxmox |
+| 2026-10-30 | best-tb5-nvme-enclosures | mejores-carcasas-nvme-tb5 |
+| 2026-10-30 | netbird-vs-headscale-vs-tailscale | netbird-vs-headscale-vs-tailscale |
+| 2026-10-30 | pinchtab-browser-ai-agents | pinchtab-agentes-ia-navegador |
+| 2026-10-30 | best-tech-gadgets-2027 | mejores-gadgets-2027 |
+
+## Done — run 2026-11-05
+
+| Date | EN slug | ES slug | Notes |
+|---|---|---|---|
+| 2026-11-05 | best-free-dictation-apps | mejores-apps-dictado-gratis | 252 lines; 4 code blocks byte-equal; ES links fluidvoice + meetily; hex kept EN (hex ES in flight) (subagent) |
+| 2026-11-05 | hex-dictation | hex-dictado-local-gratis | 296 lines; 5 code blocks byte-equal; ES links fluidvoice/opencode-go/meetily; best-free-dictation-apps kept EN (in flight) (subagent) |
+| 2026-11-05 | best-nas-for-plex | mejor-nas-plex-jellyfin | 300 lines; compose blocks byte-equal; 3 AmazonProduct props translated; ES links mini-pc-plex/jellyfin/nas-homelab/ups; das-enclosure kept EN (in flight) (subagent) |
+| 2026-11-05 | best-das-enclosure-homelab | mejor-carcasa-das-homelab | 221 lines; 4 code blocks byte-equal; 7 ES links (nas-homelab, black-friday, samba, nfs, docker-containers, jellyfin, ups); 32 /go/ links kept (subagent) |
+| 2026-11-05 | best-mac-mini-dock | mejor-dock-mac-mini | 201 lines; code blocks byte-equal; ES links mac-mini-openclaw/tb5-enclosures/tb5-docks; 14 /go/ links verified (subagent) |
+| 2026-11-05 | best-mini-pc-opnsense | mejor-mini-pc-opnsense | 190 lines; code blocks byte-equal; ES links 2.5gbe/mini-pc-proxmox/ups; travel-router kept EN (in flight) (subagent) |
+| 2026-11-05 | best-zigbee-coordinator-home-assistant | mejor-coordinador-zigbee-home-assistant | 231 lines; 6 code blocks byte-equal; 2 AmazonProduct; ES links ha-hardware/mini-pc-proxmox (subagent) |
+| 2026-11-05 | best-travel-router-wireguard-tailscale | mejor-router-viaje-wireguard-tailscale | 192 lines; 2 tables translated; ES links gadgets/headscale/netbird; mini-pc-opnsense kept EN (subagent) |
+| 2026-11-05 | best-fish-shell-plugins | mejores-plugins-fish-shell | SYNC: Fish 4 refresh mirrored (+192/−43); new version-check section, OMF v8 status, fzf deps, troubleshooting accordions; title/meta/tags re-synced; lastmod→2026-11-05 (subagent) |
+| 2026-11-05 | nvm-fish-shell | nvm-fish-shell | SYNC: EN rewritten 180→468 lines — full re-sync; new fnm/Volta/mise tabs, 7 troubleshooting accordions, no-autoswitch correction; 27 code blocks byte-equal; 7 ES links (subagent) |
+| 2026-11-05 | nanoclaw-deploy-guide | guia-despliegue-nanoclaw | SYNC: full v1→v2 rewrite (601→756); repo move to nanocoai, OneCLI vault, multi-agent teams, skills 6→19 rows; 28 code blocks byte-equal; 21 ES links; ES file normalized with accents (subagent) |
+| 2026-11-05 | best-terminal-multiplexers | mejores-multiplexores-terminal | SYNC: +Muxy as 7th tool (+105/−59); new Muxy section/table columns/Rex YouTubeEmbed; title/meta/tags re-synced (subagent) |
+| 2026-11-05 | fish-shell-abbreviations-vs-aliases | fish-shell-abreviaturas-vs-alias | SYNC: fish-4.9 refresh (+287/−46); new expansion SVG + descriptions section + 5 gotchas accordions; 24 code blocks byte-equal; 10 ES links (subagent) |
+| 2026-11-05 | nullclaw-deploy-guide | guia-despliegue-nullclaw | SYNC: ~70% rewrite (762→1160); new install paths, model routing, NullHub, hardening; 32 code blocks byte-equal; 16 ES links; build:ci passed 1929 pages (subagent) |
+| 2026-11-05 | fluidvoice-mac-dictation | fluidvoice-dictado-mac | SYNC: Hex cross-promo paragraph + closing line; links now point at new ES hex/dictation-apps posts; fixed 2 pre-existing list divergences (subagent) |
+| 2026-11-05 | fish-shell-autocomplete-suggestions | fish-shell-autocompletado-sugerencias | SYNC: near-full rewrite (187→415); new prerequisites/fish-4.x/troubleshooting/FAQ sections, keybinding tables; 14 code blocks byte-equal; 11 ES links (subagent) |
+| 2026-11-05 | best-open-source-grok-bot-alternatives | mejores-alternativas-grok-bot-open-source | SYNC: +Lorca +Rerun alternatives (8→10, +92/−8); new sections 9-10, counts/tables/FAQ updated; build:ci passed (subagent) |
+| 2026-11-05 | best-mini-pc-plex-jellyfin | mejor-mini-pc-plex-jellyfin | SYNC: small — DAS + NAS-for-plex links added (to new ES slugs); lastmod bump (subagent) |
+| 2026-11-05 | self-host-jellyfin | autoalojar-jellyfin | SYNC: tiny — best-NAS-for-Plex sentence + ES link; lastmod bump (subagent) |
+| 2026-11-05 | best-nas-homelab-docker-proxmox | mejores-nas-homelab-docker-proxmox | SYNC: link-only — NAS-for-plex + DAS links to new ES slugs; lastmod bump (subagent) |
+| 2026-11-05 | black-friday-home-server-deals | ofertas-black-friday-servidor-casa | SYNC: one-line — NAS-for-plex sentence + ES link; lastmod bump (subagent) |
+| 2026-11-05 | meetily-self-hosted-ai-meeting-assistant | meetily-asistente-reuniones-ia-autoalojado | SYNC: one-sentence — Hex + dictation-apps cross-promo with ES links (subagent) |
+| 2026-11-05 | fish-shell-history-persistence | fish-shell-historial-persistencia | SYNC: full rewrite (219→536); private-mode tabs, atuin sync, leading-space rule, FAQ; 31 code blocks; 10 ES links (subagent) |
+| 2026-11-05 | fish-shell-macos-setup | fish-shell-macos-configuracion | SYNC: fish 4.9 refresh (+209/−46); 30 code blocks identical; build passed 1930 pages (subagent) |
+| 2026-11-05 | best-openclaw-dashboards | mejores-dashboards-openclaw | SYNC: rewritten to Control-UI-first guide (+324/−197); OpenClaw Studio, radar, archived-warning sections; 19 ES links (subagent) |
+| 2026-11-05 | fish-shell-starship-prompt | fish-shell-configurar-starship | SYNC: v1.27.0 refresh (294→477); Claude Code statusline section, new presets/troubleshooting; 24 code blocks (subagent) |
+| 2026-11-05 | best-tech-gadgets-2027 | mejores-gadgets-2027 | SYNC: 1-line addition — travel-router cross-link → ES slug (subagent) |
+| 2026-11-05 | best-home-assistant-hardware | mejor-hardware-home-assistant | SYNC: 1-line addition — zigbee-coordinator cross-link → ES slug (subagent) |
+| 2026-11-05 | best-mac-mini-for-openclaw | mejor-mac-mini-openclaw | SYNC: 1-line — mac-mini-dock cross-link → ES slug (subagent) |
+| 2026-11-05 | picoclaw-setup-guide | guia-configuracion-picoclaw | SYNC: v0.3.1 rewrite (760→1083); v3 schema, WebUI, SearXNG/MCP, hardened VPS, FAQ; 35 code blocks; 16 ES links (subagent) |
+| 2026-11-05 | superlogical-rex | superlogical-rex | SYNC: +14 lines — multiplexer Notice+Button CTA, YouTubeEmbed; links → ES slugs (subagent) |
+| 2026-11-05 | best-2-5-10gbe-switch-homelab | mejores-switches-2-5-10gbe-homelab | SYNC: 1-line — opnsense-mini-pc cross-link → ES slug (subagent) |
+| 2026-11-05 | best-mini-pc-proxmox | mejores-mini-pc-proxmox | SYNC: 1-line — opnsense-mini-pc cross-link → ES slug (subagent) |
+| 2026-11-05 | best-tb5-nvme-enclosures | mejores-carcasas-nvme-tb5 | SYNC: 1-line — mac-mini-dock cross-link → ES slug (subagent) |
+| 2026-11-05 | netbird-vs-headscale-vs-tailscale | netbird-vs-headscale-vs-tailscale | SYNC: 1-line — travel-router cross-link → ES slug (subagent) |
+| 2026-11-05 | fish-shell-vs-zsh | fish-shell-vs-zsh-comparacion | SYNC: Fish 4.9.3/Zsh 5.9.2 refresh (+201/−25); cadence + ops-checklist sections; 11 code blocks identical; 18 ES links (subagent) |
+| 2026-11-05 | pinchtab-browser-ai-agents | pinchtab-agentes-ia-navegador | SYNC: v0.15.x rewrite (716 lines, 1:1 with EN); architecture/config/MCP/security sections; 50 code blocks; 10 ES links (subagent) |
+| 2026-11-05 | secure-ssh-server-linux | securizar-servidor-ssh-linux | 759 lines; 102 code blocks; 11 ES links, 5 stayed EN (subagent) |
+| 2026-11-05 | docker-commands | comandos-docker | 869 lines; 15 code blocks byte-equal; 12 ES links, 4 stayed EN (subagent) |
+| 2026-11-05 | git-commands | comandos-git | 1636 lines; 73 code blocks; 8 ES links, 5 stayed EN; ai-coading-tools typo → ES slug (subagent) |
+| 2026-11-05 | deploy-pgvector-pgadmin-docker | desplegar-pgvector-pgadmin-docker | 433 lines; 10 code blocks; 10 ES links, 4 stayed EN (subagent) |
+| 2026-11-05 | linux-commands | comandos-linux | 1255 lines; 73 code blocks; 5 ES links, 7 stayed EN (subagent) |
+| 2026-11-05 | fix-rpmdb-error-bdb0087-db_runrecovery | arreglar-error-rpmdb-bdb0087 | 98 lines; 4 code blocks; 0 links (subagent) |
+| 2026-11-05 | dokploy-install | instalar-dokploy | 675 lines; 36 code blocks; 13 ES links, 1 stayed EN; build:ci passed 1949 pages (subagent) |
+| 2026-11-05 | install-upgrade-python-mac | instalar-actualizar-python-mac | 556 lines; 44 code blocks; 7 ES links, 4 stayed EN (subagent) |
+| 2026-11-05 | docker-run-python | docker-ejecutar-python | 512 lines; 24 code blocks; 7 ES links, 7 stayed EN (subagent) |
+| 2026-11-05 | migrate-astro-bun | migrar-astro-bun | 304 lines; 18 code blocks; 8 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | add-new-drive-lvm | anadir-disco-lvm | 548 lines; 48 code blocks; 9 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | cloudpanel-remote-backups | copias-seguridad-remotas-cloudpanel | 723 lines; 19 code blocks; 9 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | nicegui-pages | paginas-nicegui | 537 lines; 16 code blocks byte-identical; 8 ES links (2 index-lag), 2 stayed EN (subagent) |
+| 2026-11-05 | perplexity | perplexity | 406 lines; 3 code blocks; 9 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | carrd-back-to-top-button | boton-volver-arriba-carrd | 318 lines; 2 code blocks byte-equal; 4 ES links, 8 stayed EN (subagent) |
+| 2026-11-05 | groq-api-mistral-streamlit | groq-api-mistral-streamlit | 588 lines; 21 code blocks; 9 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | install-wordpress-docker | instalar-wordpress-docker | 786 lines; 32 code blocks; 11 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | carrd-mobile-navbar | navbar-movil-carrd | 600 lines; 2 code blocks; 8 ES links (11 occ.), 6 stayed EN (subagent) |
+| 2026-11-05 | cloudpanel-setup-dockge | configurar-dockge-cloudpanel | 550 lines; 23 code blocks; 7 ES links, 6 stayed EN (subagent) |
+| 2026-11-05 | seo-gets-tool | herramienta-seo-gets | 388 lines; 3 code blocks; 7 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | block-ai-crawlers | bloquear-rastreadores-ia | 635 lines; 17 code blocks; 8 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | bun-package-manager | gestor-paquetes-bun | 491 lines; 34 code blocks; 6 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | best-python-web-frameworks | mejores-frameworks-web-python | 431 lines; 10 code blocks; 7 ES links, 3 stayed EN (subagent retry — first agent ended before writing) |
+| 2026-11-05 | umami-analytics-install | instalar-umami-analytics | 554 lines; 23 code blocks; 8 ES links, 4 stayed EN; 2 anchors remapped (subagent) |
+| 2026-11-05 | outline-install | instalar-outline | 505 lines; 16 code blocks; 14 ES links, 2 stayed EN; 1 anchor remapped (subagent) |
+| 2026-11-05 | php-cloud-hosting | alojamiento-cloud-php | 332 lines; 6 code blocks; 10 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | pdf-extract-text-linux-cmd | extraer-texto-pdf-linux | 593 lines; 33 code blocks; 5 ES links, 3 stayed EN; 1 anchor remapped (subagent) |
+| 2026-11-05 | pdf-merge-linux-cmd | unir-pdf-linux | 546 lines; 40 code blocks; 6 ES links, 2 stayed EN; 2 anchors remapped (subagent) |
+| 2026-11-05 | pm2-fork-cluster | pm2-fork-cluster | 515 lines; 22 code blocks; 6 ES links, 5 stayed EN (subagent) |
+| 2026-11-05 | pm2-env-vars | pm2-variables-entorno | 411 lines; 22 code blocks; 5 ES links, 4 stayed EN (subagent) |
+| 2026-11-05 | streamlit-vs-taipy | streamlit-vs-taipy | 502 lines; 9 code blocks; 10 ES links, 1 stayed EN; needed resume — write tool chokes on Taipy pipe syntax (subagent) |
+| 2026-11-05 | pm2-manage-apps | pm2-gestionar-apps | 666 lines; 35 code blocks; 6 ES links, 5 stayed EN; 1 anchor remapped (subagent) |
+| 2026-11-05 | (link sweep) | - | PM2 trio cross-links repointed: pm2-fork-cluster/pm2-variables-entorno/pm2-gestionar-apps now interlink via /es/ slugs |
+| 2026-11-05 | streamlit-deploy-vps-cloudflare | desplegar-streamlit-vps-cloudflare | 694 lines; 45 code blocks; 12 ES links (+pm2 repointed post-hoc), 0 stayed EN (subagent) |
+| 2026-11-05 | slash-docker-deploy | desplegar-slash-docker | 216 lines; 2 code blocks; 9 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | add-contact-form-static-websites | anadir-formulario-contacto-sitios-estaticos | 377 lines; 10 code blocks; 9 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | carrd-add-domain | anadir-dominio-carrd | 393 lines; 1 code block; 5 ES links (10 occ.), 5 stayed EN (subagent) |
+| 2026-11-05 | astro-plausible-cloudflare-workers | astro-plausible-cloudflare-workers | 395 lines; 5 code blocks; 7 ES links (incl. stale -2026 URL fix), 2 stayed EN (subagent) |
+| 2026-11-05 | keila-setup | instalar-keila | 282 lines; 1 code block; 9 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | best-self-hosted-panels | mejores-paneles-autoalojados | 425 lines; 0 code blocks; 11 ES links; SWEEP: 62 links repointed across 54 ES files (subagent) |
+| 2026-11-05 | nodejs-update-dependencies | actualizar-dependencias-nodejs | 554 lines; 28 code blocks; 5 ES links, 2 stayed EN; build passed 2018 pages (subagent) |
+| 2026-11-05 | carrd-add-pricing-table | anadir-tabla-precios-carrd | 168 lines; 6 code blocks; 4 ES links, 3 stayed EN (subagent) |
+| 2026-11-05 | mail-baby-review | resena-mail-baby | 342 lines; 3 code blocks; 9 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | sed-delete-lines | sed-eliminar-lineas | 785 lines; 60 code blocks; 6 ES links, 3 stayed EN; 2 anchors remapped (subagent) |
+| 2026-11-05 | build-one-page-website-budget | crear-sitio-web-una-pagina-economico | 168 lines; 0 code blocks; 1 ES link, 6 stayed EN (subagent) |
+| 2026-11-05 | check-remote-port-in-linux-nc | comprobar-puerto-remoto-linux-nc | 278 lines; 25 code blocks; 4 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | enable-command-autocomplete-in-zsh | activar-autocompletado-comandos-zsh | 328 lines; 24 code blocks; 4 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | sed-search-replace | sed-buscar-reemplazar | 663 lines; 58 code blocks byte-identical; 6 ES links, 2 stayed EN; sed cross-links repointed both ways (subagent) |
+| 2026-11-05 | enable-syntax-highlighting-zsh | activar-resaltado-sintaxis-zsh | 336 lines; 18 code blocks; 5 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | compare-folders-content-differences | comparar-carpetas-diferencias-contenido | 101 lines; 7 code blocks; 0 links (subagent) |
+| 2026-11-05 | (link sweep) | - | zsh pair: enable-syntax-highlighting-zsh + enable-command-autocomplete-in-zsh → ES slugs across 15 ES files |
+| 2026-11-05 | install-docker-ubuntu-arm | instalar-docker-ubuntu-arm | 129 lines; 7 code blocks; 4 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | opnform-open-source | opnform-open-source | 52 lines; 2 widgets; external-only links (subagent) |
+| 2026-11-05 | fix-ssh-too-many-authentication-failures | arreglar-ssh-demasiados-fallos-autenticacion | 69 lines; 5 code blocks; 0 links (subagent) |
+| 2026-11-05 | cleanup-all-docker-things | limpiar-docker-completo | 128 lines; 10 code blocks; 2 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | add-cookie-notice-carrd | anadir-aviso-cookies-carrd | 228 lines; 1 code block; 4 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | add-users-to-docker-container | anadir-usuarios-contenedor-docker | 481 lines; 19 code blocks; 9 ES links, 1 stayed EN (subagent) |
+| 2026-11-05 | exclude-directories-files-copy-remote-machine | excluir-directorios-archivos-copiar-remoto | 536 lines; 32 code blocks; 10 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | fix-kernel-panic-unable-mount-root-fs | arreglar-kernel-panic-montar-root-fs | 143 lines; 6 code blocks; 1 ES link (subagent) |
+| 2026-11-05 | add-stickey-header-carrd | anadir-header-fijo-carrd | 159 lines; 2 code blocks; 5 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | updating-container-docker-compose | actualizar-contenedor-docker-compose | 167 lines; 6 code blocks; external-only links (subagent) |
+| 2026-11-05 | upload-directory-oci-bucket-python | subir-directorio-oci-bucket-python | 163 lines; 6 code blocks; external-only links (subagent) |
+| 2026-11-05 | plausible-tool | herramienta-plausible | 49 lines; 2 widgets; external-only links (subagent) |
+| 2026-11-05 | uptime-kuma-tool | herramienta-uptime-kuma | 58 lines; 3 widgets; 1 ES link (subagent) |
+| 2026-11-05 | screen-studio-review | resena-screen-studio | 106 lines; 6 widgets; external-only links (subagent) |
+| 2026-11-05 | carrd-review | resena-carrd | 469 lines; 34 widgets; 23 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | deploy-astrojs-cloudflare | desplegar-astrojs-cloudflare | 240 lines; 9 code blocks; 4 ES links, 3 stayed EN (subagent) |
+| 2026-11-05 | install-nodejs-using-nvm-macos-ubuntu | instalar-nodejs-nvm-macos-ubuntu | 215 lines; 17 code blocks; external-only links (subagent) |
+| 2026-11-05 | best-astrojs-online-courses | mejores-cursos-astrojs-online | 144 lines; 4 widgets; 2 ES links, 2 stayed EN (subagent) |
+| 2026-11-05 | monitor-cpu-usage-and-send-email-alerts-in-linux | monitorizar-cpu-alertas-email-linux | 255 lines; 10 code blocks; 2 ES links, 0 stayed EN (subagent) |
+| 2026-11-05 | link-github-with-ssh-maco-linux | vincular-github-ssh-macos-linux | 205 lines; 12 code blocks; external-only links (subagent) |
+| 2026-11-05 | (final link sweep) | - | 598 EN→ES links repointed across ~200 ES files (markdown, absolute, link=, href= forms); 0 mapped-EN links remain |
+| 2026-11-05 | — pending queue complete | - | 69/69 older pending posts translated; index: 395 EN / 395 translated / 0 pending / 29 stale (clears on commit) |

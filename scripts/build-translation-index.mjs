@@ -3,6 +3,7 @@
 // interlinking while translating. Run after adding/renaming any post:
 //   node scripts/build-translation-index.mjs
 import { readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { parse } from "yaml";
 
@@ -39,9 +40,28 @@ const en = scan(POSTS_DIR, "en");
 const es = scan(join(POSTS_DIR, "es"), "es");
 const esByKey = new Map(es.map((p) => [p.translationKey, p]));
 
+// Last commit date per post file, in one git pass — used to flag ES files that
+// went stale (EN edited after the ES file was last touched).
+const lastCommit = new Map();
+try {
+  const log = execSync(
+    'git log --pretty="===%cs" --name-only -- "src/content/posts/"',
+    { encoding: "utf8" }
+  );
+  let cur = null;
+  for (const line of log.split("\n")) {
+    if (line.startsWith("===")) cur = line.slice(3);
+    else if (line && cur && !lastCommit.has(line)) lastCommit.set(line, cur);
+  }
+} catch {
+  // Not a git checkout — stale flags just stay absent.
+}
+
 const articles = en
   .map((p) => {
     const t = esByKey.get(p.slug);
+    const enGitDate = lastCommit.get(p.file) ?? null;
+    const esGitDate = t ? (lastCommit.get(t.file) ?? null) : null;
     return {
       enSlug: p.slug,
       enTitle: p.title,
@@ -51,6 +71,9 @@ const articles = en
       category: p.category,
       draft: p.draft,
       status: t ? "translated" : "pending",
+      ...(t && enGitDate && esGitDate && enGitDate > esGitDate
+        ? { stale: true, staleSince: enGitDate }
+        : {}),
       esSlug: t?.slug ?? null,
       esTitle: t?.title ?? null,
       esUrl: t?.url ?? null,
@@ -72,10 +95,18 @@ if (dupes.length) {
 }
 
 mkdirSync(OUT_DIR, { recursive: true });
+const staleCount = articles.filter((a) => a.stale).length;
 const out = {
   generated: new Date().toISOString().slice(0, 10),
-  totals: { en: en.length, translated: es.length, pending: en.length - es.length },
+  totals: {
+    en: en.length,
+    translated: es.length,
+    pending: en.length - es.length,
+    stale: staleCount,
+  },
   articles,
 };
 writeFileSync(join(OUT_DIR, "index.json"), JSON.stringify(out, null, 2) + "\n");
-console.log(`Wrote translations/index.json — ${en.length} EN posts, ${es.length} translated, ${en.length - es.length} pending`);
+console.log(
+  `Wrote translations/index.json — ${en.length} EN posts, ${es.length} translated, ${en.length - es.length} pending, ${staleCount} stale`
+);

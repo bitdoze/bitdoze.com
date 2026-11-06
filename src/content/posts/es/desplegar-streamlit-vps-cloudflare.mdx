@@ -1,0 +1,694 @@
+---
+date: 2024-01-18
+lastmod: 2026-07-16T00:00:00Z
+translationKey: "streamlit-deploy-vps-cloudflare"
+title: "Despliega Streamlit en un VPS y haz proxy con Cloudflare Tunnels"
+meta_title: "Despliega Streamlit en un VPS con Cloudflare Tunnels"
+description: "Despliega Streamlit en un VPS y haz proxy a través de Cloudflare Tunnels. Guía paso a paso con config.toml, PM2/systemd, configuración del venv y resolución de problemas para producción."
+image: "@assets/images/24/01/streamlit-on-vps.jpeg"
+categories: ["web-development"]
+authors: ["Dragos"]
+tags: ["streamlit", "python", "cloudflare"]
+canonical: "https://www.bitdoze.com/es/desplegar-streamlit-vps-cloudflare/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import { Picture } from "astro:assets";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import imag1 from "@assets/images/24/01/cloudflare_tunnels.png";
+import imag2 from "@assets/images/24/01/cloudflare-strimlit-tunnel.jpeg";
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+[Streamlit](https://streamlit.io/) es un framework de Python para crear aplicaciones web interactivas con muy poco código. Puedes usarlo para crear dashboards de datos, demos de machine learning, herramientas internas — cualquier cosa donde un backend en Python y una UI reactiva tengan sentido. Yo lo he usado para apps rápidas de exploración de datos y dashboards internos donde montar un frontend completo en React sería excesivo.
+
+Streamlit tiene una sintaxis sencilla: funciones y decoradores de Python definen tu layout y tu lógica. `st.title` añade un encabezado, `st.dataframe` renderiza una tabla de pandas, `st.slider` añade controles interactivos. La recarga en caliente actualiza tu app mientras editas el código, sin necesidad de refrescar el navegador. Tú escribes Python y Streamlit se encarga del servidor web, la comunicación WebSocket y las actualizaciones reactivas de la UI.
+
+> Si te interesa conocer los mejores frameworks web de Python, consulta: [Los mejores frameworks web de Python](/es/mejores-frameworks-web-python/).
+> Si quieres ver cómo se compara Streamlit con otro framework de UI en Python, mira la [comparativa de Streamlit vs NiceGUI](/es/streamlit-vs-nicegui/).
+
+Si quieres desplegar Streamlit o cualquier app de Python en Docker, puedes consultar: [Cómo ejecutar cualquier app Python en Docker con Docker Compose](/es/docker-ejecutar-python/)
+
+Esta guía te lleva paso a paso por cómo desplegar Streamlit en un VPS y hacer proxy a través de Cloudflare Tunnels. El coste total ronda los 4 a 7 USD/mes por el VPS. Los Cloudflare Tunnels son gratuitos. Obtienes HTTPS, protección DDoS y ningún puerto de entrada abierto en tu servidor.
+
+## Despliegue gratuito en Streamlit Cloud
+
+[Streamlit Community Cloud](https://streamlit.io/cloud) es la opción sin configuración. Conectas un repositorio de GitHub y despliega tu app en una URL `*.streamlit.io`. Sin servidor que gestionar, sin claves SSH, sin gestores de procesos. Haces push a GitHub y la app se actualiza automáticamente.
+
+
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/M7ZMSX6DA7E"
+  label="Vídeo de despliegue de Streamlit"
+/>
+Está bien para demos y prototipos, pero los límites son reales:
+
+- 1 GB de memoria. Las apps complejas o con muchos datos chocarán rápido con este techo.
+- Sin dominios personalizados. Tu app vive en una URL aleatoria `*.streamlit.io`.
+- Sin escalado. Tienes un contenedor con 1 GB, tómalo o déjalo.
+- Los planes de pago han desaparecido para siempre. Streamlit está desarrollando un producto conjunto con Snowflake en su lugar.
+- El nivel gratuito ahora permite un repositorio privado (antes solo se permitían repositorios públicos).
+- Arranques en frío: Community Cloud apaga las apps inactivas. La primera carga tras la inactividad puede tardar de 10 a 30 segundos.
+
+Si necesitas un dominio personalizado, más memoria, arranques en frío más rápidos o fiabilidad en producción, sigue leyendo.
+
+## Cómo desplegar Streamlit en tu VPS y hacer proxy a través de Cloudflare Tunnels
+
+La arquitectura es sencilla:
+
+1. Tu VPS ejecuta Streamlit localmente en `localhost:8501`
+2. `cloudflared` crea un túnel cifrado hacia la red edge de Cloudflare
+3. Tu dominio resuelve a través de Cloudflare. Obtienes HTTPS, protección DDoS, firewall y ningún puerto de entrada abierto en el VPS
+
+El túnel conecta hacia fuera desde tu servidor. Nadie puede sondear los puertos de tu VPS porque nada escucha en una interfaz pública. Esa es la principal ventaja de seguridad frente a una configuración con reverse proxy tradicional.
+
+## Requisitos previos
+
+Antes de empezar, asegúrate de tener:
+
+<ListCheck>
+<ul>
+  <li>Un VPS con Ubuntu 22.04 o 24.04 (mínimo 1 vCPU, se recomiendan 2 GB de RAM)</li>
+  <li>Un nombre de dominio añadido a tu cuenta de Cloudflare (el plan gratuito sirve)</li>
+  <li>Un repositorio de GitHub que contenga tu app de Streamlit con un <code>requirements.txt</code></li>
+  <li>Acceso SSH a tu VPS (root o usuario con sudo)</li>
+  <li>Python 3.10+ (incluido con Ubuntu 22.04+)</li>
+</ul>
+</ListCheck>
+
+Si aún no tienes un VPS, puedes [configurar un VPS para desarrollo](/es/vps-configuracion-codificacion-ia/) o consultar la sección de abajo.
+
+### 1. Crea un VPS
+
+Elige un VPS con al menos 2 GB de RAM. Ubuntu 22.04 o 24.04 como sistema operativo. Cloudflare Tunnels es gratis. El único coste recurrente es el propio VPS, que parte de unos 4 a 5 USD/mes.
+
+Yo uso [Hetzner](https://go.bitdoze.com/hetzner) para la mayoría de mis servidores. Buen rendimiento, ubicaciones en la UE y precios justos. [Hostinger](https://go.bitdoze.com/hostinger-vps) es una alternativa económica sólida. Puedes [comparar proveedores de VPS](/es/digitalocean-vs-vultr-vs-hetzner/) para ver cuál se ajusta a tus necesidades.
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si te estás replanteando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+### 2. Actualiza el VPS y añade swap
+
+Una vez que tengas acceso SSH, actualiza el sistema y añade espacio swap como red de seguridad. El swap actúa como memoria virtual cuando la RAM física se llena. No salvará una app mal escrita, pero evita un kill por OOM cuando tu app de Streamlit carga un dataframe o un modelo grande en memoria.
+
+```bash
+# Actualiza el sistema
+sudo apt update && sudo apt -y upgrade
+
+# Añade 2 GB de espacio swap
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+Verifica que el swap está activo:
+
+```bash
+sudo swapon --show
+```
+
+Deberías ver `/swapfile` listado con su tamaño. Si no aparece, comprueba que `fallocate` creó el archivo correctamente. Algunos proveedores de VPS o sistemas de archivos no soportan `fallocate`; en ese caso usa `dd if=/dev/zero of=/swapfile bs=1M count=2048` en su lugar.
+
+<Notice type="info">
+El swap evita kills por OOM en instancias VPS pequeñas, pero es 100 veces más lento que la RAM. Monitoriza con `htop` durante los primeros días. Si tu app usa swap de forma constante, amplía el VPS. El swap no es un sustituto de la RAM. Puedes [comprobar qué procesos usan swap](/es/uso-swap-linux/) para detectar problemas pronto.
+</Notice>
+
+### 3. Configura un entorno virtual de Python e instala Streamlit
+
+No instales Streamlit globalmente con `pip3 install streamlit`. Puede entrar en conflicto con los paquetes Python del sistema y hace que la gestión de dependencias sea un dolor. Usa un entorno virtual en su lugar.
+
+```bash
+# Instala el soporte de venv de Python (como root)
+sudo apt install python3-pip python3-venv
+```
+
+Crea un usuario dedicado para la app (lo restringiremos más en el siguiente paso):
+
+```bash
+sudo useradd -m streamlit
+```
+
+Ahora cambia al usuario `streamlit` y crea el venv:
+
+```bash
+sudo su - streamlit
+
+# Crea y activa un entorno virtual
+python3 -m venv /home/streamlit/venv
+source /home/streamlit/venv/bin/activate
+
+# Instala Streamlit dentro del venv
+pip install streamlit
+```
+
+Verifica la instalación:
+
+```bash
+streamlit --version
+```
+
+Deberías ver la versión 1.59.x o superior. Streamlit requiere Python 3.10+ desde la versión 1.51.0.
+
+<Notice type="info">
+Si prefieres una resolución de dependencias más rápida, puedes usar [uv para configurar un proyecto Python](/es/empezar-uv/) como alternativa a pip + venv. El enfoque con venv funciona bien para un despliegue de una sola app, pero uv brilla cuando gestionas varios proyectos Python.
+</Notice>
+
+### 4. Crea un usuario dedicado para tu app de Streamlit
+
+Ya creamos el usuario `streamlit` en el paso anterior. Ejecutar la app con un usuario dedicado sin privilegios de root significa que, si la app se ve comprometida, el atacante no tiene acceso root al servidor. Es el principio de mínimo privilegio básico. No hay razón para saltárselo.
+
+El home del usuario es `/home/streamlit`, y ahí es donde vivirá todo: el entorno virtual, el código de la app y los archivos de configuración. Mantenerlo todo bajo el home de un solo usuario hace que los backups y los permisos sean sencillos.
+
+Si necesitas dar acceso a otro administrador para gestionar la app, añádelo al grupo `streamlit` en lugar de compartir la contraseña del usuario:
+
+```bash
+sudo usermod -aG streamlit your-username
+```
+
+### 5. Lleva la app de Streamlit a tu VPS
+
+Necesitas llevar el código de tu app al VPS. La forma más fácil es `git clone` desde tu repositorio de GitHub. Si tu repo es privado, tendrás que configurar una clave SSH o un token de acceso personal. GitHub tiene documentación para ambos.
+
+Clona tu repositorio como usuario `streamlit`:
+
+```bash
+sudo su - streamlit
+
+# Crea un directorio para la app
+mkdir -p $HOME/streamlit-app && cd $HOME/streamlit-app
+
+# Clona tu repositorio
+git clone https://github.com/username/repo-name
+
+cd repo-name
+```
+
+Verifica que el clonado funcionó y que tu archivo de app está ahí:
+
+```bash
+ls -la
+# Deberías ver app.py (o como se llame tu archivo principal)
+```
+
+Si tu repo es privado y usaste HTTPS, Git te pedirá credenciales. Para despliegues automatizados más adelante, configura claves SSH en su lugar:
+
+```bash
+ssh-keygen -t ed25519 -C "deploy-key"
+cat ~/.ssh/id_ed25519.pub
+# Añade esto como deploy key en la configuración de tu repo de GitHub
+```
+
+### 6. Instala los requisitos con pip
+
+Tu app probablemente depende de paquetes más allá del propio Streamlit: pandas, matplotlib, plotly, scikit-learn, etc. Deberían estar listados en un archivo `requirements.txt` en tu repo. Si tu repo no tiene uno, créalo primero:
+
+```bash
+# En tu máquina local (no en el VPS), en el directorio de tu proyecto:
+pip freeze > requirements.txt
+```
+
+Asegúrate de que tu venv está activado (deberías ver `(venv)` en tu prompt) y luego instala:
+
+```bash
+# Con el venv activado:
+pip install -r requirements.txt
+```
+
+Esto instala todo lo que tu app necesita en el venv aislado. Si una dependencia no compila (habitual con paquetes que necesitan librerías C como `psycopg2` o `lxml`), instala primero la librería del sistema:
+
+```bash
+# Ejemplo: para psycopg2
+sudo apt install libpq-dev
+
+# Ejemplo: para lxml
+sudo apt install libxml2-dev libxslt1-dev
+```
+
+Verifica que streamlit y tus dependencias clave están instaladas:
+
+```bash
+pip list | grep streamlit
+pip list | grep pandas
+```
+
+### 7. Configura Streamlit para producción — `.streamlit/config.toml`
+
+Este es el paso que la mayoría de las guías se saltan, y es la razón por la que los despliegues detrás de Cloudflare Tunnels se rompen.
+
+<Notice type="warning">
+Sin `enableCORS = false` y `enableXsrfProtection = false`, tu app de Streamlit mostrará "Connection error" o se quedará colgada en "Please wait..." detrás de Cloudflare Tunnels. Este es el error de despliegue n.º 1.
+</Notice>
+
+Crea un archivo `.streamlit/config.toml` dentro del directorio de tu app:
+
+```bash
+mkdir -p /home/streamlit/streamlit-app/repo-name/.streamlit
+cat > /home/streamlit/streamlit-app/repo-name/.streamlit/config.toml << 'EOF'
+[server]
+# Ejecutar headless (sin apertura automática del navegador, sin prompt de email)
+headless = true
+
+# Escuchar solo en localhost — Cloudflare Tunnel conecta localmente
+address = "localhost"
+port = 8501
+
+# Desactivar CORS/XSRF cuando hay un reverse proxy/túnel delante
+# Cloudflare Tunnel gestiona el HTTPS; la conexión es local
+enableCORS = false
+enableXsrfProtection = false
+
+# Keep-alive de WebSocket — evita desconexiones con "Connection error"
+websocketPingInterval = 30
+
+[browser]
+# Pon tu dominio real para que Streamlit genere URLs correctas
+serverAddress = "app.example.com"
+serverPort = 443
+EOF
+```
+
+Sustituye `app.example.com` por tu nombre de dominio real. La sección `[browser]` le dice a Streamlit qué URL generar para el cliente — sin ella, el navegador podría intentar conectar con `localhost` en lugar de tu dominio.
+
+Esto es lo que hace cada ajuste:
+
+- **`headless = true`** — Desactiva la apertura automática del navegador y el prompt de email que Streamlit muestra por defecto. Esencial en despliegues de servidor donde no hay navegador de escritorio.
+- **`address = "localhost"`** — Streamlit solo escucha en la interfaz loopback. Esto es importante: incluso sin UFW (paso 11), la app no es accesible desde internet. Cloudflare Tunnel conecta localmente, así que esto es todo lo que necesitas.
+- **`enableCORS = false`** — Cross-Origin Resource Sharing. Cuando tu dominio es `app.example.com` pero Streamlit cree que se ejecuta en `localhost`, la política CORS del navegador bloquea la conexión WebSocket. Ponerlo en `false` le dice a Streamlit que confíe en el proxy.
+- **`enableXsrfProtection = false`** — El mismo razonamiento. La validación del token XSRF falla cuando la petición llega a través del túnel porque el origen no coincide. Desactivarlo es seguro aquí porque Cloudflare Tunnel ya proporciona la capa de seguridad.
+- **`websocketPingInterval = 30`** — Envía un ping cada 30 segundos para mantener viva la conexión WebSocket a través del túnel. Sin esto, Cloudflare puede cerrar conexiones inactivas, causando el mensaje "Connection error".
+
+Estos ajustes funcionan tanto con el backend clásico Tornado como con el nuevo backend Starlette/Uvicorn (Streamlit 1.57.0+). La migración a Starlette fue un cambio importante bajo el capó, pero los flags de configuración son los mismos.
+
+### 8. Ejecuta y verifica la app
+
+Antes de configurar un gestor de procesos, comprueba que Streamlit arranca correctamente:
+
+```bash
+# Como usuario streamlit, con el venv activado:
+source /home/streamlit/venv/bin/activate
+streamlit run /home/streamlit/streamlit-app/repo-name/app.py
+```
+
+En otra terminal, verifica el endpoint de salud:
+
+```bash
+curl -s http://localhost:8501/_stcore/health
+```
+
+Deberías recibir `ok` de vuelta. Si obtienes "Connection refused", comprueba que `address = "localhost"` y `port = 8501` coinciden en tu `config.toml`.
+
+<Notice type="info">
+Streamlit expone `/_stcore/health`, que devuelve HTTP 200 cuando la app está en ejecución. Guarda este endpoint — es tu comando de verificación para cualquier despliegue.
+</Notice>
+
+Una vez verificado, detén la app en ejecución (`Ctrl+C`) y pasa a configurar un gestor de procesos.
+
+### 9. Configura un gestor de procesos — PM2 o systemd
+
+Tu sesión SSH terminará, y sin un gestor de procesos, Streamlit muere con ella. Necesitas algo que lo mantenga en ejecución en segundo plano y lo reinicie si falla.
+
+Dos buenas opciones: PM2 (rico en funciones, requiere Node.js) o systemd (ya está en tu sistema Linux, cero dependencias extra). Elige la que prefieras — ambas funcionan.
+
+<Tabs>
+<Tab name="Opción A: PM2">
+
+<Notice type="info">
+PM2 es una herramienta de Node.js gestionando un proceso Python. Si prefieres no instalar Node.js solo para esto, cambia a la pestaña de systemd — tiene menos piezas móviles.
+</Notice>
+
+**Instala Node.js 22 LTS** (como root):
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+**Instala PM2 globalmente:**
+
+```bash
+sudo npm install pm2@latest -g
+```
+
+Para más detalles sobre PM2, consulta la [guía completa sobre gestión de aplicaciones con PM2](/es/pm2-gestionar-apps/).
+
+**Arranca Streamlit con PM2** (como usuario `streamlit`):
+
+```bash
+sudo su - streamlit
+source /home/streamlit/venv/bin/activate
+
+pm2 start '/home/streamlit/venv/bin/streamlit run /home/streamlit/streamlit-app/repo-name/app.py' \
+  --name my-streamlit-app
+```
+
+O usa un archivo ecosystem de PM2 para una configuración más limpia:
+
+```bash
+cat > /home/streamlit/ecosystem.config.js << 'EOF'
+module.exports = {
+  apps: [{
+    name: 'my-streamlit-app',
+    script: '/home/streamlit/venv/bin/streamlit',
+    args: 'run /home/streamlit/streamlit-app/repo-name/app.py',
+    interpreter: 'none',
+    env: {
+      PATH: '/home/streamlit/venv/bin:' + process.env.PATH
+    }
+  }]
+};
+EOF
+
+pm2 start /home/streamlit/ecosystem.config.js
+```
+
+**Configura PM2 para que arranque en el boot:**
+
+```bash
+# Como usuario streamlit:
+pm2 startup systemd
+# Copia y ejecuta el comando que muestra (se ejecuta como root)
+pm2 save
+```
+
+**Verifica:**
+
+```bash
+pm2 list
+```
+
+Tu app debería aparecer como "online". Revisa los logs con `pm2 logs my-streamlit-app`.
+
+PM2 guarda los logs en `~/.pm2/logs/`. Con el tiempo pueden crecer — configura la rotación de logs:
+
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 7
+```
+
+</Tab>
+<Tab name="Opción B: systemd">
+
+systemd ya está en todos los sistemas Ubuntu. Sin paquetes extra que instalar, sin dependencia de Node.js. Menos piezas móviles.
+
+**Crea un archivo de servicio** (como root):
+
+```bash
+sudo cat > /etc/systemd/system/streamlit.service << 'EOF'
+[Unit]
+Description=Streamlit App
+After=network.target
+
+[Service]
+User=streamlit
+WorkingDirectory=/home/streamlit/streamlit-app/repo-name
+ExecStart=/home/streamlit/venv/bin/streamlit run app.py --server.port=8501 --server.address=localhost --server.headless=true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+**Habilita e inicia el servicio:**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now streamlit
+```
+
+**Verifica:**
+
+```bash
+sudo systemctl status streamlit
+```
+
+Deberías ver `active (running)`. Si dice `failed`, revisa los logs para ver el error:
+
+```bash
+journalctl -u streamlit -n 50 --no-pager
+```
+
+Problemas habituales: ruta incorrecta al binario streamlit del venv, o el archivo de la app no existe en el `WorkingDirectory` especificado.
+
+Para seguir los logs en tiempo real:
+
+```bash
+journalctl -u streamlit -f
+```
+
+systemd gestiona la rotación de logs automáticamente mediante journald, así que no necesitas configurarla aparte.
+
+</Tab>
+</Tabs>
+
+### 10. Crea un Cloudflare Tunnel e instala cloudflared
+
+Cloudflare Tunnels expone tu app a internet sin abrir ningún puerto. El túnel conecta hacia fuera desde tu VPS hacia el edge de Cloudflare. Obtienes HTTPS, protección DDoS y reglas WAF gratis.
+
+**Regístrate en Cloudflare** y añade tu nombre de dominio. Apunta los nameservers de tu dominio al DNS de Cloudflare. Sigue las instrucciones del dashboard de Cloudflare.
+
+Ve a **Zero Trust** > **Networks** > **Tunnels** y crea un túnel. Después de darle un nombre, obtendrás un comando de instalación:
+
+<Picture formats={["webp"]} fallbackFormat="webp"
+  src={imag1}
+  alt="Panel de Cloudflare Zero Trust mostrando la creación del túnel con el comando de instalación de cloudflared"
+/>
+
+**Opción 1: instalar desde el dashboard de Cloudflare** (copia el comando mostrado):
+
+```bash
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb &&
+sudo dpkg -i cloudflared.deb &&
+sudo cloudflared service install <token>
+```
+
+Sustituye `<token>` por el token real del dashboard de Cloudflare.
+
+**Opción 2: instalar desde el repositorio apt de Cloudflare** (mejor para actualizaciones continuas):
+
+```bash
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install cloudflared
+```
+
+Con el repositorio apt, actualizar es simplemente `sudo apt update && sudo apt upgrade cloudflared`. El método `.deb` funciona, pero requiere descargar manualmente las nuevas versiones cada vez.
+
+Tras instalar cloudflared con el token del dashboard, verifica que el servicio está en ejecución:
+
+```bash
+sudo systemctl status cloudflared
+sudo systemctl enable cloudflared
+```
+
+El comando `service install` del dashboard ya registra cloudflared como servicio systemd, pero `enable` asegura que arranque en el boot.
+
+Ahora configura el hostname público en el dashboard de Cloudflare. Apunta tu dominio (p. ej., `app.example.com`) a `http://localhost:8501`:
+
+<Picture formats={["webp"]} fallbackFormat="webp"
+  src={imag2}
+  alt="Configuración del hostname público del Cloudflare Tunnel apuntando el dominio al puerto 8501 de localhost para Streamlit"
+/>
+
+Después de guardar, visita `https://app.example.com` en tu navegador. Si ves la app de Streamlit cargando, el túnel funciona. El dashboard de Cloudflare debería mostrar el túnel como "Healthy".
+
+Para más información sobre autoalojamiento con Cloudflare Tunnels, consulta [cómo autoalojar Cloudreve con Docker y Cloudflare Tunnels](/es/instalar-cloudreve-docker/).
+
+### 11. Configura el firewall UFW (defensa en profundidad)
+
+Como Cloudflare Tunnel significa que no hacen falta puertos de entrada, bloquea el VPS con UFW. Incluso si Streamlit se enlaza accidentalmente a una interfaz pública en lugar de localhost, UFW bloquea el acceso externo. Defensa en profundidad — no dependas de una sola capa.
+
+<Notice type="warning">
+Asegúrate de que SSH (puerto 22) está permitido antes de activar UFW, o te quedarás fuera del VPS. Compruébalo dos veces con `sudo ufw status` antes de `sudo ufw enable`.
+</Notice>
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp
+sudo ufw enable
+```
+
+Verifica:
+
+```bash
+sudo ufw status verbose
+```
+
+Solo el puerto 22 debería aparecer como permitido. Todo lo demás está denegado. Si más adelante necesitas exponer otro servicio (digamos, una segunda app de Streamlit en el puerto 8502 a través de un túnel aparte), tampoco necesitas abrir ese puerto — el túnel conecta localmente.
+
+Para una configuración más robusta con detección de intrusiones y baneo automático de IPs de fuerza bruta, puedes [securizar tu VPS con CrowdSec](/es/crowdsec-servidor-seguro/) encima de UFW.
+
+## Resolución de problemas comunes
+
+<Accordion label='"Connection error" / WebSocket atascado en "Please wait..."' group="troubleshooting" expanded="true">
+**Causa:** Faltan `enableCORS = false` y `enableXsrfProtection = false` en `.streamlit/config.toml`.
+
+**Solución:** Añade ambos ajustes a tu `config.toml` (ver paso 7), reinicia Streamlit y limpia la caché del navegador. Verifica también que `browser.serverAddress` está configurado con tu dominio real, no `localhost`.
+</Accordion>
+
+<Accordion label="Streamlit carga pero los widgets no responden" group="troubleshooting">
+**Causa:** Problema de proxy del WebSocket. Cloudflare Tunnel soporta WebSockets por defecto, pero puede que haya que ajustar el intervalo de ping.
+
+**Solución:** Configura `server.websocketPingInterval = 30` en `config.toml`. En el dashboard de Cloudflare, en los ajustes HTTP del hostname público de tu túnel, pon `connectionTimeout` en 300 segundos para operaciones largas.
+</Accordion>
+
+<Accordion label="La app falla al subir archivos grandes" group="troubleshooting">
+**Causa:** El límite de subida por defecto es de 200 MB, pero el VPS puede no tener memoria suficiente.
+
+**Solución:** Aumenta `server.maxUploadSize` en `config.toml`. Asegúrate de que el swap está activado (paso 2). Para archivos muy grandes, considera una subida basada en S3 en lugar de procesamiento en memoria.
+</Accordion>
+
+<Accordion label='Cloudflared muestra "version outdated"' group="troubleshooting">
+**Causa:** Instalado mediante descarga `.deb` en lugar del repositorio apt.
+
+**Solución:** Si usas el repo apt: `sudo apt update && sudo apt upgrade cloudflared`. Si usas el método `.deb`: vuelve a descargar y ejecuta `sudo dpkg -i cloudflared.deb`.
+</Accordion>
+
+<Accordion label="Problemas de auth o sesión tras actualizar a Streamlit 1.57.0+" group="troubleshooting">
+**Causa:** Streamlit 1.57.0 migró de Tornado a Starlette/Uvicorn. Se reportaron algunas regresiones en la persistencia de cookies de auth y en el comportamiento CORS en 1.57.x.
+
+**Solución:** Asegúrate de estar en Streamlit 1.58.0+, que corrigió la mayoría de las regresiones. Si usas `st.login()` para autenticación OIDC, prueba después de cualquier actualización de versión de Streamlit.
+</Accordion>
+
+## Alternativa: despliegue con Docker
+
+Docker es ahora el método de despliegue oficialmente recomendado por Streamlit. Si ya usas Docker para otros servicios en tu VPS, este es el camino más limpio — gestiona el aislamiento de dependencias, las políticas de reinicio y elimina la necesidad de PM2 o systemd. La contrapartida es Docker como dependencia y un poco más de complejidad para depurar (logs de contenedor en lugar de archivos locales).
+
+Aquí tienes un Dockerfile mínimo:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y build-essential curl git && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip3 install -r requirements.txt
+COPY . .
+EXPOSE 8501
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+```
+
+Compila y ejecuta:
+
+```bash
+docker build -t my-streamlit-app .
+docker run -d -p 8501:8501 --name my-streamlit-app --restart unless-stopped my-streamlit-app
+```
+
+Sigues necesitando el `.streamlit/config.toml` con CORS/XSRF desactivados si haces proxy a través de Cloudflare Tunnels. Puedes copiarlo dentro de la imagen Docker durante el build o montarlo como volumen:
+
+```bash
+docker run -d -p 8501:8501 \
+  -v /home/streamlit/streamlit-app/repo-name/.streamlit:/app/.streamlit \
+  --name my-streamlit-app \
+  --restart unless-stopped \
+  my-streamlit-app
+```
+
+Con Docker Compose puedes fijar la versión y añadir límites de recursos:
+
+```yaml
+version: "3.8"
+services:
+  streamlit:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./.streamlit:/app/.streamlit
+    restart: unless-stopped
+    mem_limit: 1g
+```
+
+El `mem_limit` evita que una app descontrolada consuma toda la RAM del VPS — algo a vigilar si tu app carga datasets grandes.
+
+Verifica que el contenedor está sano:
+
+```bash
+docker ps
+curl -s http://localhost:8501/_stcore/health
+```
+
+Para una guía completa de Docker + Python, consulta [Cómo ejecutar cualquier app Python en Docker con Docker Compose](/es/docker-ejecutar-python/).
+
+## Mantén tu despliegue actualizado
+
+Una vez que la app está en ejecución, tendrás que actualizar tres cosas con el tiempo: el código de la app, el propio Streamlit y cloudflared. Esta es la rutina:
+
+**Actualiza el código de la app:**
+
+```bash
+sudo su - streamlit
+cd /home/streamlit/streamlit-app/repo-name
+git pull
+```
+
+Si tu `requirements.txt` cambió, activa el venv y reinstala:
+
+```bash
+source /home/streamlit/venv/bin/activate
+pip install -r requirements.txt
+```
+
+Luego reinicia el gestor de procesos:
+
+```bash
+# PM2
+pm2 restart my-streamlit-app
+
+# systemd
+sudo systemctl restart streamlit
+```
+
+**Actualiza el propio Streamlit:**
+
+```bash
+sudo su - streamlit
+source /home/streamlit/venv/bin/activate
+pip install --upgrade streamlit
+```
+
+Reinicia después de actualizar.
+
+**Actualiza cloudflared** (si usas el repo apt):
+
+```bash
+sudo apt update && sudo apt upgrade cloudflared
+```
+
+**Monitoriza los logs:**
+
+```bash
+# PM2
+pm2 logs my-streamlit-app
+
+# systemd
+journalctl -u streamlit -f
+```
+
+Considera configurar [Uptime Kuma para monitorización](/es/instalar-uptime-kuma/) — apúntalo a `https://app.example.com/_stcore/health` para recibir alertas si la app se cae.
+
+**Backup:** El código de tu app vive en Git (seguro). Pero `.streamlit/config.toml` y cualquier archivo de datos en el VPS deberían respaldarse por separado. Si ejecutas varias apps, cada una necesita un puerto diferente (8501, 8502, etc.) y entradas de hostname del Cloudflare Tunnel separadas.
+
+<Notice type="info">
+Los Cloudflare Tunnels son gratuitos. Tu único coste recurrente es el VPS (~4–7 USD/mes). Sin cargos por ancho de banda, sin tarifas por petición.
+</Notice>
+
+## Conclusión
+
+Ahora tienes un despliegue de Streamlit listo para producción: un usuario dedicado con un entorno virtual, un `config.toml` adecuado para compatibilidad con Cloudflare Tunnel, un gestor de procesos que lo mantiene en ejecución y un firewall bien bloqueado. El coste total es de 4–7 USD/mes por el VPS — Cloudflare Tunnels, HTTPS, protección DDoS y el WAF son todos gratis.
+
+El mismo patrón funciona para otros frameworks web de Python como Flask, FastAPI o Gradio. Las piezas clave son siempre las mismas: escuchar en localhost, usar un gestor de procesos, hacer proxy a través de Cloudflare Tunnel y bloquear el firewall.
+
+Si necesitas restringir el acceso a tu app, Streamlit 1.42.0+ añadió `st.login()` y `st.logout()` para autenticación OIDC nativa. Puedes usarlo con Google o cualquier proveedor OIDC para controlar el acceso sin construir una capa de auth personalizada. Para herramientas internas que no deberían ser públicas, esto es lo primero que configuraría una vez que el despliegue básico funciona.
+
+<Button text="Despliega apps Python con Docker" link="/es/docker-ejecutar-python/" variant="outline" color="blue" size="md" icon="arrow-right" />

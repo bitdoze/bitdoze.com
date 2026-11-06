@@ -1,0 +1,411 @@
+---
+date: 2024-01-20
+lastmod: 2026-07-17T00:00:00Z
+translationKey: "pm2-env-vars"
+title: "Variables de entorno en PM2: configuración, actualización y buenas prácticas"
+meta_title: "Variables de entorno en PM2: configuración, actualización y buenas prácticas"
+description: "Domina las variables de entorno de PM2: aprende a definirlas, actualizarlas y protegerlas con archivos de ecosistema, --update-env, filter_env y más. Evita los errores más comunes."
+image: "@assets/images/24/01/pm2-env-vars.jpeg"
+categories: ["tools"]
+authors: ["Dragos"]
+tags: ["pm2", "node", "environment-variables"]
+canonical: "https://www.bitdoze.com/es/pm2-variables-entorno/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Las variables de entorno de PM2 son de esas cosas que parecen sencillas hasta que te dan un mordisco. Defines una variable, reinicias el proceso y nada cambia. O usas la opción equivocada y te preguntas por qué tu aplicación está escuchando en el puerto que no es. He visto a desarrolladores con experiencia tropezar con estos errores, y la antigua documentación de PM2 no ayuda mucho.
+
+Esta guía cubre la forma correcta de definir, actualizar y proteger las variables de entorno en PM2 (actualmente en la versión 7.0.3, que requiere Node.js 18+). Si buscas una visión más general de la gestión de procesos, consulta primero [cómo gestionar aplicaciones con PM2](/es/pm2-gestionar-apps/). Para quienes administran varias aplicaciones en un VPS, los [mejores paneles autoalojados de gestión de servidores](/es/mejores-paneles-autoalojados/) pueden ayudar a tener visibilidad de todo el stack.
+
+<Notice type="error" title="Concepto erróneo común">
+La opción `--env` de PM2 **no** define variables de entorno individuales. Selecciona bloques de entorno con nombre de un archivo de ecosistema (p. ej., `--env production`). Muchos artículos, incluidas versiones antiguas de este, muestran una sintaxis incorrecta como `pm2 start app.js --env PORT=3000`. Eso no funciona.
+</Notice>
+
+## Definir variables de entorno desde la línea de comandos en PM2
+
+La forma correcta de pasar variables de entorno al iniciar un proceso de PM2 usa la [sintaxis estándar de variables de entorno de Unix](https://www.bitdoze.com/es/comandos-linux/): antepón al comando `VAR=valor`.
+
+<Tabs>
+<Tab name="Forma incorrecta (no funciona)">
+```sh
+# ❌ Así NO funcionan las variables de entorno de PM2
+pm2 start app.js --env PORT=3000
+pm2 start app.js --env PORT=3000,DB_URL=mongodb://localhost:27017/mydb
+```
+La opción `--env` selecciona **bloques** de entorno de un archivo de ecosistema, no variables individuales. Pasar `--env PORT=3000` será ignorado o provocará un error.
+</Tab>
+<Tab name="Forma correcta (prefijo Unix)">
+```sh
+# Una sola variable:
+PORT=3000 pm2 start app.js
+
+# Varias variables (separadas por espacios):
+PORT=3000 DB_URL=mongodb://localhost:27017/mydb SECRET=abc123 pm2 start app.js
+```
+Esto es Unix estándar. Las variables se definen en el entorno antes de que PM2 lance tu aplicación.
+</Tab>
+</Tabs>
+
+**Comprueba que funcionó:**
+
+```sh
+# Primero busca el ID de tu proceso
+pm2 list
+
+# Luego inspecciona el entorno (sustituye 0 por el id de tu proceso)
+pm2 env 0
+```
+
+Deberías ver `PORT=3000` en la salida. Si no aparece, revisa la sintaxis del prefijo. Las variables deben ir *antes* de `pm2 start`.
+
+Para el [modo clúster de PM2](/es/pm2-fork-cluster/) con varias instancias, normalmente querrás puertos distintos por instancia. `increment_var` lo gestiona automáticamente (consulta la sección avanzada).
+
+## Definir variables de entorno con archivos de ecosistema de PM2
+
+Para cualquier aplicación en producción, el archivo de ecosistema es el enfoque adecuado. Te da un único archivo de configuración que define tu aplicación, sus variables de entorno y cómo debe ejecutarla PM2.
+
+### Bloques básicos env, env_production y env_development
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [
+    {
+      name: "my-app",
+      script: "./app.js",
+      // Entorno por defecto. Se usa cuando no se pasa --env
+      env: {
+        NODE_ENV: "development",
+        PORT: 3000,
+        APP_LOG_LEVEL: "debug",
+      },
+      // Se usa con: pm2 start ecosystem.config.js --env production
+      env_production: {
+        NODE_ENV: "production",
+        PORT: 3000,
+        APP_LOG_LEVEL: "info",
+      },
+      // Se usa con: pm2 start ecosystem.config.js --env staging
+      env_staging: {
+        NODE_ENV: "staging",
+        PORT: 3000,
+        APP_LOG_LEVEL: "warn",
+      },
+    },
+  ],
+};
+```
+
+Cada bloque `env_*` corresponde a un nombre que pasas con `--env`. El bloque base `env` es el predeterminado cuando no se usa `--env`.
+
+### Cambiar de entorno con --env [nombre]
+
+```sh
+# Iniciar con el entorno de desarrollo (predeterminado):
+pm2 start ecosystem.config.js
+
+# Iniciar con el entorno de producción:
+pm2 start ecosystem.config.js --env production
+
+# Iniciar con el entorno de staging:
+pm2 start ecosystem.config.js --env staging
+```
+
+<Notice type="info" title="Las variables de entorno del ecosistema se actualizan automáticamente al reiniciar">
+Cuando usas un archivo de ecosistema, PM2 vuelve a leer el archivo en cada `pm2 restart`. Así que si editas el bloque `env_production` y ejecutas `pm2 restart ecosystem.config.js --env production`, se aplican los nuevos valores. Esto es diferente de las variables definidas por CLI, que son conservadoras por defecto (más sobre esto abajo).
+</Notice>
+
+### Formatos modernos de archivos de ecosistema y generación de plantillas
+
+PM2 admite más que simples archivos `.js`:
+
+- `ecosystem.config.js` / `ecosystem.config.cjs` / `ecosystem.config.mjs`
+- `ecosystem.json` / `ecosystem.json5`
+- `ecosystem.yaml` / `ecosystem.yml`
+
+Para generar una configuración inicial:
+
+```sh
+pm2 init simple
+```
+
+Esto crea un `ecosystem.config.js` básico que puedes completar.
+
+**Comprueba:**
+
+```sh
+pm2 start ecosystem.config.js --env production
+pm2 env 0   # Confirma que aparece NODE_ENV=production
+```
+
+Si aparecen los valores del bloque equivocado, el nombre de `--env` no coincide con la clave de tu archivo de ecosistema. `--env prod` **no** coincidirá con `env_production`. El nombre debe coincidir exactamente.
+
+## Cómo actualizar las variables de entorno de una aplicación PM2 en ejecución
+
+Aquí es donde la mayoría de la gente se atasca. PM2 es conservador por defecto: las variables de entorno son esencialmente inmutables una vez que el proceso arranca.
+
+<Notice type="warning" title="Los reinicios son conservadores por defecto">
+Según la documentación oficial de PM2: "A través de la CLI, el entorno es conservador, lo que significa que cuando ejecutas distintas acciones de gestión de procesos (restart, reload, stop/start), las nuevas variables de entorno no se actualizarán en tu aplicación". Debes activarlo explícitamente con `--update-env`.
+</Notice>
+
+### La opción --update-env
+
+Para cambiar una variable en un proceso iniciado por CLI:
+
+```sh
+# Define el nuevo valor y reinicia con --update-env
+PORT=4000 pm2 restart my-app --update-env
+```
+
+Para confirmar que el cambio surtió efecto:
+
+```sh
+pm2 env 0   # Busca PORT=4000
+```
+
+Para cambios en el archivo de ecosistema, basta con reiniciar con la misma opción `--env`:
+
+```sh
+# Edita env_production en ecosystem.config.js y luego:
+pm2 restart ecosystem.config.js --env production
+```
+
+Las variables del archivo de ecosistema siempre se actualizan al reiniciar. No necesitas `--update-env` para ellas.
+
+### Borrado completo + reinicio para variables rebeldes
+
+Algunas variables, sobre todo `NODE_ENV`, se leen una sola vez al arrancar y no cambian ni con `--update-env`. Cuando eso ocurre, borrar y volver a crear es la única vía fiable:
+
+```sh
+pm2 delete my-app
+pm2 start ecosystem.config.js --env production
+```
+
+Es un comportamiento conocido. Los informes de la comunidad (issues de GitHub #3192, #4135, #5591) confirman que `--update-env` puede ser poco fiable en ciertos casos extremos. Ante la duda, borra y vuelve a crear.
+
+### La trampa de pm2 save / pm2 resurrect
+
+Si usas `pm2 save` para persistir tu lista de procesos y reiniciarla automáticamente al arrancar el servidor (vía `pm2 startup`), ten en cuenta: `pm2 save` congela las variables de entorno actuales en el archivo de volcado. Cuando luego ejecutas `pm2 resurrect`, se usan esos valores guardados, aunque hayas modificado el archivo de ecosistema.
+
+La solución: tras cambiar las variables de entorno, borra y vuelve a crear tus procesos, y después guarda de nuevo:
+
+```sh
+pm2 delete my-app
+pm2 start ecosystem.config.js --env production
+pm2 save
+```
+
+<Notice type="error" title="pm2 set NO actualiza las variables de entorno de la aplicación">
+`pm2 set` pertenece al **sistema de configuración interno de PM2** (p. ej., `pm2 set pm2:sysmonit true` para activar la monitorización del host). No define variables de entorno de la aplicación ni envía ninguna señal a tu proceso. Si has estado usando `pm2 set app:CLAVE valor`, ese valor no está llegando a tu aplicación.
+</Notice>
+
+## Funciones avanzadas de variables de entorno en PM2
+
+Estas funciones son especialmente importantes cuando ejecutas varias instancias o despliegas en varios entornos en el mismo servidor.
+
+### filter_env: evita la fuga de variables de entorno globales
+
+Por defecto, tu proceso de PM2 hereda **todas** las variables de entorno del shell padre. Eso incluye variables del sistema, variables de otras aplicaciones y cualquier cosa exportada en tu `.bashrc`. `filter_env` te permite definir una lista blanca de prefijos.
+
+```js
+module.exports = {
+  apps: [
+    {
+      name: "my-app",
+      script: "./app.js",
+      // Solo pasa las variables de entorno que empiezan por APP_ o DB_
+      filter_env: ["APP_", "DB_"],
+    },
+  ],
+};
+```
+
+Para descartar por completo todas las variables de entorno globales:
+
+```js
+filter_env: true,
+```
+
+Es una función de seguridad. Evita la filtración accidental de secretos o variables de otros procesos. Consulta la sección de seguridad para más detalles.
+
+### increment_var: incrementa PORT automáticamente por instancia de clúster
+
+Al ejecutar en [modo clúster de PM2](/es/pm2-fork-cluster/), cada instancia necesita su propio puerto. En lugar de fijar los puertos manualmente, usa `increment_var`:
+
+```js
+module.exports = {
+  apps: [
+    {
+      name: "api",
+      script: "./api.js",
+      instances: 4,
+      exec_mode: "cluster",
+      increment_var: "PORT",
+      env: {
+        PORT: 3000,
+      },
+    },
+  ],
+};
+```
+
+Esto produce: la instancia 0 recibe `PORT=3000`, la instancia 1 recibe `PORT=3001`, la instancia 2 recibe `PORT=3002` y la instancia 3 recibe `PORT=3003`.
+
+### instance_var: personaliza NODE_APP_INSTANCE
+
+PM2 define `NODE_APP_INSTANCE` para cada instancia del clúster (0, 1, 2, ...). Esto entra en conflicto con la librería `node-config`, que usa la misma variable para sus propios fines. Renómbrala:
+
+```js
+instance_var: "INSTANCE_ID",
+```
+
+Ahora cada instancia recibe `INSTANCE_ID=0`, `INSTANCE_ID=1`, etc. en lugar de `NODE_APP_INSTANCE`.
+
+### append_env_to_name: varios entornos en un mismo servidor
+
+Si quieres ejecutar la misma aplicación en desarrollo y producción en una sola máquina:
+
+```js
+module.exports = {
+  apps: [
+    {
+      name: "my-app",
+      script: "./app.js",
+      append_env_to_name: true,
+      env: { NODE_ENV: "development" },
+      env_production: { NODE_ENV: "production" },
+    },
+  ],
+};
+```
+
+Con `pm2 start ecosystem.config.js --env production`, PM2 nombra el proceso `my-app-production`. Sin la opción, es `my-app-development`. Ambos pueden ejecutarse simultáneamente.
+
+## Listar e inspeccionar variables de entorno en PM2
+
+Para ver todas las variables de entorno de un proceso en ejecución:
+
+```sh
+# Por ID de proceso
+pm2 env 0
+
+# Por nombre de proceso
+pm2 env my-app
+```
+
+Muestra todas las variables de entorno que el proceso puede ver, tanto las que definiste tú como todas las variables de sistema heredadas.
+
+Para salida en JSON (útil para scripts):
+
+```sh
+pm2 jlist | jq '.[0].pm2_env'
+```
+
+Para una vista formateada de todos los procesos:
+
+```sh
+pm2 prettylist
+```
+
+<Notice type="warning" title="Los secretos son visibles en la salida de pm2 env">
+Cualquiera con acceso al shell puede ejecutar `pm2 env <id>` y ver todas las variables de entorno, incluidas contraseñas de bases de datos, claves de API y tokens. Es una razón más para usar `filter_env` y restringir el acceso SSH. Para más orientación sobre [cómo monitorizar los procesos de tu aplicación](https://www.bitdoze.com/es/monitorizar-servidor/) y la seguridad del servidor, consulta las guías enlazadas.
+</Notice>
+
+## Buenas prácticas de seguridad para las variables de entorno en PM2
+
+<ListCheck>
+<ul>
+<li>Nunca escribas secretos en archivos de ecosistema que se suban a git</li>
+<li>Usa `filter_env` para limitar qué variables puede ver tu proceso</li>
+<li>Inyecta los secretos en el momento del despliegue, no durante el desarrollo</li>
+<li>Restringe el acceso SSH. `pm2 env` lo expone todo a cualquiera con un shell</li>
+<li>Rota los secretos con regularidad y reinicia con `--update-env` o con borrar+iniciar</li>
+<li>Audita tu entorno periódicamente con `pm2 env <id>`</li>
+</ul>
+</ListCheck>
+
+### Nunca escribas secretos en los archivos de ecosistema
+
+Tu `ecosystem.config.js` debería estar bajo control de versiones. Eso significa que nunca debe contener contraseñas reales, claves de API ni tokens. En su lugar, inyéctalos en el momento del despliegue:
+
+**Opción 1: script envoltorio que carga un archivo .env**
+
+```sh
+#!/bin/bash
+# start-app.sh
+set -a
+source /etc/my-app/secrets.env
+set +a
+pm2 start ecosystem.config.js --env production
+```
+
+**Opción 2: archivo de entorno de systemd**
+
+Si PM2 está gestionado por systemd (vía `pm2 startup`), puedes definir las variables en `/etc/default/my-app` y referenciarlas en el archivo de la unidad.
+
+**Opción 3: gestor de secretos**
+
+Para equipos y configuraciones más complejas, herramientas como Infisical, Doppler o HashiCorp Vault pueden inyectar secretos en el despliegue. Para configuraciones sencillas en solitario, un archivo `.env` con permisos restringidos (`chmod 600`) cargado por un script envoltorio suele ser suficiente.
+
+Para quienes gestionan secretos en entornos con contenedores, consulta la [gestión de secretos en Docker Compose](https://www.bitdoze.com/es/secretos-docker-compose/) para una comparación de enfoques.
+
+### Usar filter_env para limitar la exposición
+
+Si tu servidor ejecuta varias aplicaciones con PM2, `filter_env` evita que una aplicación vea las variables de otra. El filtrado por prefijo es lo más práctico:
+
+```js
+filter_env: ["MYAPP_"],
+```
+
+Ahora solo las variables que empiezan por `MYAPP_` llegan a tu proceso. Todo lo demás se descarta.
+
+### Seguridad general del servidor
+
+Las variables de entorno son solo una parte del panorama. Si aún no lo has hecho, revisa [cómo securizar un servidor SSH en Linux](https://www.bitdoze.com/es/securizar-servidor-ssh-linux/). Si alguien obtiene acceso al shell, todas tus variables de entorno quedan expuestas, independientemente de lo bien que las gestiones en PM2.
+
+## Errores comunes con las variables de entorno de PM2 (y cómo evitarlos)
+
+<Accordion label="--env selecciona bloques de entorno, no variables individuales" group="pitfalls" expanded="true">
+`pm2 start app.js --env PORT=3000` **no** define `PORT`. La opción `--env` selecciona un bloque de entorno con nombre de un archivo de ecosistema. Usa `--env production` para aplicar el bloque `env_production`. Para definir variables individuales en la línea de comandos, usa la sintaxis de prefijo de Unix: `PORT=3000 pm2 start app.js`.
+</Accordion>
+
+<Accordion label="Los reinicios no recogen las nuevas variables de entorno" group="pitfalls">
+PM2 es conservador por defecto. Ejecutar `pm2 restart my-app` **no** recogerá las nuevas variables de entorno del shell. Debes añadir `--update-env`: `PORT=4000 pm2 restart my-app --update-env`. Para las variables del archivo de ecosistema, reinicia con el archivo de ecosistema y la opción `--env`. Esas siempre se actualizan.
+</Accordion>
+
+<Accordion label="NODE_ENV no cambia con --update-env" group="pitfalls">
+`NODE_ENV` se lee una sola vez al arrancar la aplicación. Ni siquiera `--update-env` lo cambiará. La única vía fiable es la opción nuclear: `pm2 delete my-app` seguido de `pm2 start ecosystem.config.js --env production` (o el equivalente por CLI con el nuevo valor de `NODE_ENV`).
+</Accordion>
+
+<Accordion label="pm2 save congela las variables de entorno en el archivo de volcado" group="pitfalls">
+Cuando ejecutas `pm2 save`, PM2 vuelca la lista de procesos actual, con todas las variables de entorno, en `~/.pm2/dump.pm2`. Al hacer `pm2 resurrect` (a menudo lanzado automáticamente por `pm2 startup`), se usan esos valores guardados. Si cambiaste las variables de entorno del archivo de ecosistema después de guardar, los procesos resucitados seguirán usando los valores antiguos. Borra, vuelve a crear y guarda de nuevo.
+</Accordion>
+
+<Accordion label="Los secretos son visibles en la salida de pm2 env" group="pitfalls">
+Cualquier usuario con acceso al shell puede ejecutar `pm2 env <id>` y ver todas las variables de entorno, incluidas las contraseñas de bases de datos y las claves de API. Usa `filter_env` para limitar lo que hereda tu proceso y restringe el acceso SSH al servidor.
+</Accordion>
+
+<Accordion label="pm2 set es para la configuración interna de PM2, no para variables de la aplicación" group="pitfalls">
+`pm2 set pm2:sysmonit true` activa la monitorización del host de PM2. `pm2 set myapp:PORT 3000` **no** define una variable de entorno de la aplicación. No existe ningún comando `pm2 set` que afecte a `process.env` en tu aplicación. Usa archivos de ecosistema o el prefijo por CLI + `--update-env` en su lugar.
+</Accordion>
+
+## Conclusión
+
+Las variables de entorno de PM2 se resumen en unas pocas reglas básicas:
+
+1. **Usa archivos de ecosistema para producción.** Son explícitos, se pueden versionar y PM2 los relee al reiniciar.
+2. **Usa `--update-env` al cambiar variables definidas por CLI.** Sin ella, `pm2 restart` es conservador y no recogerá los cambios.
+3. **Borra y vuelve a iniciar para los cambios en `NODE_ENV`.** `--update-env` no funciona para las variables leídas al arrancar.
+4. **Usa `filter_env` para limitar la exposición.** No dejes que tu aplicación herede todo el entorno del servidor.
+5. **Comprueba con `pm2 env <id>`.** Verifica siempre lo que tu proceso ve realmente.
+
+Para una visión completa de la gestión de procesos, consulta la [guía completa para gestionar aplicaciones con PM2](/es/pm2-gestionar-apps/) y [cómo elegir entre los modos fork y cluster](/es/pm2-fork-cluster/). Y si tus dependencias de Node.js están desactualizadas, [mantener tu entorno de Node.js al día](/es/actualizar-dependencias-nodejs/) merece la pena. PM2 7.x requiere Node.js 18+.
+
+Si buscas un VPS asequible para ejecutar tus aplicaciones gestionadas con PM2, [Hetzner Cloud](https://go.bitdoze.com/hetzner) ofrece una relación calidad-precio sólida en regiones de Europa y EE. UU. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) es otra opción económica con almacenamiento NVMe.
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._

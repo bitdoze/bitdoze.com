@@ -1,0 +1,481 @@
+---
+date: 2023-07-03
+lastmod: 2026-08-26T00:00:00Z
+translationKey: "add-users-to-docker-container"
+title: "Añadir usuarios a un contenedor Docker: guía de usuario no-root"
+meta_title: "Añadir usuarios a un contenedor Docker: guía de UID/GID y no-root"
+description: "Aprende a añadir usuarios a un contenedor Docker de forma segura: USER en el Dockerfile, fijar UID/GID, docker exec -u, user y group_add en Compose, y cómo corregir los permisos."
+image: "@assets/images/23/07/add-users-docker-container.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "dockerfile", "docker-compose"]
+canonical: "https://www.bitdoze.com/es/anadir-usuarios-contenedor-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Los contenedores Docker se ejecutan como **root** por defecto. Bien para una prueba rápida, un riesgo en producción. Esta guía te muestra cómo **añadir usuarios a un contenedor Docker** de la forma correcta: integra usuarios no-root en tu imagen, fija el UID/GID, corrige los permisos de los volúmenes y verifica antes de desplegar.
+
+Tres enfoques, en orden de preferencia:
+
+1. **Dockerfile:** crea usuarios en tiempo de compilación (recomendado para cualquier cosa que deba sobrevivir a un reinicio)
+2. **Sobrescritura en tiempo de ejecución:** `docker run -u` y `docker exec -u` (depuración y tareas puntuales)
+3. **Mapeo de UID/GID:** haz coincidir los usuarios del contenedor y del host para acabar con los quebraderos de cabeza de permisos en los bind mounts
+
+Esta guía cubre Ubuntu 24.04 y Alpine 3.24, Docker Compose V2 y Docker Engine 29.x. Si necesitas un VPS Linux para practicar, puedes empezar con un [VPS de Hetzner](https://go.bitdoze.com/hetzner) o un [VPS de Hostinger](https://go.bitdoze.com/hostinger-vps).
+
+_Los precios de los VPS subieron en general en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+## ¿Por qué ejecutar contenedores como usuario no-root?
+
+Ejecutar contenedores como root crea tres problemas:
+
+- **Seguridad**: si la aplicación se ve comprometida, el atacante tiene root dentro del contenedor. En hosts mal configurados (sobre todo con `--privileged` o bind mounts escribibles), eso puede escalar a root en el host.
+- **Permisos**: un proceso root que escribe en un volumen montado crea archivos propiedad de root en el host. Tu usuario del host (UID 1000) no puede editarlos ni borrarlos sin `sudo`.
+- **Mínimo privilegio**: el mismo principio que se aplica en todas partes. Los contenedores de producción no deberían ejecutarse como root.
+
+<Notice type="warning" title="La trampa del bind mount">
+Este es el problema nº 1 con el que se topan los autoalojadores. Un contenedor que corre como root escribe en un volumen montado y, de repente, todos los archivos del host pertenecen a `root:root`. Acabas ejecutando `sudo chown` en el host tras cada reinicio del contenedor. La solución: fija el UID del contenedor para que coincida con tu usuario del host (normalmente 1000). Lo cubrimos en el Método 3, más abajo.
+</Notice>
+
+## Conoce tu imagen base
+
+Antes de crear un usuario, comprueba si la imagen ya incluye uno. Algunas imágenes oficiales traen un usuario no-root de fábrica:
+
+```bash
+docker run --rm node id
+# uid=1000(node) gid=1000(node) groups=1000(node)
+```
+
+| Imagen | Usuario no-root por defecto | UID |
+|-------|----------------------|-----|
+| `node` | `node` | 1000 |
+| `postgres` | `postgres` (vía gosu en el entrypoint) | 999 |
+| `nginx` | `nginx` (procesos worker) | 101 |
+| `ubuntu` / `debian` / `alpine` | Ninguno, debes crearlo | - |
+
+<Notice type="info" title="Comprueba antes de crear">
+Ejecuta `docker run --rm <imagen> id` para ver si la imagen ya tiene un usuario no-root. Si lo tiene, usa simplemente `USER <nombre>`. No crees un segundo usuario que pueda entrar en conflicto.
+</Notice>
+
+## Método 1: añadir usuarios en el Dockerfile (recomendado)
+
+Integrar los usuarios en la imagen es el enfoque duradero. Los usuarios pertenecen a las imágenes; los contenedores los heredan. Esto sobrevive a reinicios, redespliegues y ciclos de `docker compose up`.
+
+### Crear un usuario no-root con `useradd`
+
+El patrón endurecido usa `--no-log-init`, UID/GID fijados y una shell sin login:
+
+```dockerfile
+FROM ubuntu:24.04
+
+# Crea un usuario de aplicación dedicado con UID/GID fijados.
+# 1001 deja libre el 1000 para coincidir con el usuario del host en bind mounts.
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
+
+# Ejecuta el contenedor como usuario sin privilegios (UID numérico: sobrevive a cambios en /etc/passwd)
+USER 1001:1001
+WORKDIR /home/appuser
+```
+
+Desglose de los flags:
+
+| Flag | Qué hace |
+|------|-------------|
+| `--no-log-init` | Evita el bug de agotamiento de disco por el archivo disperso faillog con UIDs grandes (problema de archive/tar de Go) |
+| `-u 1001` | Fija el UID, determinista entre recompilaciones |
+| `-g appgroup` | Establece el grupo primario (debe existir antes; por eso `groupadd` va antes que `useradd`) |
+| `-m` | Crea el directorio home |
+| `-s /usr/sbin/nologin` | Shell sin login para cuentas de servicio; usa `/bin/bash` solo si necesitas acceso interactivo |
+
+<Notice type="info" title="¿Por qué --no-log-init?">
+Sin este flag, `useradd` escribe en `/var/log/faillog` y `/var/log/lastlog`. Con un UID grande, estos archivos pueden crecer hasta gigabytes de bytes NULL por un bug de archivos dispersos en el archive/tar de Go. Pasa siempre `--no-log-init` en los Dockerfiles.
+</Notice>
+
+Puedes parametrizar el UID/GID mediante build args. Consulta [ARG y ENV en Docker](/es/variables-entorno-docker/) para el patrón completo.
+
+### La variante Alpine: `adduser` y `addgroup`
+
+Alpine usa `adduser`/`addgroup` de busybox, no el `useradd` de shadow-utils. Los flags son diferentes:
+
+<Tabs>
+<Tab name="Ubuntu/Debian">
+```dockerfile
+FROM ubuntu:24.04
+
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
+
+USER 1001:1001
+WORKDIR /home/appuser
+```
+</Tab>
+<Tab name="Alpine">
+```dockerfile
+FROM alpine:3.24
+
+RUN addgroup -g 1001 appgroup && \
+    adduser -D -u 1001 -G appgroup -s /bin/sh appuser
+
+USER 1001:1001
+WORKDIR /home/appuser
+```
+</Tab>
+</Tabs>
+
+Diferencias de flags en Alpine: `-D` = sin contraseña (equivalente a `--disabled-password`), `-G` = grupo primario, `-s /bin/sh` = shell (Alpine no trae bash por defecto).
+
+### Blíndalo con el numérico `USER 1001:1001`
+
+La propia documentación de Docker recomienda UIDs numéricos:
+
+```dockerfile
+# Bien: sobrevive a cambios en /etc/passwd, no necesita resolución de nombres
+USER 1001:1001
+
+# Funciona pero es frágil: depende de que exista la entrada en /etc/passwd
+USER appuser
+```
+
+Cuando especificas un grupo (la parte `:1001`), el usuario obtiene **solo** ese grupo. Sin grupos suplementarios de `/etc/group`. Normalmente es justo lo que quieres para una cuenta de servicio.
+
+### Establece la propiedad de los archivos con `COPY --chown`
+
+Usa `COPY --chown` para establecer la propiedad en tiempo de compilación en lugar de ejecutar `chown` en una capa `RUN` aparte:
+
+```dockerfile
+COPY --chown=1001:1001 app/ /home/appuser/app/
+USER 1001:1001
+```
+
+`COPY --chown` acepta nombres o UID/GID numéricos. Los nombres requieren resolución en `/etc/passwd` durante la compilación. Si el usuario aún no existe en esa capa, la compilación falla. Los UIDs numéricos son más seguros y portables.
+
+Para mantener las capas del Dockerfile ligeras, consulta [cómo copiar varios archivos en una sola capa de un Dockerfile](/es/copiar-varios-archivos-una-capa-dockerfile/).
+
+### Builds multi-etapa: compila como root, ejecuta como usuario
+
+Los builds multi-etapa te permiten instalar paquetes y compilar como root en una etapa de build, y luego copiar solo los artefactos a una etapa de ejecución limpia que corre como usuario no-root:
+
+```dockerfile
+# Etapa de build: corre como root, instala dependencias
+FROM ubuntu:24.04 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential
+COPY . /src
+WORKDIR /src
+RUN make build
+
+# Etapa de ejecución: imagen mínima, usuario no-root
+FROM ubuntu:24.04
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m -s /usr/sbin/nologin appuser
+COPY --chown=1001:1001 --from=builder /src/app /home/appuser/app
+USER 1001:1001
+WORKDIR /home/appuser
+CMD ["./app"]
+```
+
+La imagen de ejecución nunca tiene `build-essential`, código fuente ni artefactos de compilación. Menor superficie de ataque, imagen más pequeña.
+
+## Método 2: añadir usuarios en tiempo de ejecución (solo depuración)
+
+Los cambios de usuario en tiempo de ejecución son temporales y solo útiles para depurar o para tareas puntuales. Viven en la capa escribible del contenedor y **se pierden cuando el contenedor se recrea**.
+
+<Notice type="warning" title="Los cambios en tiempo de ejecución son efímeros">
+Cualquier usuario o cambio de permisos hecho dentro de un contenedor en ejecución se pierde cuando se recrea (`docker compose up`, `docker rm`). Integra los usuarios en la imagen para cualquier cosa que deba sobrevivir a un reinicio. Consulta [actualizar contenedores con Docker Compose](/es/actualizar-contenedor-docker-compose/) para ver cómo los redespliegues borran la capa escribible.
+</Notice>
+
+### `docker run -u` / `--user` y `--group-add`
+
+El flag `-u` / `--user` sobrescribe el usuario por defecto del contenedor en tiempo de ejecución. Los IDs numéricos no requieren una entrada en `/etc/passwd`:
+
+```bash
+# Ejecuta como UID 1001 con GID 1001
+docker run --rm -it -u 1001:1001 myimage sh
+
+# Añade el grupo suplementario 2000 (p. ej., un grupo de volumen compartido)
+docker run --rm -it --user 1001:1001 --group-add 2000 myimage id
+
+# Formatos aceptados:
+#   -u user          # se busca en /etc/passwd
+#   -u user:group    # ambos se buscan
+#   -u uid           # numérico, sin búsqueda
+#   -u uid:gid       # numérico, sin búsqueda
+#   -u user:gid      # mixto
+#   -u uid:group     # mixto
+```
+
+Esto es útil para probar si tu app funciona como usuario no-root antes de llevar el cambio al Dockerfile.
+
+### Inspecciona como otro usuario con `docker exec -u`
+
+En lugar de modificar un contenedor en ejecución, usa `docker exec -u` para ejecutar comandos como otro usuario:
+
+```bash
+# Abre una shell como appuser dentro de un contenedor en ejecución
+docker exec -it -u appuser mycontainer sh
+
+# Ejecuta un único comando como un UID concreto
+docker exec -u 1001:1001 mycontainer whoami
+# appuser
+
+# Comprueba a qué archivos puede acceder el usuario de la app
+docker exec -u 1001:1001 mycontainer ls -la /app
+```
+
+Esto no modifica el contenedor — solo ejecutas un proceso como otro usuario. Genial para diagnosticar problemas de permisos. Para depurar los logs de contenedores, consulta [redirigir los logs de Docker a un solo archivo](/es/redirigir-logs-docker-un-solo-archivo/).
+
+## Método 3: mapea el UID/GID del host para arreglar los permisos de los volúmenes
+
+Esta es la sección que resuelve el problema de propiedad de los bind mounts de la introducción. El problema de fondo: el UID 0 del contenedor (root) escribe archivos en un volumen montado y el host ve archivos propiedad de root que tu usuario del host (UID 1000) no puede editar.
+
+La solución: fija el UID de la app para que coincida con el usuario del host.
+
+### Mapeo de UID/GID con build args
+
+Pasa el UID/GID del usuario del host en tiempo de compilación:
+
+```dockerfile
+FROM ubuntu:24.04
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+
+RUN groupadd -g "$GROUP_ID" appgroup && \
+    useradd --no-log-init -u "$USER_ID" -g "$GROUP_ID" -m -s /usr/sbin/nologin appuser
+
+USER "$USER_ID:$GROUP_ID"
+```
+
+Compila con los IDs de tu usuario del host:
+
+```bash
+docker build --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t myapp .
+```
+
+El valor por defecto 1000 coincide con el primer usuario estándar en la mayoría de los sistemas Linux. En un VPS de un solo usuario, esto casi siempre es correcto. Para más sobre build args, consulta [ARG y ENV en Docker](/es/variables-entorno-docker/).
+
+### Docker Compose: `user`, `group_add` y `PUID`/`PGID`
+
+La especificación de Compose soporta `user` y `group_add` directamente. No hace falta la clave `version:` (es obsoleta en Compose V2) y el comando es `docker compose`, no `docker-compose`:
+
+```yaml
+services:
+  app:
+    build: .
+    user: "1001:1001"
+    group_add:
+      - "2000"
+    volumes:
+      - .:/app
+    environment:
+      - USER_ID=${USER_ID:-1001}
+      - GROUP_ID=${GROUP_ID:-1001}
+```
+
+```bash
+docker compose up -d --build
+```
+
+Para un VPS de un solo usuario, fija `user: "1000:1000"` para coincidir con el usuario de despliegue `ubuntu`. El truco de exportar `${UID}`/`${GID}` en la shell que recomiendan algunos tutoriales falla en macOS y Docker Desktop, donde los UIDs de la VM difieren.
+
+<Notice type="info" title="Convención PUID/PGID">
+Muchas imágenes autoalojadas populares (los contenedores de LinuxServer.io como Plex, Sonarr, Jellyfin) usan las variables de entorno `PUID` y `PGID` para establecer el usuario en tiempo de ejecución al arrancar. El script de entrypoint lee estos valores y crea o cambia al usuario correspondiente. Es una convención, no una función de Docker — revisa la documentación de tu imagen. Si estás [ejecutando una app de Python en Docker Compose como usuario no-root](/es/docker-ejecutar-python/), el campo `user:` es el enfoque más limpio.
+</Notice>
+
+Si estás configurando Docker por primera vez, consulta [cómo instalar Docker en Ubuntu ARM](/es/instalar-docker-ubuntu-arm/).
+
+## Escalada de privilegios bien hecha: gosu en lugar de sudo
+
+El consejo antiguo era instalar `sudo` en tu imagen y añadir usuarios al grupo sudo. Las propias buenas prácticas de Docker ahora dicen que lo evites:
+
+> Evita instalar o usar sudo, ya que tiene un comportamiento impredecible con el TTY y el reenvío de señales. En su lugar, usa gosu.
+> — Buenas prácticas de build de Docker
+
+El patrón gosu (el mismo de la imagen oficial de Postgres) arranca el entrypoint como root, corrige la propiedad de los directorios de datos y luego baja al usuario de la app:
+
+```dockerfile
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gosu && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1001 appgroup && \
+    useradd --no-log-init -u 1001 -g appgroup -m appuser
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
+```
+
+```bash
+#!/bin/sh
+set -e
+
+# Si corre como root, corrige la propiedad y baja a appuser
+if [ "$(id -u)" = "0" ]; then
+    chown -R appuser:appgroup /data
+    exec gosu appuser "$@"
+fi
+
+exec "$@"
+```
+
+El contenedor arranca como root (para poder hacer `chown` del volumen de datos) y luego `exec gosu appuser` reemplaza el proceso por el del usuario sin privilegios. La app nunca corre como root.
+
+<Notice type="error" title="Nunca integres secretos en las capas de la imagen">
+Las contraseñas y claves en comandos `RUN` son visibles con `docker history`. El viejo patrón de `echo 'appuser:password' | chpasswd` deja una contraseña en texto plano en la imagen para siempre. Usa variables de entorno en tiempo de ejecución o [protege los secretos en Docker Compose](/es/secretos-docker-compose/) en su lugar.
+</Notice>
+
+## Endurecimiento avanzado: userns-remap y Docker rootless
+
+La instrucción `USER` cubre la mayoría de los casos. Si necesitas un aislamiento más fuerte (hosts multi-inquilino, imágenes no confiables, requisitos de cumplimiento), existen dos opciones:
+
+### Reasignación de espacios de nombre de usuario (userns-remap)
+
+Mapea el root del contenedor (UID 0) a un UID sin privilegios del host. Añade a `/etc/docker/daemon.json`:
+
+```json
+{ "userns-remap": "default" }
+```
+
+```bash
+sudo systemctl restart docker
+id dockremap                              # usuario de reasignación creado por el daemon
+grep dockremap /etc/subuid /etc/subgid    # verifica el rango de 65536 IDs subordinados
+```
+
+Advertencias:
+
+- **Actívalo solo en una instalación nueva** — enmascara las imágenes y contenedores existentes. Tendrás que volver a descargarlo todo.
+- Exclusión por contenedor: `docker run --userns=host` (pero tiene efectos secundarios sobre la propiedad de los archivos).
+- `--privileged` requiere `--userns=host`; `mknod` está denegado en los user namespaces.
+- La propiedad de los bind mounts debe prepararse de antemano — el UID reasignado en el host no coincidirá con lo que esperas a menos que lo planifiques.
+
+<Notice type="warning" title="Docker 29 + userns-remap">
+En instalaciones nuevas de Docker 29.x, el almacén de imágenes de containerd es el predeterminado y es temporalmente incompatible con userns-remap (moby/moby#47377). Activar la reasignación hace que el daemon vuelva al almacén de imágenes heredado. Verifica el comportamiento en tu versión exacta de Docker antes de activarlo en producción.
+</Notice>
+
+### Modo rootless
+
+Ejecuta el propio daemon de Docker como un usuario sin privilegios. Requisitos: `newuidmap`/`newgidmap` y al menos 65.536 UIDs subordinados en `/etc/subuid` y `/etc/subgid`.
+
+```bash
+# Instala la herramienta de configuración rootless
+dockerd-rootless-setuptool.sh install
+
+# Arranca el daemon rootless
+systemctl --user start docker
+```
+
+Docker 29.5.0 convirtió `gvisor-tap-vsock` en el controlador de red rootless por defecto, lo que mejora la compatibilidad.
+
+**Cuándo molestarse:** si ejecutas imágenes no confiables, alojas a varios usuarios o tienes requisitos de cumplimiento. Para un VPS de un solo usuario con tus propias imágenes, `USER` en el Dockerfile es suficiente. Para más sobre seguridad en Docker, consulta [cómo endurecer Docker en un VPS de Hetzner](/es/informe-seguridad-bsi-docker-ufw/).
+
+## Verifica antes de desplegar
+
+No lo des por hecho — verifica. Ejecuta estos comandos tras compilar y después de cada despliegue:
+
+<ListCheck>
+<ul>
+<li>`docker run --rm myimage id` — espera `uid=1001(appuser) gid=1001(appgroup)`</li>
+<li>`docker inspect --format '{{.Config.User}}' myimage` — espera `1001:1001`</li>
+<li>`docker exec -it mycontainer id` — confirma dentro de un contenedor en ejecución</li>
+<li>`docker compose exec app id` — equivalente en Compose</li>
+<li>`docker exec mycontainer touch /app/check.txt && ls -l ./check.txt` — espera tu UID, no root</li>
+<li>`docker build --check .` — el linter de Dockerfile detecta un `USER` ausente (Dockerfile v1.8.0+)</li>
+</ul>
+</ListCheck>
+
+Script rápido de verificación:
+
+```bash
+# Tras el build — confirma el usuario por defecto de la imagen
+docker run --rm myimage id
+
+# Inspecciona sin ejecutar
+docker create --name tmp myimage && docker inspect --format '{{.Config.User}}' tmp && docker rm tmp
+
+# Dentro de un contenedor en ejecución
+docker exec -it mycontainer id
+
+# Comprobación de propiedad del bind mount (lado host)
+docker exec mycontainer touch /app/check.txt && ls -l ./check.txt
+# Debería mostrar tu UID del host (p. ej., 1000), no root
+```
+
+## Solución de problemas: modos comunes de fallo de permisos
+
+| Síntoma | Causa | Solución |
+|---------|-------|-----|
+| Los archivos del bind mount pertenecen a root | El contenedor corrió como root | Fija el UID de la app al del host (`user: "1000:1000"`) o un `sudo chown -R $(id -u):$(id -g) ./data` puntual |
+| `COPY --chown=name` falla al compilar | El nombre aún no está en `/etc/passwd` en esa capa | Usa el UID numérico: `COPY --chown=1001:1001` |
+| Puerto &lt; 1024 denegado para no-root | Un no-root no puede abrir puertos privilegiados | `--cap-add NET_BIND_SERVICE` o usa un puerto alto |
+| Los usuarios desaparecieron tras `docker compose up` | Los cambios en tiempo de ejecución son efímeros | Integra el usuario en el Dockerfile |
+| El entrypoint necesita root para hacer chown de volúmenes | El usuario de la app no puede corregir la propiedad al arrancar | Usa el patrón entrypoint con gosu o un hook `pre_start` de Compose con `user: root` |
+| `userns-remap` oculta las imágenes existentes | La reasignación enmascara el almacén de imágenes/contenedores | Actívalo solo en hosts nuevos; vuelve a descargar las imágenes |
+| El UID del host macOS no coincide con el del contenedor | Los UIDs de la VM de Docker Desktop difieren | Prueba en un VPS Linux; fija el UID para producción |
+
+<Accordion label="¿Por qué mis archivos pertenecen a root después de que Docker escribe en ellos?" group="faq">
+Cuando un contenedor corre como root (el valor por defecto) y escribe en un volumen montado, los archivos se crean con UID 0 en el host. Tu usuario del host (normalmente UID 1000) no puede editarlos ni borrarlos sin `sudo`.
+
+**Solución en la imagen:** define `USER 1000:1000` en tu Dockerfile (o `user: "1000:1000"` en Compose) para que el proceso corra como tu usuario del host.
+
+**Solución a posteriori:** ejecuta `sudo chown -R $(id -u):$(id -g) ./data` en el host. Para evitar que vuelva a pasar, fija el UID en tu Dockerfile.
+</Accordion>
+
+<Accordion label="¿Por qué falla COPY --chown con un nombre de usuario?" group="faq">
+`COPY --chown=name:group` resuelve el nombre contra `/etc/passwd` y `/etc/group` durante la compilación. Si el usuario aún no se ha creado en ese punto del Dockerfile (o el archivo no existe en la etapa de build), la compilación falla.
+
+**Solución:** usa UIDs numéricos: `COPY --chown=1001:1001`. Funciona independientemente de si `/etc/passwd` tiene la entrada.
+</Accordion>
+
+<Accordion label="¿Por qué mi contenedor no-root no puede abrir el puerto 80?" group="faq">
+En Linux, los puertos por debajo de 1024 son privilegiados — solo root (o los procesos con `CAP_NET_BIND_SERVICE`) pueden abrirlos. Por eso la imagen oficial de Nginx mantiene un proceso maestro root.
+
+**Opciones de solución:**
+1. `--cap-add NET_BIND_SERVICE` en el contenedor (concede solo la capacidad de bind)
+2. Usa un puerto alto (8080, 8443) y mapea en Compose: `ports: ["8080:80"]`
+3. Usa un proxy inverso (Caddy, Traefik) que gestione los puertos 80/443 y reenvíe al puerto alto de tu app
+</Accordion>
+
+Para más comandos y patrones de Docker, guarda la referencia de [comandos esenciales de Docker](/es/comandos-docker/).
+
+## Referencia rápida: comandos de creación de usuarios
+
+| Tarea | Ubuntu/Debian | Alpine |
+|------|--------------|--------|
+| Crear usuario con directorio home | `useradd --no-log-init -m -s /bin/bash user` | `adduser -D -s /bin/sh user` |
+| Crear grupo | `groupadd -g 1001 appgroup` | `addgroup -g 1001 appgroup` |
+| Crear usuario con UID/GID específicos | `useradd --no-log-init -u 1001 -g appgroup -m user` | `adduser -D -u 1001 -G appgroup user` |
+| Añadir usuario a un grupo | `usermod -aG sudo user` | `addgroup user sudo` |
+| Usuario por defecto en el Dockerfile | `USER 1001:1001` | `USER 1001:1001` |
+| Ejecutar como usuario específico | `docker run -u 1001:1001 img` | Igual |
+| Exec como usuario específico | `docker exec -u user container cmd` | Igual |
+| Sobrescribir usuario en Compose | `user: "1001:1001"` | Igual |
+| Grupos suplementarios en Compose | `group_add: ["2000"]` | Igual |
+| Copiar con propiedad | `COPY --chown=1001:1001 src/ dest/` | Igual |
+
+## TL;DR
+
+<ListCheck>
+<ul>
+<li>Crea siempre usuarios no-root para contenedores de producción — `USER 1001:1001` en el Dockerfile</li>
+<li>Fija el UID/GID (p. ej., 1001:1001) para evitar quebraderos de cabeza de permisos con volúmenes montados</li>
+<li>Usa `COPY --chown=1001:1001` con UIDs numéricos — los nombres pueden fallar en tiempo de compilación</li>
+<li>Verifica con `docker run --rm myimage id` y `ls -l` en los bind mounts antes de desplegar</li>
+<li>Usa gosu (no sudo) cuando tu entrypoint necesite root al arrancar para corregir la propiedad de los volúmenes</li>
+</ul>
+</ListCheck>
+
+Otros artículos de Docker que pueden ayudarte en tu camino con Docker:
+
+- [Copiar varios archivos en una sola capa usando un Dockerfile](/es/copiar-varios-archivos-una-capa-dockerfile/)
+- [Instalar Docker y Docker Compose en Ubuntu ARM](/es/instalar-docker-ubuntu-arm/)
+- [Redirigir los logs de Docker a un solo archivo](/es/redirigir-logs-docker-un-solo-archivo/)
+- [Variables de entorno ARG y ENV en Docker](/es/variables-entorno-docker/)

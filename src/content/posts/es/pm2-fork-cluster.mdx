@@ -1,0 +1,515 @@
+---
+date: 2024-01-21
+lastmod: 2026-07-18T00:00:00Z
+translationKey: "pm2-fork-cluster"
+title: "Cómo elegir entre los modos Fork y Cluster en PM2"
+meta_title: "PM2 Fork vs Cluster: cómo elegir (Guía 2026)"
+description: "PM2 fork vs cluster: diferencias clave, cuándo usar cada modo, recarga graceful, reinicio sin tiempo de inactividad y buenas prácticas de producción para aplicaciones Node.js."
+image: "@assets/images/24/01/pm2-fork-vs-cluster.jpeg"
+categories: ["tools"]
+authors: ["Dragos"]
+tags: ["pm2", "node", "process-management"]
+canonical: "https://www.bitdoze.com/es/pm2-fork-cluster/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+El modo fork vs cluster de PM2 es una de las primeras decisiones a las que te enfrentas al ejecutar aplicaciones Node.js en producción. [PM2](https://pm2.keymetrics.io/) es el gestor de procesos de Node.js más usado (más de 43 000 estrellas en GitHub, más de 600 M de descargas en npm), y te ofrece dos formas fundamentalmente distintas de ejecutar tus apps. Elige el modo equivocado y desperdiciarás recursos o romperás funciones como la recarga graceful.
+
+PM2 v7.0.3 (junio de 2026) es la versión actual. Requiere Node.js >= 18, añade soporte para el runtime Bun, incluye trazado con OpenTelemetry y source maps nativos. Si estás usando una versión de PM2 más antigua, la ruta de actualización importa. Más sobre eso abajo.
+
+Esta guía cubre qué hace cada modo, las diferencias reales (incluidas algunas correcciones a lo que encontrarás en otros sitios), cuándo elegir cada uno y las buenas prácticas de producción que mantienen tus apps vivas.
+
+Para un tutorial más amplio de PM2, consulta [gestionar aplicaciones con PM2](/es/pm2-gestionar-apps/).
+
+<Notice type="info" title="Decisión rápida: ¿Fork o Cluster?">
+
+| Usa el modo Fork cuando | Usa el modo Cluster cuando |
+|---|---|
+| Trabajos en segundo plano, cron, workers, scripts | Servidores HTTP, TCP o WebSocket |
+| Apps que no son Node.js (Python, Ruby, binarios) | Apps solo de Node.js |
+| Versiones de Node distintas por app | Todas las apps en la misma versión de Node |
+| VPS con memoria limitada (1-2 GB) | VPS multinúcleo (2+ núcleos, 2+ GB) |
+| Desarrollo o pruebas locales | Producción con requisitos de disponibilidad |
+
+</Notice>
+
+## ¿Qué es el modo fork en PM2?
+
+El modo fork es el predeterminado de PM2. Genera un único proceso por aplicación usando `child_process.fork()` de Node. Un proceso, una app.
+
+El modo fork es la elección correcta para:
+
+- **Scripts, workers y tareas cron:** cualquier cosa que no escuche en un puerto.
+- **Runtimes que no son Node.js:** el modo fork puede ejecutar Python, Ruby o binarios arbitrarios.
+- **Apps que necesitan distintas versiones de Node:** usa `node_args` para apuntar a un binario específico.
+- **Desarrollo y pruebas:** más simple, menor consumo de memoria.
+
+### Uso básico del modo fork
+
+```sh
+# Ejecuta app.js en modo fork (predeterminado)
+pm2 start app.js
+```
+
+O con un archivo de ecosistema:
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    script: "app.js",
+    exec_mode: "fork"
+  }]
+};
+```
+
+```sh
+pm2 start ecosystem.config.js
+```
+
+Una creencia errónea común: funciones como los reinicios por cron, el soporte de source maps y los formatos de log personalizados **no** son exclusivas del modo fork. Son atributos generales de PM2 que funcionan tanto en fork como en cluster. PM2 v7 sustituyó la dependencia npm `source-map-support` por `process.setSourceMapsEnabled()` nativo, así que los source maps funcionan en todas partes sin paquetes extra.
+
+Para gestionar las [variables de entorno de PM2](/es/pm2-variables-entorno/) entre modos, consulta la guía enlazada.
+
+## ¿Qué es el modo cluster en PM2?
+
+El modo cluster genera varios procesos worker usando el módulo `cluster` de Node.js. Cada worker es un proceso de sistema operativo independiente que ejecuta tu app, y comparten el mismo puerto del servidor mediante el uso compartido de handles IPC. Es una función de Node.js, no algo que PM2 haya inventado. El módulo cluster se encarga del balanceo de carga round-robin entre los workers.
+
+### Iniciar el modo cluster
+
+```sh
+# Ejecuta con tantos workers como núcleos de CPU
+pm2 start app.js -i max
+
+# Ejecuta con exactamente 4 workers
+pm2 start app.js -i 4
+```
+
+Con un archivo de ecosistema:
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    script: "app.js",
+    instances: "max",
+    exec_mode: "cluster"
+  }]
+};
+```
+
+Desde PM2 v7, definir `instances` en una app de Node.js activa automáticamente el modo cluster. `exec_mode: "cluster"` explícito es opcional pero recomendado por claridad. Tu yo del futuro te lo agradecerá.
+
+Los valores de `instances`:
+
+- `"max"` o `0`: un worker por núcleo de CPU
+- `-1`: todos los núcleos menos uno (deja margen para el SO)
+- Cualquier número: esa cantidad de workers
+
+### Ventajas del modo cluster
+
+- **Aprovechamiento multinúcleo:** tu app atiende peticiones en paralelo en todos los núcleos.
+- **Tolerancia a fallos:** si un worker se cae, PM2 lo reinicia mientras los demás siguen sirviendo.
+- **Recarga graceful / reinicio sin tiempo de inactividad:** `pm2 reload` sustituye los workers uno a uno (explicado en detalle abajo).
+
+### Limitaciones del modo cluster
+
+- **Mayor uso de memoria:** cada worker es un proceso aparte. 4 workers de 200 MB cada uno = 800 MB como mínimo.
+- **Requiere la misma versión de Node.js** para todos los workers (limitación del módulo cluster). Bun tiene soporte en PM2 v7+ pero presenta casos límite. Haz pruebas exhaustivas.
+- **Requiere aplicaciones sin estado (stateless).** Esta es la trampa que la mayoría de los tutoriales omiten.
+
+<Notice type="warning" title="Se requieren apps sin estado (stateless)">
+
+Si tu app almacena datos de sesión en memoria, usa cachés dentro del proceso o depende de estado mutable compartido, el modo cluster la romperá. El worker A recibe una petición y guarda la sesión. El worker B recibe la siguiente petición y no tiene ni idea de esa sesión.
+
+Usa Redis, Memcached o tu base de datos para el estado compartido. Para apps de WebSocket, consulta la sección de sticky sessions más abajo.
+
+</Notice>
+
+<Notice type="info" title="Cálculo de memoria">
+
+4 instancias x 200 MB = 800 MB de RAM. En un [VPS de 2 GB de Hetzner Cloud](https://go.bitdoze.com/hetzner), puedes ejecutar con seguridad unas 8 instancias en total entre todas tus apps en cluster (dejando espacio para el SO y el propio PM2). Planifica tu número de instancias antes de llegar al OOM.
+
+_Los precios de los VPS subieron en general en 2026 — si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+</Notice>
+
+## PM2 fork vs cluster: diferencias clave
+
+| Característica | Modo Fork | Modo Cluster |
+|---|---|---|
+| Modelo de procesos | Un proceso por app | Varios workers por app |
+| Balanceo de carga | Ninguno (o externo) | Automático (módulo cluster de Node.js) |
+| Recarga graceful (`pm2 reload`) | Recurre a reinicio (breve inactividad) | Reinicio continuo real (cero inactividad) |
+| Uso compartido de puerto | Se requieren puertos distintos | Mismo puerto mediante handles IPC |
+| Runtimes que no son Node.js | Soportados (Python, Ruby, binarios) | Solo Node.js (Bun soportado en v7+) |
+| Varias versiones de Node | Soportado vía `node_args` | Una sola versión (limitación del módulo cluster) |
+| Reinicios por cron | Sí | Sí |
+| Soporte de source maps | Sí (nativo en v7+) | Sí (nativo en v7+) |
+| Formatos de log personalizados | Sí | Sí |
+| Memoria por instancia | Menor (un solo proceso) | Mayor (N x una instancia) |
+| Ideal para | Workers, scripts, cron, runtimes mixtos | Servidores HTTP/TCP, apps web en producción |
+
+Si estás dimensionando un VPS para el modo cluster, primero [haz benchmark de tu VPS](/es/benchmark-servidores-cloud/) para entender el margen real.
+
+El modo cluster suele ser el mejor valor predeterminado para apps web en producción que sirven tráfico HTTP. El modo fork gana en cargas de trabajo sin red, trabajos en segundo plano y entornos donde necesitas varios runtimes o versiones de Node.
+
+## Recarga graceful y reinicio sin tiempo de inactividad en PM2
+
+La recarga graceful y el reinicio sin tiempo de inactividad son lo que separa un entorno de desarrollo de un despliegue en producción. La mayoría de las guías de PM2 se saltan esta parte.
+
+### pm2 reload vs pm2 restart
+
+Son comandos distintos con comportamientos distintos:
+
+```bash
+pm2 reload my-app     # reinicio continuo (cluster) / reinicio (fork)
+pm2 restart my-app    # matar + arrancar inmediato
+```
+
+- **`pm2 restart`** mata todos los procesos y luego los arranca. Breve inactividad en modo fork. Inactividad total en modo cluster (todos los workers se matan a la vez).
+- **`pm2 reload`** en modo cluster es un reinicio continuo real. Los workers se sustituyen uno a uno; al menos un worker sigue sirviendo tráfico en todo momento. En modo fork, `pm2 reload` recurre a `pm2 restart` (hay inactividad), porque solo hay un proceso. No hay nada que rotar.
+
+Para despliegues sin tiempo de inactividad en modo cluster, usa siempre `pm2 reload`.
+
+### Apagado graceful en el lado de la aplicación (manejo de SIGINT)
+
+Definir `wait_ready: true` en tu configuración de ecosistema le dice a PM2 que espere una señal de "ready" de tu app antes de considerarla iniciada. Pero esa señal tiene que venir de tu código. Cuando PM2 envía un SIGINT para recargar un worker, tu app necesita manejarlo: cerrar el servidor, vaciar las conexiones y salir limpiamente.
+
+Sin este código, PM2 esperará `listen_timeout` y luego forzará el cierre del proceso. Eso no es graceful. Es un timeout con riesgo de pérdida de datos.
+
+```js
+const express = require('express');
+const app = express();
+
+// ... tus rutas y middleware ...
+
+const PORT = process.env.PORT || 3000;
+
+const server = app.listen(PORT, () => {
+  console.log(`Worker ${process.pid} escuchando en ${PORT}`);
+  // Avisa a PM2 de que el worker está listo (requerido con wait_ready: true)
+  if (process.send) {
+    process.send('ready');
+  }
+});
+
+// Maneja la señal de recarga graceful de PM2
+process.on('SIGINT', () => {
+  console.log('SIGINT recibido, cerrando el servidor...');
+  server.close(() => {
+    // Cierra conexiones de BD, vacía logs, libera recursos
+    console.log('Servidor cerrado, saliendo');
+    process.exit(0);
+  });
+  // Seguridad: salida forzada si no se cierra dentro de kill_timeout
+  setTimeout(() => {
+    console.error('Apagado forzado tras el timeout');
+    process.exit(1);
+  }, 5000);
+});
+```
+
+La configuración de ecosistema que acompaña a esto:
+
+```js
+module.exports = {
+  apps: [{
+    name: "my-api",
+    script: "./app.js",
+    instances: "max",
+    exec_mode: "cluster",
+    wait_ready: true,        // espera a process.send('ready')
+    listen_timeout: 5000,    // ms de espera por la señal 'ready'
+    kill_timeout: 5000,      // ms de espera para una salida limpia tras SIGINT
+  }]
+};
+```
+
+<Notice type="warning" title="Sin este código, la recarga graceful no funcionará">
+
+Si tu app no maneja SIGINT ni llama a `process.send('ready')`, PM2 esperará `listen_timeout` y luego forzará el cierre. Tus usuarios sufrirán conexiones cortadas. Añade el manejador de apagado de arriba antes de activar `wait_ready`.
+
+</Notice>
+
+## Buenas prácticas del modo cluster de PM2 para producción
+
+### Configuración de ecosistema para producción
+
+Genera un archivo inicial con `pm2 init simple` (o `pm2 ecosystem`, ambos siguen funcionando). Luego complétalo:
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    name: "my-api",
+    script: "./app.js",
+    instances: "max",
+    exec_mode: "cluster",              // explícito, recomendado por claridad
+    max_memory_restart: "300M",         // reinicio automático si el worker supera 300 MB
+    wait_ready: true,                   // espera a process.send('ready')
+    listen_timeout: 5000,               // ms de espera por la señal ready
+    kill_timeout: 5000,                 // ms de espera para el apagado limpio
+    max_restarts: 10,                   // límite de reinicios dentro de la ventana min_uptime
+    min_uptime: "10s",                  // si el proceso dura menos de 10 s, es un fallo
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    merge_logs: true,                   // fusiona los logs de los workers en un archivo
+    env: {
+      NODE_ENV: "development",
+    },
+    env_production: {
+      NODE_ENV: "production",
+    },
+  }]
+};
+```
+
+Arrancar en producción:
+
+```bash
+pm2 start ecosystem.config.js --env production
+```
+
+### Estrategia de escalado de instancias
+
+No toda app necesita `instances: "max"`. Escala según tu carga de trabajo:
+
+- **Apps limitadas por CPU:** `instances: "max"` (una por núcleo).
+- **Apps limitadas por E/S:** puedes probar 1,5x-2x el número de núcleos; vigila la memoria.
+- **VPS con memoria limitada:** calcula `RAM_disponible / RAM_por_instancia` = máximo seguro.
+
+Escalado dinámico sin reinicio:
+
+```bash
+pm2 scale my-app +2     # añade 2 workers más
+pm2 scale my-app 4      # escala a exactamente 4 workers
+```
+
+### Gestión de variables de entorno
+
+Una trampa común: cuando reinicias por CLI con nuevas variables de entorno, no se actualizan a menos que pases `--update-env`:
+
+```bash
+NODE_ENV=production pm2 restart my-app --update-env
+```
+
+Los archivos de ecosistema siempre actualizan las variables de entorno al reiniciar o recargar. Úsalos siempre que puedas. Consulta [variables de entorno de PM2](/es/pm2-variables-entorno/) para todos los detalles.
+
+### Seguridad: filter_env
+
+Si tu VPS tiene otros servicios o usuarios, evita que variables de entorno sensibles se filtren a los procesos hijo de PM2 con `filter_env`:
+
+```js
+// En ecosystem.config.js
+module.exports = {
+  apps: [{
+    name: "my-api",
+    script: "./app.js",
+    // Solo pasa estas variables de entorno (por prefijo) al worker
+    filter_env: ["NODE_", "APP_", "DB_"],
+    // O elimina TODAS las variables de entorno globales:
+    // filter_env: true,
+    // ...
+  }]
+};
+```
+
+Para un endurecimiento (hardening) más amplio del VPS, consulta [cómo securizar un servidor VPS](/es/crowdsec-servidor-seguro/).
+
+### Rotación de logs
+
+Por defecto, los logs de PM2 crecen hasta llenar el disco. Instala el módulo de rotación de logs:
+
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 30
+pm2 set pm2-logrotate:compress true
+```
+
+Esto mantiene los logs en 10 MB por archivo, conserva 30 archivos rotados y comprime los antiguos. Esencial en cualquier VPS de producción.
+
+Para una monitorización más amplia, consulta [monitorizar el uso de CPU en Linux](/es/monitorizar-cpu-alertas-email-linux/).
+
+<ListCheck>
+
+**Checklist de producción**
+
+- Define `max_memory_restart` para evitar que las fugas de memoria tumben el servidor
+- Define `wait_ready: true` e implementa el manejo de SIGINT en tu app
+- Define `max_restarts` y `min_uptime` para detectar bucles de fallos
+- Usa `merge_logs: true` para mantener los archivos de log manejables
+- Instala `pm2-logrotate` para evitar que se llene el disco
+- Usa archivos de ecosistema (no flags de CLI) para despliegues reproducibles
+- Ejecuta `pm2 save` y `pm2 startup` para sobrevivir a los reinicios
+- Mantén Node.js y las dependencias actualizadas. Consulta [mantener actualizadas las dependencias de Node.js](/es/actualizar-dependencias-nodejs/)
+
+</ListCheck>
+
+## PM2 en contenedores: pm2-runtime para Docker
+
+Si ejecutas PM2 dentro de un contenedor Docker, usa `pm2-runtime` en lugar de `pm2 start`.
+
+El `pm2 start` normal genera un proceso demonio, lo cual es incorrecto para contenedores. El contenedor arranca, PM2 hace fork, el proceso principal termina y Docker cree que el contenedor ha acabado. `pm2-runtime` se mantiene en primer plano y envía los logs a stdout/stderr, que es lo que Docker espera.
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --production
+COPY . .
+
+CMD ["pm2-runtime", "start", "ecosystem.config.js"]
+```
+
+O sin un archivo de ecosistema:
+
+```dockerfile
+CMD ["pm2-runtime", "npm", "--", "start"]
+```
+
+Una decisión: en Docker, el modo cluster escala mediante `instances` en el archivo de ecosistema **o** mediante réplicas de Docker/Kubernetes. Elige una opción, no ambas, o acabarás con N x M workers y te preguntarás por qué tu contenedor muere por OOM.
+
+Para más sobre comandos de contenedores, consulta [comandos de Docker para producción](/es/comandos-docker/). El modo fork de PM2 también puede ejecutar [apps de Python en Docker](/es/docker-ejecutar-python/) u otros runtimes que no sean Node.js.
+
+## Consideraciones sobre WebSocket y sticky sessions
+
+El modo cluster usa balanceo de carga round-robin por defecto. Para peticiones HTTP, eso está bien: cada petición es independiente. Para conexiones WebSocket, es un problema. El handshake inicial llega al worker A, pero los frames siguientes pueden enrutarse al worker B, que no tiene ni idea de esa conexión.
+
+Tres soluciones:
+
+1. **Sticky sessions en el proxy inverso:** Nginx: `ip_hash`. HAProxy: persistencia basada en `cookie`. Esto fija un cliente a un worker.
+2. **Adaptador Redis para socket.io:** `@socket.io/redis-adapter` permite que los workers compartan el estado de las conexiones. Funciona bien pero añade Redis como dependencia.
+3. **Servidor WebSocket separado:** ejecuta tu manejador WebSocket en modo fork en un puerto distinto, junto a tu servidor HTTP en cluster. Simple, sin estado compartido.
+
+Elige la opción que encaje con tu arquitectura. Si tienes un único VPS con Nginx delante, las sticky sessions son el camino más fácil.
+
+## PM2 v7: novedades (2025-2026)
+
+PM2 v7.0.0 (mayo de 2026) fue una versión mayor. Cambios clave relevantes para la decisión fork vs cluster:
+
+- **Se requiere Node.js >= 18.** PM2 abandonó el soporte de Node 16. Si aún estás en la 16, primero tienes que actualizar.
+- **Soporte del runtime Bun.** Modo fork desde v6.0.5, modo cluster desde v7.0.0. Advertencia: Bun + cluster tiene casos límite (ver los issues de GitHub). Haz pruebas exhaustivas antes de desplegar.
+- **Source maps nativos.** Sustituyó la dependencia npm `source-map-support` por `process.setSourceMapsEnabled()`. Funciona en ambos modos, sin paquetes extra.
+- **OpenTelemetry integrado.** `@opentelemetry/api`, `sdk-node` y `auto-instrumentations-node` son dependencias directas. Advertencia: en modo cluster, los workers pueden reportar spans duplicados (problema conocido de OpenTelemetry).
+- **`pm2 ls` muestra métricas del host por defecto** (v7.0.2). CPU, memoria y disco de un vistazo.
+- **`max_memory_restart` se muestra en `pm2 describe`** (v7.0.1). Más fácil auditar los límites de memoria.
+- **Correcciones de seguridad.** CVE-2025-5891 (ReDoS), CVE-2026-27699 (proxy-agent), tres correcciones de inyección de comandos, una corrección de prototype pollution. Si estás en v5 o v6, son buenas razones para actualizar.
+
+<Notice type="info" title="¿Actualizando desde PM2 v5/v6?">
+
+PM2 v7 requiere Node.js >= 18. Comprueba primero tu versión de Node (`node -v`). Solo las correcciones de seguridad ya justifican la actualización. Ejecuta `npm install -g pm2@latest` y luego `pm2 update` para recargar tus procesos con el nuevo binario de PM2. Si usas Bun, consulta [actualizar paquetes con Bun](/es/actualizar-paquetes-bun/) para el flujo de actualización.
+
+</Notice>
+
+## Solución de problemas de PM2 en fork y cluster
+
+<Accordion label="EADDRINUSE: el puerto ya está en uso" group="faq">
+
+En modo fork, dos apps no pueden compartir un puerto. Si ves `EADDRINUSE`, otro proceso (u otra app de PM2) ya está escuchando en ese puerto.
+
+```bash
+# Comprueba qué está usando el puerto
+lsof -i :3000
+
+# Comprueba conflictos entre apps de PM2
+pm2 list
+```
+
+En modo cluster, los workers comparten el puerto automáticamente. No te encontrarás con esto dentro de una misma app. Pero dos apps distintas en modo cluster tampoco pueden compartir un puerto.
+
+</Accordion>
+
+<Accordion label="Workers fallando en bucle" group="faq">
+
+Si ves `pm2 restart count exceeded` en los logs, tus workers están fallando más rápido de lo que `min_uptime` permite. PM2 deja de reiniciar tras `max_restarts` intentos.
+
+```bash
+# Revisa los logs para la causa raíz
+pm2 logs my-app --lines 100
+
+# Describe la app para ver los reinicios
+pm2 describe my-app
+```
+
+Corrige primero el bug subyacente. Si es un problema transitorio (p. ej., la base de datos no está lista), aumenta `max_restarts` o reduce `min_uptime` temporalmente.
+
+</Accordion>
+
+<Accordion label="La recarga graceful no funciona" group="faq">
+
+Si `pm2 reload` corta las conexiones en lugar de drenarlas, probablemente tu app no está manejando SIGINT o no está enviando `process.send('ready')`. Consulta el código de apagado graceful en la sección de buenas prácticas de arriba.
+
+Verifica:
+
+```bash
+# Comprueba si wait_ready está activado
+pm2 describe my-app | grep wait_ready
+
+# Busca el mensaje "SIGINT recibido" en los logs durante la recarga
+pm2 logs my-app
+```
+
+Si no ves "SIGINT recibido" en los logs durante la recarga, tu manejador no está registrado.
+
+</Accordion>
+
+<Accordion label="Fugas de memoria / OOM" group="faq">
+
+Usa `max_memory_restart` para reiniciar automáticamente los workers que superen un umbral de memoria. Esto detecta las fugas antes de que tumben todo el VPS.
+
+```bash
+# Observa la memoria en tiempo real
+pm2 monit
+```
+
+Si un worker concreto sigue alcanzando el límite, tiene una fuga. Corrige el código. `max_memory_restart` es un parche, no una cura.
+
+</Accordion>
+
+<Accordion label="Las conexiones WebSocket se caen en modo cluster" group="faq">
+
+El modo cluster de PM2 usa round-robin por defecto. Las conexiones WebSocket que empiezan en un worker pueden enrutarse a otro al reconectar. Consulta la sección de sticky sessions de arriba para las soluciones: `ip_hash` de Nginx, adaptador Redis o un servidor WebSocket aparte en modo fork.
+
+</Accordion>
+
+<Accordion label="Las variables de entorno no se actualizan" group="faq">
+
+Al reiniciar por CLI con nuevas variables de entorno, debes pasar `--update-env`:
+
+```bash
+NODE_ENV=production pm2 restart my-app --update-env
+```
+
+Los archivos de ecosistema siempre actualizan las variables de entorno al reiniciar/recargar. Esta es la trampa de PM2 más común en pipelines de CI/CD. Tu script de despliegue define una variable nueva, reinicia, y nada cambia.
+
+</Accordion>
+
+### Comandos rápidos de verificación
+
+Tras el despliegue, confirma que todo funciona como esperas:
+
+```bash
+pm2 list          # revisa la columna de modo (fork/cluster), nº de instancias y estado
+pm2 describe 0    # info detallada: exec_mode, nº de reinicios, límites de memoria
+pm2 monit         # CPU/memoria en vivo por instancia
+pm2 logs          # busca errores de arranque
+```
+
+## Conclusión
+
+La vieja división "fork para funciones, cluster para escalar" está desfasada. Los reinicios por cron, los source maps y los formatos de log personalizados funcionan en ambos modos. Elige según la arquitectura de tu app:
+
+- **Modo cluster** para servidores HTTP/TCP en producción que necesitan disponibilidad y aprovechamiento multinúcleo. Solo la recarga sin tiempo de inactividad ya compensa la memoria extra.
+- **Modo fork** para workers en segundo plano, scripts, tareas cron, runtimes que no sean Node.js y entornos donde necesitas versiones de Node distintas por app.
+
+Si estás en un VPS económico como [Hetzner Cloud](https://go.bitdoze.com/hetzner) o [Hostinger VPS](https://go.bitdoze.com/hostinger-vps), el modo cluster con 2 a 4 instancias funciona bien en un plan de 2 a 4 GB. Solo haz primero el cálculo de memoria.
+
+Para el tutorial completo de PM2 sobre gestión de procesos, monitorización y despliegue, consulta [gestionar aplicaciones con PM2](/es/pm2-gestionar-apps/). Si estás evaluando opciones más amplias de gestión de servidores, echa un vistazo a los [paneles de servidor autoalojados](/es/mejores-paneles-autoalojados/) como alternativa a la gestión manual con PM2.
+
+<Button text="Tutorial de gestión de PM2" link="/es/pm2-gestionar-apps/" variant="solid" color="blue" size="md" icon="arrow-right" />

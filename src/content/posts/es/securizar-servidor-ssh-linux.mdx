@@ -1,0 +1,759 @@
+---
+date: 2024-07-12
+lastmod: 2026-07-31T00:00:00Z
+translationKey: "secure-ssh-server-linux"
+title: "Cómo securizar un servidor SSH en Linux: guía de hardening"
+meta_title: "Securizar un servidor SSH en Linux: guía de hardening 2025"
+description: "Securiza tu servidor SSH en Linux con esta guía de hardening. Cubre autenticación por claves, buenas prácticas de sshd_config, fail2ban, reglas de firewall y seguridad de OpenSSH."
+image: "@assets/images/24/07/secure-ssh-server.jpeg"
+categories:
+  - linux
+authors:
+  - Dragos
+tags:
+  - ssh
+  - openssh
+  - server-hardening
+canonical: "https://www.bitdoze.com/es/securizar-servidor-ssh-linux/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Button from "@components/widgets/Button.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Secure Shell (SSH) es la forma en que la mayoría administramos servidores Linux remotos, y es lo primero que los atacantes sondean cuando tu VPS se pone en línea. Si administras un servidor Linux, el hardening de SSH no es opcional. Un SSH sin proteger conduce a accesos no autorizados, filtraciones de datos e infraestructura comprometida.
+
+Esta guía te lleva de un sshd_config por defecto a una configuración endurecida para producción. Cada recomendación se basa en el comportamiento actual de OpenSSH (10.x en 2025), no en artículos desactualizados que todavía mencionan el protocolo 1 o directivas obsoletas.
+
+Si necesitas un servidor para practicar, [Hetzner Cloud](https://go.bitdoze.com/hetzner) ofrece instancias VPS asequibles desde ~4 €/mes, más que suficientes para probar todo lo de esta guía.
+
+_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando una máquina alquilada, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<Notice type="warning" title="regreSSHion (CVE-2024-6387)">
+Si ejecutas OpenSSH de la versión 8.5p1 a la 9.7p1, tenías una vulnerabilidad crítica de ejecución remota de código sin autenticación (regreSSHion, descubierta por Qualys). Se corrigió en OpenSSH 9.8 (julio de 2024). Actualiza tu servidor SSH inmediatamente antes de hacer cualquier otra cosa: `sudo apt update && sudo apt install openssh-server` (o `sudo dnf update openssh-server` en RHEL/Fedora).
+</Notice>
+
+## Cómo funciona SSH
+
+SSH es un protocolo criptográfico para el acceso remoto seguro a través de una red no segura. Sustituyó a Telnet y rsh a mediados de los años 90 y se ha convertido en el estándar para la administración remota de servidores en Linux, BSD y macOS.
+
+SSH funciona con un modelo cliente-servidor:
+
+1. El cliente inicia una conexión con el servidor SSH
+2. El servidor envía su clave pública al cliente
+3. El cliente verifica la identidad del servidor (o te pide que la aceptes)
+4. Se establece un canal cifrado seguro
+5. Tiene lugar la autenticación del usuario (clave pública, contraseña, etc.)
+6. Tras una autenticación correcta, comienza la sesión
+
+| Componente    | Descripción                                                                               |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| Servidor SSH  | El programa (sshd) que se ejecuta en la máquina remota y escucha las conexiones entrantes |
+| Cliente SSH   | El programa (ssh) usado para conectarse a un servidor SSH                                |
+| Cifrado       | Algoritmos usados para asegurar el canal de comunicación (intercambio de claves, cifrados, MACs) |
+
+<Notice type="info">
+El OpenSSH moderno (7.6+, publicado en 2017) solo admite la versión 2 del protocolo SSH. El protocolo 1 se eliminó por completo; no existe ninguna directiva `Protocol` que configurar. Ya estás usando el protocolo 2.
+</Notice>
+
+Si administras servidores Linux con regularidad, te conviene dominar los [comandos esenciales de Linux](/es/comandos-linux/) además de SSH.
+
+## Medidas básicas de seguridad para el servidor SSH
+
+Estas son las victorias rápidas: lo que todo operador debería hacer en un servidor nuevo antes que cualquier otra cosa.
+
+### Desactivar el inicio de sesión de root
+
+Permitir el inicio de sesión directo de root por SSH les da a los atacantes la mitad del trabajo. Solo necesitan romper una contraseña o encontrar una clave para adueñarse de todo el sistema.
+
+Edita `/etc/ssh/sshd_config` (o usa un archivo drop-in, más sobre esto después):
+
+```sh
+PermitRootLogin no
+```
+
+Prueba la configuración antes de reiniciar:
+
+```sh
+sudo sshd -t
+sudo systemctl restart sshd
+```
+
+Verifica que hizo efecto:
+
+```sh
+sudo sshd -T | grep permitrootlogin
+```
+
+Salida esperada: `permitrootlogin no`
+
+<Notice type="warning" title="Mantén una sesión activa abierta">
+Antes de reiniciar sshd tras cualquier cambio de configuración, mantén siempre una sesión SSH abierta. Prueba la nueva configuración desde una segunda terminal. Si te quedas fuera, la sesión abierta es tu salvavidas. En servidores remotos, localiza la consola web de tu proveedor (Hetzner, DigitalOcean y [Vultr](https://go.bitdoze.com/vultr) ofrecen una).
+</Notice>
+
+### Usar autenticación por claves (no contraseñas)
+
+La autenticación por claves es la mejora de seguridad SSH más importante que puedes hacer. Las claves no se pueden romper por fuerza bruta como las contraseñas.
+
+Genera un par de claves Ed25519 en tu máquina local:
+
+```sh
+ssh-keygen -t ed25519 -a 100
+```
+
+<Notice type="info">
+Desde OpenSSH 9.5 (octubre de 2023), `ssh-keygen` genera claves Ed25519 por defecto. Puedes omitir `-t ed25519` en sistemas modernos. Para sistemas antiguos que no admiten Ed25519, usa `ssh-keygen -t rsa -b 4096`.
+</Notice>
+
+Copia la clave pública a tu servidor:
+
+```sh
+ssh-copy-id user@server_ip
+```
+
+Prueba el inicio de sesión. Deberías conectar sin que te pida contraseña:
+
+```sh
+ssh user@server_ip
+```
+
+Para más información sobre cómo generar y usar claves SSH con servicios concretos, consulta [esta guía para vincular GitHub con claves SSH](/es/vincular-github-ssh-macos-linux/).
+
+### Desactivar la autenticación por contraseña
+
+Una vez que la autenticación por claves funciona, desactiva las contraseñas por completo. Define esto en tu sshd_config o en un archivo drop-in:
+
+```sh
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+```
+
+Verifica:
+
+```sh
+sudo sshd -T | grep -i passwordauth
+```
+
+Salida esperada: `passwordauthentication no`
+
+### Cambiar el puerto SSH por defecto (opcional)
+
+<Notice type="warning">
+Cambiar el puerto SSH es opcional. Reduce el ruido de los escaneos automatizados, pero no detiene ataques dirigidos. Las medidas anteriores (autenticación por claves, sin login de root) importan mucho más. Tiene costes operativos reales: hay que actualizar reglas de firewall, scripts y la memoria muscular del equipo. Yo lo omitiría en configuraciones de un solo servidor y solo lo consideraría si ves spam excesivo en los logs.
+</Notice>
+
+Si cambias el puerto, actualiza las reglas del firewall **antes** de reiniciar sshd:
+
+```sh
+# En /etc/ssh/sshd_config
+Port 2222
+```
+
+```sh
+# Actualiza primero el firewall
+sudo ufw allow 2222/tcp
+sudo ufw deny 22/tcp   # opcional: cierra el puerto antiguo
+sudo sshd -t && sudo systemctl restart sshd
+```
+
+Prueba desde una terminal nueva antes de cerrar tu sesión actual:
+
+```sh
+ssh -p 2222 user@server_ip
+```
+
+## Técnicas avanzadas de hardening de SSH
+
+Más allá de las victorias rápidas, estos ajustes endurecen tu servidor SSH frente a ataques más sofisticados.
+
+### Limitar el acceso de usuarios con AllowUsers / AllowGroups
+
+Restringe qué usuarios pueden iniciar sesión por SSH:
+
+```sh
+# Solo estos usuarios pueden entrar por SSH
+AllowUsers admin deploy
+
+# O restringe por grupo
+AllowGroup sshusers
+```
+
+Si `AllowUsers` está definido, todos los demás usuarios quedan denegados por defecto. Puedes usar comodines: `AllowUsers admin* deploy*`.
+
+Los bloques `Match` te permiten aplicar reglas por usuario o por dirección:
+
+```sh
+Match User git
+    ForceCommand internal-sftp
+    AllowTcpForwarding no
+
+Match Address 192.168.1.0/24
+    PasswordAuthentication yes
+```
+
+Verifica:
+
+```sh
+sudo sshd -T | grep -i allowusers
+```
+
+### Implementar autenticación de dos factores (2FA)
+
+El 2FA añade un código TOTP sobre la autenticación por claves. Un atacante necesitaría tanto tu clave privada COMO tu teléfono.
+
+<Notice type="info">
+`ChallengeResponseAuthentication` está obsoleto desde OpenSSH 8.7 (2021). Usa `KbdInteractiveAuthentication` en su lugar. Es la misma directiva con un nombre nuevo.
+</Notice>
+
+**1. Instala Google Authenticator:**
+
+```sh
+sudo apt-get update
+sudo apt-get install libpam-google-authenticator
+```
+
+**2. Configura PAM.** Edita `/etc/pam.d/sshd` y añade:
+
+```
+auth required pam_google_authenticator.so
+```
+
+**3. Actualiza la configuración de SSH.** En `/etc/ssh/sshd_config` (o en un drop-in como `sshd_config.d/90-2fa.conf`):
+
+```
+KbdInteractiveAuthentication yes
+UsePAM yes
+AuthenticationMethods publickey,keyboard-interactive
+```
+
+La línea `AuthenticationMethods publickey,keyboard-interactive` exige **ambas** cosas: una clave Y un código 2FA. Más fuerte que permitir cualquiera de las dos por separado.
+
+**4. Configura el autenticador** para cada usuario:
+
+```sh
+google-authenticator
+```
+
+Sigue las instrucciones para escanear el código QR y guarda los códigos de emergencia.
+
+**5. Reinicia y prueba:**
+
+```sh
+sudo sshd -t && sudo systemctl restart sshd
+```
+
+Prueba desde otra terminal. Debería pedirte la frase de contraseña de tu clave y después el código TOTP. Si tienes problemas, consulta [cómo resolver errores de autenticación SSH](/es/arreglar-ssh-demasiados-fallos-autenticacion/).
+
+### Configurar correctamente el tiempo de inactividad
+
+El tiempo de inactividad desconecta las sesiones inactivas, útil si alguien se aleja de una terminal.
+
+<Notice type="error" title="Cambio de comportamiento en OpenSSH 8.2">
+La versión original de este artículo recomendaba `ClientAliveCountMax 0`. Desde OpenSSH 8.2 (febrero de 2020), esto **desactiva** por completo el cierre de conexiones. NO provoca una terminación inmediata. Usa `ClientAliveCountMax 1` en su lugar.
+</Notice>
+
+Configuración correcta para un tiempo de inactividad de 5 minutos:
+
+```
+ClientAliveInterval 300
+ClientAliveCountMax 1
+```
+
+Esto envía una sonda keepalive cada 300 segundos. Si el cliente no responde a una sonda, la conexión se termina (total ~5 minutos).
+
+| Tiempo deseado | ClientAliveInterval | ClientAliveCountMax |
+| -------------- | ------------------- | ------------------- |
+| 5 minutos      | 300                 | 1                   |
+| 10 minutos     | 600                 | 1                   |
+| 15 minutos     | 900                 | 1                   |
+| 30 minutos     | 1800                | 1                   |
+
+### Aplicar límites de autenticación
+
+Dos directivas que limitan la eficacia de la fuerza bruta por conexión:
+
+```
+MaxAuthTries 3
+LoginGraceTime 30s
+```
+
+- `MaxAuthTries 3` (por defecto: 6), limita los intentos de autenticación por conexión
+- `LoginGraceTime 30s` (por defecto: 120s), la ventana que tiene un cliente para autenticarse tras conectar. OpenSSH 9.9+ añade un jitter aleatorio (hasta 4 s) a este valor.
+
+Ambas van en la configuración drop-in que se muestra en la siguiente sección.
+
+## Buenas prácticas de hardening de sshd_config
+
+Esta es la sección que marcarás como favorita y a la que volverás. Un único archivo de configuración drop-in que cubre todas las directivas de hardening en un solo lugar.
+
+### Usar sshd_config.d/ para una configuración limpia
+
+Las distribuciones modernas (Ubuntu 22.04+, Debian 12+, RHEL 9+) admiten `/etc/ssh/sshd_config.d/*.conf` para fragmentos de configuración. Es la forma recomendada de endurecer el servicio sin tocar el archivo de configuración principal.
+
+Crea un archivo drop-in con todos tus ajustes de hardening:
+
+```sh
+sudo cat > /etc/ssh/sshd_config.d/90-hardening.conf << 'EOF'
+# Autenticación
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+MaxAuthTries 3
+LoginGraceTime 30s
+
+# Tiempo de inactividad (5 min)
+ClientAliveInterval 300
+ClientAliveCountMax 1
+
+# Desactivar el reenvío si no se necesita
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+
+# Tamaño mínimo de clave RSA
+RequiredRSASize 3072
+
+# Hardening criptográfico (verifica con: ssh -Q kex/cipher/mac)
+KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com
+EOF
+```
+
+Prueba y reinicia:
+
+```sh
+sudo sshd -t && sudo systemctl restart sshd
+```
+
+<Notice type="warning" title="Prueba siempre antes de reiniciar">
+Ejecuta `sudo sshd -t` antes de `sudo systemctl restart sshd`. Así detectas errores de sintaxis que impedirían que sshd arranque y te dejarían fuera. Mantén una sesión SSH abierta mientras pruebas desde otra.
+</Notice>
+
+### Restringir el intercambio de claves, cifrados y MACs
+
+Las listas explícitas de algoritmos eliminan los valores débiles por defecto. La lista anterior se basa en las recomendaciones de sshaudit.com. Antes de definirlas, verifica qué admite tu compilación de OpenSSH:
+
+```sh
+ssh -Q kex        # Algoritmos de intercambio de claves
+ssh -Q cipher     # Cifrados
+ssh -Q mac        # Algoritmos MAC
+ssh -Q key        # Tipos de clave
+ssh -Q sig        # Algoritmos de firma
+```
+
+Si un cliente no puede conectar después de restringir los algoritmos, revisa ambos lados. El cliente debe admitir al menos un algoritmo de la lista de tu servidor. Para casos de uso de tunelización SSH, consulta [SSH port forwarding y túneles](/es/tuneles-ssh-linux/) para entender qué afectan los controles de reenvío.
+
+### Establecer un tamaño mínimo de clave RSA (RequiredRSASize)
+
+`RequiredRSASize 3072` (disponible desde OpenSSH 9.1) rechaza las claves RSA de menos de 3072 bits. Protege contra claves débiles de clientes antiguos o scripts de automatización heredados.
+
+Si sigues usando claves Ed25519 (recomendado), esta directiva no afecta a tus claves principales, pero detecta claves RSA débiles de otras fuentes.
+
+### Desactivar el reenvío innecesario
+
+Si tu servidor no necesita tunelización SSH, reenvío de agente ni X11, desactívalos:
+
+```
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+```
+
+O usa la opción única: `DisableForwarding yes`. Esto desactiva todas las funciones de reenvío de una vez. Hazlo solo si no necesitas [SSH port forwarding y túneles](/es/tuneles-ssh-linux/).
+
+### Probar la configuración antes de reiniciar
+
+No se puede insistir lo suficiente en esto:
+
+```sh
+# Prueba la sintaxis (detecta errores antes de que te dejen fuera)
+sudo sshd -t
+
+# Vuelca la configuración efectiva (muestra los valores tras todos los bloques Match e includes)
+sudo sshd -T | grep -E 'permitrootlogin|passwordauth|pubkeyauth|maxauthtries'
+```
+
+`sshd -T` muestra la configuración real en ejecución, no solo lo que hay en el archivo. Así verificas que los bloques `Match` y los archivos drop-in se aplican correctamente.
+
+## Configuración del firewall para SSH
+
+El control de acceso a nivel de red es tu capa de defensa más externa.
+
+### Usar ufw (Ubuntu/Debian)
+
+ufw es el firewall recomendado para Ubuntu y Debian:
+
+```sh
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp    # o tu puerto personalizado
+sudo ufw enable
+sudo ufw status verbose
+```
+
+Si cambiaste el puerto SSH, sustituye `22` por tu número de puerto personalizado.
+
+### Usar firewalld (RHEL/Fedora)
+
+firewalld es el firewall recomendado para RHEL, Fedora y CentOS:
+
+```sh
+sudo firewall-cmd --permanent --add-service=ssh
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-all
+```
+
+### Usar iptables (avanzado)
+
+iptables te da un control detallado, pero requiere más cuidado:
+
+```sh
+# Permitir conexiones establecidas
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Permitir SSH (ajusta el puerto si es necesario)
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Limitar la tasa de conexiones nuevas (máx. 4 por minuto)
+iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+
+# Descartar todo lo demás
+iptables -A INPUT -j DROP
+```
+
+### Advertencia: Docker evita el firewall
+
+<Notice type="error" title="Docker evita tu firewall">
+Docker manipula iptables directamente, lo que puede exponer puertos de contenedores aunque ufw o firewalld los bloqueen. Si ejecutas Docker en el mismo servidor que SSH, lee la [guía dedicada sobre cómo Docker evita las reglas del firewall](/es/docker-evita-firewall/).
+</Notice>
+
+Tras configurar tu firewall, verifica que el puerto SSH sea accesible: [comprueba la conectividad de puertos remotos](/es/comprobar-puerto-remoto-linux-nc/) usando `nc` o `nmap`.
+
+Para la prevención de intrusiones a nivel de servidor más allá de los firewalls, considera [CrowdSec](/es/crowdsec-servidor-seguro/) como complemento a tus reglas de firewall.
+
+## Protección contra fuerza bruta: fail2ban y PerSourcePenalties
+
+Necesitas capas de defensa contra la fuerza bruta. OpenSSH 9.8+ tiene un sistema integrado, y fail2ban añade más flexibilidad.
+
+### Protección integrada contra fuerza bruta con PerSourcePenalties (OpenSSH 9.8+)
+
+OpenSSH 9.8 (julio de 2024) introdujo `PerSourcePenalties`, un sistema de penalización integrado que rastrea y retrasa las IP de origen que se comportan mal. Está **activado por defecto**.
+
+Configuración por defecto:
+
+```
+PerSourcePenalties crash:90s authfail:30s noauth:10s
+PerSourcePenaltyExemptList 192.168.0.0/16
+PerSourceNetBlockSize 32:128
+```
+
+Cómo funciona: las IP que provocan fallos de autenticación reciben retrasos progresivamente más largos antes de que sshd responda. Las caídas (crashes) provocan una penalización de 90 segundos, los fallos de autenticación 30 segundos.
+
+<Notice type="info">
+`PerSourcePenalties` está activado por defecto en OpenSSH 9.8+. Si tu servidor está detrás de una puerta de enlace NAT o un proxy inverso, todos los clientes pueden parecer provenir de la misma IP. Ajusta `PerSourcePenaltyExemptList` para eximir tu rango NAT, o penalizarás a todos los clientes cuando uno se comporte mal.
+</Notice>
+
+### Configurar fail2ban para SSH
+
+fail2ban aporta valor más allá de PerSourcePenalties: duraciones de baneo más largas, alertas por correo, acciones personalizadas y protección multiservicio (no solo SSH).
+
+<Tabs>
+<Tab name="Ubuntu/Debian">
+```sh
+sudo apt-get update
+sudo apt-get install fail2ban
+sudo systemctl enable fail2ban
+```
+</Tab>
+<Tab name="RHEL/Fedora">
+```sh
+sudo dnf install epel-release
+sudo dnf install fail2ban
+sudo systemctl enable fail2ban
+```
+</Tab>
+</Tabs>
+
+Crea `/etc/fail2ban/jail.local` (no edites `jail.conf` directamente — se sobrescribe con las actualizaciones):
+
+```ini
+[sshd]
+enabled = true
+port = ssh
+backend = systemd
+maxretry = 3
+bantime = 3600
+findtime = 600
+```
+
+- `backend = systemd` usa journald en lugar de leer `/var/log/auth.log` — más fiable en distribuciones modernas
+- `maxretry = 3` — tres intentos fallidos provocan un baneo
+- `bantime = 3600` — el baneo dura 1 hora
+- `findtime = 600` — la ventana para contar fallos (10 minutos)
+
+Inicia fail2ban:
+
+```sh
+sudo systemctl restart fail2ban
+```
+
+Verifica que está en ejecución:
+
+```sh
+sudo fail2ban-client status sshd
+```
+
+## Monitorización y registro de accesos SSH
+
+### Configurar el registro de SSH
+
+Activa el registro detallado para capturar información de algoritmos de claves y eventos de autenticación:
+
+```
+LogLevel VERBOSE
+SyslogFacility AUTH
+```
+
+Consulta los logs de SSH con journalctl:
+
+```sh
+sudo journalctl -u sshd -f                    # Seguimiento en vivo
+sudo journalctl -u sshd --since "1 hour ago"  # Actividad reciente
+sudo sshd -T | grep -E 'loglevel|syslog'      # Comprobar la configuración efectiva
+```
+
+### Monitorizar los intentos de acceso SSH
+
+Comandos prácticos para vigilar la actividad:
+
+```sh
+sudo lastb                 # Intentos de inicio de sesión fallidos
+who                        # Usuarios conectados actualmente
+sudo journalctl -u sshd | grep "Failed password" | tail -20   # Contraseñas fallidas recientes
+```
+
+Para una monitorización más profunda, herramientas como OSSEC (detección de intrusiones en el host) o [paneles de monitorización de servidores](/es/monitorizar-servidor/) te dan alertas y análisis de tendencias.
+
+## Mantener OpenSSH actualizado y parcheado
+
+### Por qué importa CVE-2024-6387 (regreSSHion)
+
+En julio de 2024, Qualys reveló regreSSHion — un RCE crítico sin autenticación en sshd que afectaba a OpenSSH de la 8.5p1 a la 9.7p1. Una condición de carrera en un manejador de señales permitía a un atacante ejecutar código arbitrario como root sin credenciales.
+
+Fue la vulnerabilidad de SSH más grave en años. Se corrigió en OpenSSH 9.8.
+
+Otras dos vulnerabilidades se corrigieron en OpenSSH 9.9p2 (febrero de 2025):
+- **CVE-2025-26465**: suplantación MITM cuando `VerifyHostKeyDNS` está activado (desactivado por defecto)
+- **CVE-2025-26466**: DoS de memoria/CPU mediante paquetes SSH2_MSG_PING (mitigado por `PerSourcePenalties`)
+
+Estas son razones del mundo real para mantener OpenSSH actualizado. No teóricas.
+
+### Intercambio de claves post-cuántico: qué cambió en OpenSSH 10.0
+
+<Notice type="info">
+El intercambio de claves post-cuántico es automático en OpenSSH 10.0+. No hace falta configuración. Si defines explícitamente `KexAlgorithms`, incluye `mlkem768x25519-sha256` para mantener la protección post-cuántica.
+</Notice>
+
+OpenSSH 10.0 (abril de 2025) usa `mlkem768x25519-sha256` — un híbrido de ML-KEM (post-cuántico) y X25519 (clásico) — como algoritmo de intercambio de claves por defecto. Esto protege contra los ataques de «recoger ahora, descifrar después», en los que los adversarios graban tráfico cifrado para descifrarlo cuando haya ordenadores cuánticos disponibles.
+
+Las versiones anteriores (9.0+) usaban `sntrup761x25519-sha512@openssh.com` como KEX post-cuántico por defecto. Ambos ofrecen resistencia cuántica — el algoritmo de la 10.0 es simplemente la versión estandarizada.
+
+### Cómo comprobar y actualizar tu versión de OpenSSH
+
+```sh
+ssh -V       # Versión del cliente
+sshd -V      # Versión del servidor (disponible desde OpenSSH 9.2)
+```
+
+Actualizar en Ubuntu/Debian:
+
+```sh
+sudo apt update
+sudo apt install openssh-server
+```
+
+Actualizar en RHEL/Fedora:
+
+```sh
+sudo dnf update openssh-server
+```
+
+Tras actualizar, verifica y reinicia:
+
+```sh
+ssh -V
+sudo sshd -t && sudo systemctl restart sshd
+```
+
+Configura las actualizaciones automáticas de seguridad para recibir los parches de SSH sin intervención manual:
+
+```sh
+# Ubuntu/Debian
+sudo apt install unattended-upgrades
+sudo dpkg-reconfigure unattended-upgrades
+```
+
+## Buenas prácticas de gestión de claves SSH
+
+### Generación segura de claves
+
+Ed25519 es el tipo de clave recomendado. Es el valor por defecto desde OpenSSH 9.5 (octubre de 2023) — rápido, claves pequeñas y sin debilidades conocidas.
+
+```sh
+ssh-keygen -t ed25519 -a 100     # Principal (recomendada)
+ssh-keygen -t rsa -b 4096        # Alternativa heredada para sistemas antiguos
+```
+
+Comparación de tipos de clave:
+
+| Tipo de clave | Tamaño recomendado | Estado en OpenSSH 10.x     |
+| ------------- | ------------------ | -------------------------- |
+| Ed25519       | 256 bits (fijo)    | Por defecto, recomendada   |
+| RSA           | 4096 bits          | Admitida, usa sha2-512     |
+| ECDSA         | 256-521 bits       | Admitida, evítala si puedes |
+| DSA           | —                  | **Eliminada en OpenSSH 10.0** |
+
+<Notice type="error" title="Claves DSA eliminadas en OpenSSH 10.0">
+OpenSSH 10.0 (abril de 2025) eliminó por completo el soporte de DSA. DSA se desactivó en tiempo de compilación en la 9.8 (julio de 2024). Si todavía tienes claves DSA, migra a Ed25519 inmediatamente.
+</Notice>
+
+### Almacenamiento y protección de claves
+
+- Guarda las claves privadas solo en tu máquina local — nunca en el servidor
+- Define permisos restrictivos: `chmod 700 ~/.ssh; chmod 600 ~/.ssh/id_ed25519`
+- Usa siempre una frase de contraseña al generar claves
+- Usa `ssh-agent` para mayor comodidad:
+
+```sh
+eval $(ssh-agent)
+ssh-add ~/.ssh/id_ed25519
+```
+
+Para entornos de alta seguridad, considera llaves de seguridad hardware (YubiKey, etc.) que almacenan la clave privada en hardware resistente a manipulaciones.
+
+### Rotación periódica de claves
+
+Rota las claves SSH cada 6–12 meses, o inmediatamente si una clave puede haberse visto comprometida:
+
+1. Genera un nuevo par de claves
+2. Añade la nueva clave pública a `~/.ssh/authorized_keys` en el servidor
+3. Prueba la nueva clave
+4. Elimina la clave pública antigua del servidor
+5. Borra la clave privada antigua de tu máquina local
+
+Para equipos que gestionan muchos servidores, los certificados SSH ofrecen una gestión centralizada de claves con expiración automática. Es la alternativa escalable a distribuir archivos authorized_keys por todas partes. Consulta [la configuración de SSH ProxyJump y jump hosts](/es/ssh-proxyjump-jumphost/) para gestionar el acceso a servidores detrás de bastiones.
+
+## Probar la seguridad de tu SSH
+
+### Ejecutar ssh-audit
+
+ssh-audit es una herramienta en Python que revisa la configuración de tu servidor SSH y señala algoritmos débiles, ajustes inseguros y problemas conocidos.
+
+```sh
+# Instalar
+sudo apt install ssh-audit     # o: pipx install ssh-audit
+
+# Ejecutar contra tu servidor
+ssh-audit localhost
+ssh-audit your_server_ip
+```
+
+La salida muestra hallazgos con colores: rojo para críticos, amarillo para advertencias, verde para lo correcto. Compara las recomendaciones con las listas de algoritmos de este artículo. Consulta [sshaudit.com](https://sshaudit.com) para guías de hardening detalladas que encajan con los ajustes de `KexAlgorithms`/`Ciphers`/`MACs` recomendados aquí.
+
+### Verificar la configuración
+
+```sh
+# Vuelca la configuración efectiva (muestra los valores reales tras todos los includes y bloques Match)
+sudo sshd -T | grep -E 'permitrootlogin|passwordauth|pubkeyauth|maxauthtries'
+
+# Prueba de conexión detallada (muestra qué algoritmos se negocian)
+ssh -v user@localhost
+
+# Lista los algoritmos admitidos
+ssh -Q kex
+ssh -Q cipher
+ssh -Q mac
+```
+
+### Pruebas de penetración (opcional)
+
+Para una comprobación más profunda:
+
+```sh
+# Escaneo de puertos
+nmap -sV -p22 your_server_ip
+
+# Probar la negociación de algoritmos débiles
+ssh -oKexAlgorithms=+diffie-hellman-group1-sha1 user@your_server_ip
+# Esto debería FALLAR — si funciona, tu servidor aún acepta algoritmos débiles
+```
+
+Herramientas como Hydra pueden probar la resistencia a la fuerza bruta, pero úsalas solo contra servidores que te pertenezcan o que tengas autorización para probar. Consulta [cómo comprobar la conectividad de puertos remotos](/es/comprobar-puerto-remoto-linux-nc/) para verificar tus reglas de firewall.
+
+## Errores comunes de seguridad SSH y resolución de problemas
+
+### Bloqueado tras un cambio de configuración
+
+Un `AllowUsers` incorrecto, un puerto mal configurado o un error en el firewall — pasa. Solución:
+
+- Usa la consola web de tu proveedor de VPS (Hetzner, [Vultr](https://go.bitdoze.com/vultr) y DigitalOcean ofrecen una)
+- Inicia sesión a través de la consola, corrige la configuración y reinicia sshd
+- Prevención: mantén siempre una sesión abierta mientras pruebas una configuración nueva
+
+<Accordion label="¿Cómo me recupero si me quedo fuera de SSH?" group="faq">
+Usa la consola web de tu proveedor de VPS o el acceso IPMI. Inicia sesión, corrige `/etc/ssh/sshd_config` (o elimina el drop-in conflictivo de `sshd_config.d/`) y reinicia sshd con `sudo systemctl restart sshd`. Si no puedes acceder a la consola, la mayoría de los proveedores te permiten arrancar en un modo de rescate para editar los archivos del disco.
+</Accordion>
+
+### Clave ignorada por permisos incorrectos
+
+`Permission denied (publickey)` es casi siempre un problema de permisos en el servidor:
+
+```sh
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Verifica también que `PubkeyAuthentication yes` esté definido en sshd_config.
+
+### Conexión rechazada tras cambiar el puerto
+
+Olvidaste actualizar las reglas del firewall. Comprueba:
+
+```sh
+sudo ufw status          # Ubuntu/Debian
+sudo firewall-cmd --list-all   # RHEL/Fedora
+sudo iptables -L -n      # iptables manual
+```
+
+### Errores de incompatibilidad de algoritmos
+
+Si un cliente no puede conectar después de restringir los algoritmos, comprueba qué admite el cliente:
+
+```sh
+ssh -Q kex    # Ejecuta en el cliente
+```
+
+Añade un algoritmo compatible a la lista `KexAlgorithms` del servidor, o actualiza el OpenSSH del cliente.
+
+## Conclusión
+
+El hardening de SSH es una defensa por capas. Ningún ajuste por sí solo te hace seguro — pero combinadas, estas medidas convierten tu servidor en un objetivo difícil:
+
+1. **Solo autenticación por claves** — sin contraseñas, sin login de root
+2. **Restringir el acceso** — AllowUsers, reglas de firewall, MaxAuthTries
+3. **Endurecer la configuración** — archivo drop-in con algoritmos restringidos, tiempos de inactividad, sin reenvío
+4. **Protección contra fuerza bruta** — PerSourcePenalties + fail2ban
+5. **Monitorizar y actualizar** — LogLevel VERBOSE, journalctl, actualizaciones automáticas de seguridad
+6. **Probar con regularidad** — ssh-audit, sshd -T, pruebas de conexión detalladas
+
+Si administras varios servidores, [CrowdSec para la prevención de intrusiones a nivel de servidor](/es/crowdsec-servidor-seguro/) añade inteligencia de amenazas impulsada por la comunidad sobre todo lo anterior.
+
+Para más información sobre flujos de trabajo con SSH, consulta [SSH port forwarding y túneles](/es/tuneles-ssh-linux/) y [cómo securizar tu panel de control](/es/securizar-cloudpanel/).
+
+<Button text="Securiza tu servidor con CrowdSec" link="/es/crowdsec-servidor-seguro/" variant="solid" color="blue" size="md" icon="arrow-right" />

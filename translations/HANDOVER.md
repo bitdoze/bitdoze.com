@@ -1,8 +1,14 @@
 # Translation Handover — resume instructions
 
-**Status as of last session:** 184 of 376 EN posts translated, **192 pending**.
+**Status as of last session:** 318 of 395 EN posts translated, **77 pending + 29 stale**.
 Index of record: `translations/index.json` (regenerate: `node scripts/build-translation-index.mjs`).
-Per-article log: `translations/LOG.md` (append a row per completed translation).
+Per-article log: `translations/LOG.md` (append a row per completed translation; queue
+snapshots — new/stale lists — get dated "Queue update" sections).
+
+Entries may carry `stale: true` + `staleSince` when the EN file was committed after
+the ES file's last commit. Stale articles need a **diff-sync** (translate only what
+changed — `git diff <esLastCommitDate>..HEAD -- <enFile>` shows it), not a full
+re-translation; update ES `lastmod` to today when syncing.
 
 ## Goal
 

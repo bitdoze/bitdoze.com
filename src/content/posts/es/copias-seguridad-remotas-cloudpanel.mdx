@@ -1,0 +1,723 @@
+---
+date: 2024-03-14
+lastmod: 2026-07-26T00:00:00Z
+translationKey: "cloudpanel-remote-backups"
+title: "Copias de seguridad remotas de CloudPanel en OneDrive y Google Drive"
+meta_title: "Copias de seguridad remotas de CloudPanel en OneDrive y Google Drive"
+description: "Guía paso a paso para configurar copias de seguridad remotas de CloudPanel en OneDrive o Google Drive usando Rclone."
+image: "@assets/images/24/03/cloudpanel-remote-backups.png"
+categories: ["hosting"]
+authors: ["Dragos"]
+tags: ["cloudpanel", "rclone", "backups"]
+canonical: "https://www.bitdoze.com/es/copias-seguridad-remotas-cloudpanel/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import { Picture } from "astro:assets";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import imag1 from "@assets/images/24/03/cloudpanel-backup.png";
+
+Si autoalojas tus aplicaciones en CloudPanel y no tienes copias de seguridad remotas, estás a una cuenta de hosting comprometida o un ataque de ransomware de perderlo todo. Las copias de seguridad locales en el mismo VPS no sirven de nada cuando el servidor desaparece.
+
+[CloudPanel](https://www.cloudpanel.io/) es un panel de hosting gratuito y de código abierto, y uno de los [mejores paneles de servidores autoalojados](/es/mejores-paneles-autoalojados/) disponibles. Utiliza [Rclone](https://rclone.org/) internamente para las copias de seguridad remotas, con soporte para proveedores como Amazon S3, Dropbox, SFTP y más. Para algunos proveedores (DigitalOcean Spaces, Dropbox, SFTP), la configuración se hace directamente en la interfaz. Pero para **OneDrive** y **Google Drive personal**, tienes que usar la ruta de Custom Rclone Config.
+
+Esta guía cubre la configuración completa para ambos proveedores, además de los pasos de restauración y la solución de problemas que la mayoría de los tutoriales omiten. Si prefieres copias de seguridad a nivel de plugin específicamente para WordPress, consulta los [plugins de copias de seguridad para WordPress](/es/mejores-plugins-gratuitos-backup-wordpress/) como alternativa a nivel de aplicación.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/ja3TZR083pA"
+  label="Configura las copias de seguridad remotas de CloudPanel en OneDrive o Google Drive"
+/>
+
+## Qué respalda CloudPanel (archivos, bases de datos y configuración)
+
+Antes de configurar nada, conviene saber qué incluye exactamente una copia de seguridad remota de CloudPanel.
+
+<ListCheck>
+
+**Incluido en cada copia de seguridad:**
+- El directorio home de cada sitio (todos los archivos)
+- La configuración del sitio y del vhost
+- Las bases de datos, que se respaldan _antes_ de que se ejecute la copia de archivos (desde CloudPanel v2.4.0)
+
+**Excluido por defecto:**
+- Los directorios `.ssh`
+- Los directorios `logs`
+- Los directorios `tmp`
+
+</ListCheck>
+
+<Notice type="info" title="Copia con prioridad a la base de datos">
+Desde CloudPanel v2.4.0, las bases de datos se vuelcan antes de crear el archivo de la copia de seguridad remota. Esto significa que, si la copia de archivos falla a mitad de camino, seguirás teniendo un snapshot consistente de la base de datos en el archivo.
+</Notice>
+
+También puedes usar el campo **Excludes** de la interfaz de CloudPanel para omitir sitios o rutas concretas. Esto es útil si tienes directorios grandes de recursos estáticos que no necesitan una copia de seguridad diaria externa.
+
+Si alojas WordPress en CloudPanel, la copia de seguridad lo incluye todo: wp-content, uploads, la base de datos y la configuración. Consulta cómo [alojar sitios WordPress en CloudPanel](/es/instalar-wordpress-ubuntu-arm/) para más detalles sobre la configuración.
+
+## Requisitos previos para las copias de seguridad remotas de CloudPanel
+
+Asegúrate de que todo esto esté listo antes de empezar la configuración de Rclone.
+
+### Comprueba la zona horaria de tu instancia
+
+La documentación de CloudPanel lo indica explícitamente: la zona horaria debe ser correcta para que las copias de seguridad programadas se ejecuten a la hora esperada.
+
+Compruébala con:
+
+```sh
+timedatectl
+```
+
+Si no es correcta, corrígela:
+
+```sh
+sudo timedatectl set-timezone Europe/Bucharest
+```
+
+Sustituye `Europe/Bucharest` por tu zona horaria real.
+
+<Notice type="warning" title="Zona horaria incorrecta = copias a horas incorrectas">
+Si la zona horaria de tu servidor no es correcta, las copias de seguridad se ejecutarán a horas inesperadas. Esto importa si tienes ventanas de mantenimiento o quieres que las copias se ejecuten en periodos de poco tráfico.
+</Notice>
+
+### Crea una carpeta de destino en OneDrive o Google Drive
+
+Ve a tu proveedor de nube y crea una carpeta dedicada para las copias de seguridad _antes_ de ejecutar la configuración de Rclone. Ni CloudPanel ni Rclone la crearán por ti. Si la carpeta no existe, obtendrás errores.
+
+Para esta guía usaré una carpeta llamada `dragos-cloudpanel-backups`.
+
+**Costes de almacenamiento a tener en cuenta:**
+
+| Proveedor | Nivel gratuito | Nivel de pago | Notas |
+|-----------|----------------|---------------|-------|
+| Google Drive | 15 GB | 100 GB ~ $1.99/mes | Límite de subida no documentado de ~750 GB/día |
+| OneDrive | 5 GB | 100 GB ~ $1.99/mes, 1 TB con M365 ~ $6.99/mes | El refresh token caduca tras 90 días de inactividad |
+
+Ambos descuentan las copias de seguridad de tu cuota de almacenamiento. Planifica la retención en consecuencia.
+
+### Conéctate mediante un túnel SSH para la autenticación en el navegador
+
+Rclone necesita un navegador para OAuth, pero tu servidor no tiene entorno gráfico. La solución es un túnel SSH que redirige el puerto 53682 del servidor a tu máquina local.
+
+<Notice type="info" title="El túnel solo durante la configuración">
+El túnel SSH solo es necesario durante el paso inicial de `rclone config`. Las copias de seguridad del día a día funcionan sin él.
+</Notice>
+
+<Tabs>
+<Tab name="Mac / Linux">
+```sh
+ssh -L localhost:53682:localhost:53682 username@your_server_ip
+```
+Sustituye `username` por tu usuario SSH y `your_server_ip` por la IP del servidor. Funciona en cualquier terminal.
+</Tab>
+<Tab name="Windows (WSL)">
+Si tienes WSL instalado, usa el mismo comando:
+```sh
+ssh -L localhost:53682:localhost:53682 username@your_server_ip
+```
+Si no tienes WSL, usa PuTTY: ve a **Connection → SSH → Tunnels**, pon `53682` en Source port y `localhost:53682` en Destination, haz clic en **Add** y conéctate.
+</Tab>
+</Tabs>
+
+Para más detalles, consulta la [documentación de configuración remota de Rclone](https://rclone.org/remote_setup/).
+
+Si todavía no has instalado CloudPanel, primero [instala CloudPanel en tu servidor](/es/instalar-cloudpanel-alojar-nodejs/). Asegúrate también de [mantener tu instalación de CloudPanel actualizada](/es/actualizar-cloudpanel-seguro/). Las funciones de copia de seguridad han mejorado desde la v2.4.0.
+
+## Cómo configurar la copia de seguridad de CloudPanel en OneDrive
+
+### Ejecuta la configuración de Rclone para OneDrive
+
+Con el túnel SSH abierto, conéctate por SSH a tu servidor y ejecuta:
+
+```sh
+rclone config
+```
+
+Sigue las indicaciones interactivas. El texto exacto puede variar según tu versión de Rclone, pero las opciones y el orden son los mismos. Esta es la sesión completa:
+
+```sh
+root@cp-dg:~# rclone config
+2024/03/14 13:27:43 NOTICE: Config file "/root/.config/rclone/rclone.conf" not found - using defaults
+No remotes found - make a new one
+n) New remote
+s) Set configuration password
+q) Quit config
+n/s/q> n
+name> remote
+Type of storage to configure.
+Enter a string value. Press Enter for the default ("").
+Choose a number from below, or type in your own value
+ 1 / 1Fichier
+   \ "fichier"
+ 2 / Alias for an existing remote
+   \ "alias"
+ 3 / Amazon Drive
+   \ "amazon cloud drive"
+ 4 / Amazon S3 Compliant Storage Provider (AWS, Alibaba, Ceph, Digital Ocean, Dreamhost, IBM COS, Minio, Tencent COS, etc)
+   \ "s3"
+ 5 / Backblaze B2
+   \ "b2"
+ 6 / Box
+   \ "box"
+ 7 / Cache a remote
+   \ "cache"
+ 8 / Citrix Sharefile
+   \ "sharefile"
+ 9 / Dropbox
+   \ "dropbox"
+10 / Encrypt/Decrypt a remote
+   \ "crypt"
+11 / FTP Connection
+   \ "ftp"
+12 / Google Cloud Storage (this is not Google Drive)
+   \ "google cloud storage"
+13 / Google Drive
+   \ "drive"
+14 / Google Photos
+   \ "google photos"
+15 / Hubic
+   \ "hubic"
+16 / In memory object storage system.
+   \ "memory"
+17 / Jottacloud
+   \ "jottacloud"
+18 / Koofr
+   \ "koofr"
+19 / Local Disk
+   \ "local"
+20 / Mail.ru Cloud
+   \ "mailru"
+21 / Microsoft Azure Blob Storage
+   \ "azureblob"
+22 / Microsoft OneDrive
+   \ "onedrive"
+23 / OpenDrive
+   \ "opendrive"
+24 / OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
+   \ "swift"
+25 / Pcloud
+   \ "pcloud"
+26 / Put.io
+   \ "putio"
+27 / SSH/SFTP Connection
+   \ "sftp"
+28 / Sugarsync
+   \ "sugarsync"
+29 / Transparently chunk/split large files
+   \ "chunker"
+30 / Union merges the contents of several upstream fs
+   \ "union"
+31 / Webdav
+   \ "webdav"
+32 / Yandex Disk
+   \ "yandex"
+33 / http Connection
+   \ "http"
+34 / premiumize.me
+   \ "premiumizeme"
+35 / seafile
+   \ "seafile"
+Storage> 22
+** See help for onedrive backend at: https://rclone.org/onedrive/ **
+
+OAuth Client Id
+Leave blank normally.
+Enter a string value. Press Enter for the default ("").
+client_id>
+OAuth Client Secret
+Leave blank normally.
+Enter a string value. Press Enter for the default ("").
+client_secret>
+Edit advanced config? (y/n)
+y) Yes
+n) No (default)
+y/n>
+Remote config
+Use auto config?
+ * Say Y if not sure
+ * Say N if you are working on a remote or headless machine
+y) Yes (default)
+n) No
+y/n>
+If your browser doesn't open automatically go to the following link: http://127.0.0.1:53682/auth?state=LK_cdbrOrIT
+Log in and authorize rclone for access
+Waiting for code...
+Got code
+Choose a number from below, or type in an existing value
+ 1 / OneDrive Personal or Business
+   \ "onedrive"
+ 2 / Root Sharepoint site
+   \ "sharepoint"
+ 3 / Type in driveID
+   \ "driveid"
+ 4 / Type in SiteID
+   \ "siteid"
+ 5 / Search a Sharepoint site
+   \ "search"
+Your choice> 1
+Found 1 drives, please select the one you want to use:
+0:  (personal) id=f9f661d3066d45ed
+Chose drive to use:> 0
+Found drive 'root' of type 'personal', URL: https://onedrive.live.com/?cid=f9f661d3066d45ed
+Is that okay?
+y) Yes (default)
+n) No
+y/n>
+--------------------
+[remote]
+type = onedrive
+token = {"access_token":"eyJ0eXAiOiJKV1QiLCJub25jZSI6ImFRVH","token_type":"Bearer","refresh_token":"M.R3_BL2-","expiry":"2024-03-14T14:33:11.976081855Z"}
+drive_id = f9f661d3066d45ed
+drive_type = personal
+--------------------
+y) Yes this is OK (default)
+e) Edit this remote
+d) Delete this remote
+y/e/d>
+Current remotes:
+
+Name                 Type
+====                 ====
+remote               onedrive
+
+e) Edit existing remote
+n) New remote
+d) Delete remote
+r) Rename remote
+c) Copy remote
+s) Set configuration password
+q) Quit config
+e/n/d/r/c/s/q> q
+```
+
+Opciones clave:
+
+- **name> remote** debe ser exactamente `remote`. CloudPanel tiene este nombre fijado en el código.
+- **Storage> 22** es Microsoft OneDrive. En versiones más recientes de Rclone también puedes escribir `onedrive`.
+- **client_id / client_secret**: pulsa Enter para usar los valores por defecto.
+- **Use auto config?**: responde Yes. Rclone abrirá tu navegador a través del túnel SSH.
+- **OneDrive Personal or Business**: elige el tipo que corresponda a tu cuenta.
+
+### Verifica la configuración de Rclone
+
+Antes de tocar la interfaz de CloudPanel, comprueba que Rclone realmente puede escribir en el remoto:
+
+```sh
+touch /tmp/test-file
+rclone copy /tmp/test-file remote:dragos-cloudpanel-backups/
+```
+
+Revisa tu carpeta de OneDrive. El archivo de prueba debería aparecer en cuestión de segundos. Si aparece, bórralo:
+
+```sh
+rclone delete remote:dragos-cloudpanel-backups/test-file
+```
+
+<Notice type="success" title="¿Prueba superada?">
+Si el archivo de prueba aparece en tu carpeta en la nube, Rclone está configurado correctamente. Si obtienes errores de autenticación o «directory not found», vuelve a ejecutar `rclone config` y comprueba el nombre de la carpeta.
+</Notice>
+
+Este paso detecta fallos de autenticación, carpetas inexistentes y problemas de permisos antes de que rompan silenciosamente tus copias de seguridad reales.
+
+### Configura CloudPanel para usar la configuración personalizada de Rclone
+
+1. Inicia sesión en CloudPanel
+2. Ve a **Admin Area → Backups**
+3. Elige **Custom Rclone Config**
+4. Configura **Frequency** (diaria, semanal), **Time**, **Retention Period** (días) y **Storage Directory** (la carpeta que creaste, p. ej. `dragos-cloudpanel-backups`)
+5. Opcionalmente, usa el campo **Excludes** para omitir sitios o rutas concretas
+6. Haz clic en **Save** y luego en **Create Backup** para ejecutar una de inmediato
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imag1} alt="Configuración de copias de seguridad Custom Rclone Config de CloudPanel" />
+
+Después de unos minutos (según el tamaño del sitio), revisa OneDrive. Deberías ver cómo aparecen los archivos de la copia de seguridad.
+
+## Cómo configurar la copia de seguridad de CloudPanel en Google Drive
+
+### Importante: Google Workspace frente a Google Drive personal
+
+<Notice type="warning" title="Se requiere Google Workspace para la opción nativa de la interfaz">
+La opción integrada de Google Drive en la interfaz de CloudPanel requiere ahora una cuenta de servicio de Google Workspace de pago. Si tienes una cuenta personal de Google (la gratuita), **debes** usar el método de Custom Rclone Config que se describe a continuación. No es un truco: es la vía oficial para cuentas personales.
+</Notice>
+
+Los pasos siguientes usan el método de Custom Rclone Config, que funciona tanto con Google Drive personal como con Google Workspace.
+
+### Ejecuta la configuración de Rclone para Google Drive
+
+```sh
+rclone config
+```
+
+Sesión interactiva completa:
+
+```sh
+root@cp-dg:~/.config/rclone# rclone config
+2024/03/14 13:54:24 NOTICE: Config file "/root/.config/rclone/rclone.conf" not found - using defaults
+No remotes found - make a new one
+n) New remote
+s) Set configuration password
+q) Quit config
+n/s/q> n
+name> remote
+Type of storage to configure.
+Enter a string value. Press Enter for the default ("").
+Choose a number from below, or type in your own value
+ 1 / 1Fichier
+   \ "fichier"
+ 2 / Alias for an existing remote
+   \ "alias"
+ 3 / Amazon Drive
+   \ "amazon cloud drive"
+ 4 / Amazon S3 Compliant Storage Provider (AWS, Alibaba, Ceph, Digital Ocean, Dreamhost, IBM COS, Minio, Tencent COS, etc)
+   \ "s3"
+ 5 / Backblaze B2
+   \ "b2"
+ 6 / Box
+   \ "box"
+ 7 / Cache a remote
+   \ "cache"
+ 8 / Citrix Sharefile
+   \ "sharefile"
+ 9 / Dropbox
+   \ "dropbox"
+10 / Encrypt/Decrypt a remote
+   \ "crypt"
+11 / FTP Connection
+   \ "ftp"
+12 / Google Cloud Storage (this is not Google Drive)
+   \ "google cloud storage"
+13 / Google Drive
+   \ "drive"
+14 / Google Photos
+   \ "google photos"
+15 / Hubic
+   \ "hubic"
+16 / In memory object storage system.
+   \ "memory"
+17 / Jottacloud
+   \ "jottacloud"
+18 / Koofr
+   \ "koofr"
+19 / Local Disk
+   \ "local"
+20 / Mail.ru Cloud
+   \ "mailru"
+21 / Microsoft Azure Blob Storage
+   \ "azureblob"
+22 / Microsoft OneDrive
+   \ "onedrive"
+23 / OpenDrive
+   \ "opendrive"
+24 / OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
+   \ "swift"
+25 / Pcloud
+   \ "pcloud"
+26 / Put.io
+   \ "putio"
+27 / SSH/SFTP Connection
+   \ "sftp"
+28 / Sugarsync
+   \ "sugarsync"
+29 / Transparently chunk/split large files
+   \ "chunker"
+30 / Union merges the contents of several upstream fs
+   \ "union"
+31 / Webdav
+   \ "webdav"
+32 / Yandex Disk
+   \ "yandex"
+33 / http Connection
+   \ "http"
+34 / premiumize.me
+   \ "premiumizeme"
+35 / seafile
+   \ "seafile"
+Storage> 13
+** See help for drive backend at: https://rclone.org/drive/ **
+
+Google Application Client Id
+Setting your own is recommended.
+See https://rclone.org/drive/#making-your-own-client-id for how to create your own.
+If you leave this blank, it will use an internal key which is low performance.
+Enter a string value. Press Enter for the default ("").
+client_id>
+OAuth Client Secret
+Leave blank normally.
+Enter a string value. Press Enter for the default ("").
+client_secret>
+Scope that rclone should use when requesting access from drive.
+Enter a string value. Press Enter for the default ("").
+Choose a number from below, or type in your own value
+ 1 / Full access all files, excluding Application Data Folder.
+   \ "drive"
+ 2 / Read-only access to file metadata and file contents.
+   \ "drive.readonly"
+   / Access to files created by rclone only.
+ 3 | These are visible in the drive website.
+   | File authorization is revoked when the user deauthorizes the app.
+   \ "drive.file"
+   / Allows read and write access to the Application Data folder.
+ 4 | This is not visible in the drive website.
+   \ "drive.appfolder"
+   / Allows read-only access to file metadata but
+ 5 | does not allow any access to read or download file content.
+   \ "drive.metadata.readonly"
+scope> 1
+ID of the root folder
+Leave blank normally.
+
+Fill in to access "Computers" folders (see docs), or for rclone to use
+a non root folder as its starting point.
+
+Enter a string value. Press Enter for the default ("").
+root_folder_id>
+Service Account Credentials JSON file path
+Leave blank normally.
+Needed only if you want use SA instead of interactive login.
+
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+Enter a string value. Press Enter for the default ("").
+service_account_file>
+Edit advanced config? (y/n)
+y) Yes
+n) No (default)
+y/n>
+Remote config
+Use auto config?
+ * Say Y if not sure
+ * Say N if you are working on a remote or headless machine
+y) Yes (default)
+n) No
+y/n>
+If your browser doesn't open automatically go to the following link: http://127.0.0.1:53682/auth?state=lJ52bPvVGaG
+Log in and authorize rclone for access
+Waiting for code...
+Got code
+Configure this as a team drive?
+y) Yes
+n) No (default)
+y/n>
+
+--------------------
+[remote]
+scope = drive
+token = {"access_token":"ya29.a0Ad52N3_J72wn8dG4c","token_type":"Bearer","refresh_token":"1//0czUgUBU95R8GCgYIARAAG-JK9klco7JLyA","expiry":"2024-03-14T14:55:20.87391752Z"}
+--------------------
+y) Yes this is OK (default)
+e) Edit this remote
+d) Delete this remote
+y/e/d>
+Current remotes:
+
+Name                 Type
+====                 ====
+remote               drive
+
+e) Edit existing remote
+n) New remote
+d) Delete remote
+r) Rename remote
+c) Copy remote
+s) Set configuration password
+q) Quit config
+e/n/d/r/c/s/q> q
+```
+
+Opciones clave:
+
+- **name> remote**: mismo requisito. Debe ser exactamente `remote`.
+- **Storage> 13** es Google Drive. En versiones más recientes de Rclone también puedes escribir `drive`.
+- **scope> 1**: acceso completo. Es el valor por defecto y lo que CloudPanel necesita.
+- **Configure this as a team drive?**: responde No, a menos que uses una unidad compartida (Shared Drive).
+- **Use auto config?**: responde Yes. Abre el navegador a través del túnel SSH.
+
+### Usa tu propio Client ID de Google (recomendado)
+
+<Notice type="info" title="El client_id compartido funciona, pero tiene límites">
+El client_id compartido por defecto de Rclone funciona para la configuración inicial. Desde Rclone v1.74.4, se muestra un aviso al usar el ID compartido. Google puede limitar o revocar los ID compartidos con un uso intensivo. Crear el tuyo propio es gratis y está recomendado para copias de seguridad en producción.
+</Notice>
+
+Crear tu propio Client ID lleva unos 5 minutos:
+
+1. Ve a [Google Cloud Console](https://console.cloud.google.com/)
+2. Crea un proyecto (o usa uno existente)
+3. Habilita la **API de Google Drive**
+4. Ve a **APIs & Services → Credentials**
+5. Crea un **OAuth 2.0 Client ID** (aplicación de escritorio)
+6. Copia el client_id y el client_secret
+7. Introdúcelos durante `rclone config` en lugar de pulsar Enter para usar los valores por defecto
+
+<Button text="Crea tu propio Client ID de Google" link="https://rclone.org/drive/#making-your-own-client-id" variant="outline" color="blue" size="sm" icon="arrow-right" />
+
+### Verifica y configura CloudPanel
+
+Ejecuta la misma prueba de verificación que en la sección de OneDrive:
+
+```sh
+touch /tmp/test-file
+rclone copy /tmp/test-file remote:dragos-cloudpanel-backups/
+```
+
+Confirma que el archivo aparece en Google Drive y luego bórralo. Después, configura CloudPanel de la misma forma: **Admin Area → Backups → Custom Rclone Config**. Define la frecuencia, la hora, la retención y el directorio de almacenamiento.
+
+## Cómo restaurar copias de seguridad de CloudPanel desde OneDrive o Google Drive
+
+<Notice type="warning" title="No hay restauración con un clic">
+CloudPanel no tiene restauración con un clic desde las copias de seguridad remotas. Es una [petición de función](https://feature-requests.cloudpanel.io/posts/27/one-click-restore-from-backup) que existe desde los primeros días. La restauración es un proceso manual.
+</Notice>
+
+### Restaurar archivos (restauraciones pequeñas de menos de 2 GB)
+
+1. Descarga `backup.tar` desde OneDrive o Google Drive
+2. Súbelo a la carpeta `tmp` del sitio usando el **File Manager** de CloudPanel
+3. Haz clic derecho en el archivo → **Extract**
+4. Copia los archivos a sus ubicaciones correctas
+
+### Restaurar copias de seguridad grandes mediante SFTP y SSH
+
+Para copias de seguridad de más de 2 GB, el File Manager puede agotar el tiempo de espera. Usa SFTP en su lugar:
+
+1. Sube `backup.tar` por SFTP al directorio `~/tmp/` del usuario del sitio
+2. Conéctate por SSH como el usuario del sitio
+3. Extrae:
+
+```sh
+tar xf ~/tmp/backup.tar
+```
+
+4. Mueve los archivos a los directorios correctos
+
+### Restaurar bases de datos mediante la CLI
+
+El archivo de la copia de seguridad contiene los volcados SQL de tus bases de datos. Para restaurar una base de datos:
+
+```sh
+clpctl db:restore --databaseName=your_database --filePath=/path/to/dump.sql
+```
+
+<Notice type="warning" title="Prueba antes de tocar producción">
+Prueba siempre las restauraciones primero en un entorno de staging. La base de datos debe existir ya. Créala en la interfaz de CloudPanel si restauras en un servidor nuevo.
+</Notice>
+
+## Personalizar la programación de las copias de seguridad de CloudPanel
+
+CloudPanel guarda la programación de las copias de seguridad en `/etc/cron.d/clp`. El valor por defecto es este:
+
+```sh
+15 3 * * * clp /usr/bin/bash -c "/usr/bin/clpctl db:backup --ignoreDatabases='db1,db2' --retentionPeriod=7" &> /dev/null
+15 4 * * * clp /home/clp/scripts/create_backup.sh &> /dev/null
+```
+
+Esto es lo que hace cada línea:
+
+- **La línea 1** ejecuta las copias de seguridad de las bases de datos a las 3:15 con un periodo de retención de 7 días. El flag `--ignoreDatabases` permite excluir bases de datos concretas (sustituye `db1,db2` por nombres reales o elimina el flag).
+- **La línea 2** ejecuta la copia de seguridad remota completa (archivos + bases de datos) a las 4:15. Es la que sube los datos a OneDrive/Google Drive mediante Rclone.
+
+<Notice type="info" title="Frecuencia frente a cron">
+El cron se ejecuta a diario, pero CloudPanel comprueba el ajuste **Frequency** de la interfaz para decidir si realmente ejecuta la copia de seguridad ese día. Si pones Frequency en «Weekly», el cron sigue ejecutándose a diario, pero solo realiza la copia una vez a la semana.
+</Notice>
+
+Puedes cambiar las horas para adaptarlas a tu planificación. Solo mantén la copia de las bases de datos antes que la copia completa (la línea 1 antes que la línea 2) para que los volcados estén actualizados.
+
+## Solución de problemas de las copias de seguridad remotas de CloudPanel
+
+<Accordion label="Solucionar la caducidad del token (límite de 90 días de OneDrive)" group="troubleshooting">
+
+Los refresh tokens de OneDrive caducan tras 90 días de inactividad. Si las copias de seguridad se ejecutan al menos una vez cada 90 días, el token se renueva automáticamente y ni te enteras. Pero si las copias dejan de ejecutarse (desactivadas, servidor caído, frecuencia demasiado baja), el token caduca y las subidas fallan silenciosamente.
+
+**Solución:** vuelve a autenticar Rclone:
+
+```sh
+rclone config reconnect remote:
+```
+
+Esto abre el navegador a través del túnel SSH (necesitarás el túnel abierto de nuevo). Tras volver a autenticarte, prueba con:
+
+```sh
+rclone lsd remote:dragos-cloudpanel-backups/
+```
+
+Si lista el directorio, todo está bien.
+
+**Prevención:** pon un recordatorio en el calendario cada 60 días o monitoriza los logs de las copias de seguridad en busca de errores de autenticación.
+
+</Accordion>
+
+<Accordion label="Error 'Remote not found'" group="troubleshooting">
+
+CloudPanel espera que el remoto de Rclone se llame exactamente `remote` (en minúsculas). Si le pusiste otro nombre durante la configuración, no funcionará.
+
+Comprueba lo que tienes:
+
+```sh
+rclone listremotes
+```
+
+Si muestra algo distinto de `remote:`, cámbiale el nombre:
+
+```sh
+rclone config
+```
+
+Luego usa la opción **r) Rename remote**.
+
+</Accordion>
+
+<Accordion label="No se encuentra la carpeta de copias de seguridad" group="troubleshooting">
+
+La carpeta de destino debe existir en OneDrive/Google Drive antes de configurar CloudPanel. Si ves errores sobre rutas inexistentes:
+
+1. Ve a tu proveedor de nube y crea la carpeta manualmente
+2. Verifica que Rclone puede verla:
+
+```sh
+rclone lsd remote:
+```
+
+3. Vuelve a ejecutar la copia de seguridad desde CloudPanel
+
+</Accordion>
+
+<Accordion label="Errores de permisos en OneDrive Personal" group="troubleshooting">
+
+OneDrive Personal tiene algunas limitaciones de API en comparación con Business:
+
+- `rclone cleanup` no funciona (no se pueden eliminar versiones)
+- El borrado definitivo no está soportado
+- El campo de descripción ya no está soportado (desde Rclone v1.73.0)
+
+Esto no rompe las copias de seguridad; solo limita algunas operaciones de gestión. Las copias de seguridad y las restauraciones funcionan bien.
+
+</Accordion>
+
+<Accordion label="Problemas con el túnel SSH en Windows" group="troubleshooting">
+
+Si el túnel SSH no funciona desde el símbolo del sistema de Windows o PowerShell:
+
+1. **Usa WSL** (Windows Subsystem for Linux). El comando `ssh -L` funciona exactamente igual
+2. **Usa PuTTY**: ve a **Connection → SSH → Tunnels**, pon `53682` en Source port y `localhost:53682` en Destination, haz clic en **Add** y conéctate
+3. Si el puerto 53682 está bloqueado por un firewall local, permítelo temporalmente durante la configuración. Solo es necesario para la autenticación inicial de `rclone config`
+
+</Accordion>
+
+## Reflexiones finales
+
+Las copias de seguridad remotas no son opcionales en el autoalojamiento. El método de Custom Rclone Config descrito aquí funciona de forma fiable tanto con OneDrive como con Google Drive personal. No es un truco: es el enfoque oficial cuando las opciones nativas de la interfaz no cubren tu proveedor.
+
+Algunas cosas a tener en cuenta:
+
+- **Prueba tus restauraciones.** Una copia de seguridad de la que nunca has restaurado no es una copia de seguridad: es una esperanza. Descarga el archivo, extráelo y confirma que los archivos están intactos y la base de datos se importa sin problemas.
+- **Vigila la caducidad del token de OneDrive.** Es la principal causa de fallos silenciosos: las copias parecen ejecutarse, pero no se sube nada.
+- **Mantén CloudPanel actualizado.** Las funciones de copia de seguridad han mejorado desde la v2.4.0 (copia con prioridad a la base de datos, inclusión del vhost). Las correcciones de seguridad también importan: varias CVE de escalada de privilegios se parchearon en la v2.5.0.
+
+Más allá de las copias de seguridad, también deberías [securizar tu servidor CloudPanel](/es/securizar-cloudpanel/) y [securizar tu VPS](/es/crowdsec-servidor-seguro/). Si usas WordPress, [optimiza el rendimiento de WordPress con CloudPanel](/es/varnish-cache-cloudpanel/) para cargas de página más rápidas. Y si necesitas una [estrategia de copias de seguridad para plataformas autoalojadas](/es/backups-dokploy-cloudflare-r2/) más allá de CloudPanel, esa guía cubre Cloudflare R2 con Dokploy.
+
+Si buscas un VPS asequible para alojar CloudPanel, [Hetzner Cloud](https://go.bitdoze.com/hetzner) ofrece servidores europeos fiables desde unos 4,50 €/mes. Para alternativas económicas, [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) ofrece VPS basados en KVM con almacenamiento NVMe.
+
+_Los precios de los VPS subieron en general en 2026: si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._

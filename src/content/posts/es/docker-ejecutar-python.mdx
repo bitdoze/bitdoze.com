@@ -1,0 +1,512 @@
+---
+date: 2024-03-25
+lastmod: 2026-07-28T00:00:00Z
+translationKey: "docker-run-python"
+title: "Cómo ejecutar cualquier app Python en Docker con Docker Compose"
+meta_title: "Cómo ejecutar apps Python en Docker con Docker Compose (2026)"
+description: "Aprende a ejecutar cualquier app Python en Docker con Docker Compose. Actualizado para 2026 con mejores prácticas modernas, health checks, usuarios no-root y Cloudflare…"
+image: "@assets/images/24/03/python-docker.jpeg"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["docker", "python", "docker-compose"]
+canonical: "https://www.bitdoze.com/es/docker-ejecutar-python/"
+---
+
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+
+Ejecutar apps Python en Docker con Docker Compose es la forma más rápida de pasar de `main.py` a un despliegue fiable en cualquier VPS. Esta guía cubre el pipeline completo: `.dockerignore`, Dockerfile, `compose.yml`, arranque, verificación, además de SSL con Cloudflare Tunnel para HTTPS gratis. Actualizada para 2026 con Docker Compose V2 (adiós al guion), disponibilidad de Python 3.13/3.14, `uv` como alternativa más rápida a pip, y Compose Watch para recarga en vivo.
+
+Tanto si estás contenedorizando un dashboard NiceGUI, una app Streamlit o cualquier proyecto Python, el patrón es el mismo. Yo uso esta configuración en VPS de Hetzner corriendo Dokploy para varias apps Python pequeñas, y funciona de forma fiable.
+
+## Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Un VPS corriendo Linux (Ubuntu o Debian). Un Hetzner CX23 (4 EUR/mes) puede correr 3-5 apps Python pequeñas. [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner) es mi opción por defecto. [Hostinger VPS](https://go.bitdoze.com/hostinger-vps) funciona como alternativa económica.</li>
+<li>Docker y Docker Compose V2 instalados. Si necesitas una guía: [Cómo instalar Docker y Docker Compose en sistemas Ubuntu ARM](/es/instalar-docker-ubuntu-arm/)</li>
+<li>Familiaridad básica con el terminal y un editor de texto.</li>
+<li>Recomendado: [Dockge](/es/instalar-dockge/) para gestionar Docker Compose desde una GUI. Hace que arrancar, parar y editar archivos compose sea mucho más fácil.</li>
+<li>Recomendado: Una cuenta de Cloudflare con un dominio (para SSL gratis vía Tunnels).</li>
+</ul>
+</ListCheck>
+
+_Los precios de los VPS subieron en general en 2026 — si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/7Nu7r8y_bDA"
+  label="Cómo ejecutar cualquier app Python en Docker con Docker Compose"
+/>
+
+## Resumen de la estructura del proyecto
+
+Antes de crear archivos, así queda la estructura final del directorio:
+
+```
+my-python-app/
+├── .dockerignore
+├── Dockerfile
+├── compose.yml
+└── my-app/
+    ├── requirements.txt
+    └── main.py
+```
+
+Todo vive en un solo directorio. La subcarpeta `my-app/` contiene tu código Python real y sus dependencias. Los archivos Docker van en la raíz del proyecto.
+
+## Crea un archivo `.dockerignore`
+
+Sin un `.dockerignore`, Docker envía todo tu directorio de proyecto (incluyendo `.git`, `__pycache__`, `.venv`, `.env`) al daemon de Docker como contexto de build. Esto ralentiza los builds y puede filtrar secretos a la imagen.
+
+Crea `.dockerignore` en la raíz del proyecto:
+
+```
+**/__pycache__
+**/.venv
+**/.git
+**/.env
+**/.DS_Store
+Dockerfile
+compose.yml
+README.md
+```
+
+Y ya está. Estas líneas evitan la mayoría de problemas comunes de contexto inflado.
+
+## Crea un Dockerfile
+
+Aquí está el Dockerfile actualizado y listo para producción:
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY ./my-app/requirements.txt /app
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./my-app /app
+
+RUN addgroup --system app && adduser --system --group app
+USER app
+
+CMD ["python", "main.py"]
+```
+
+### Entendiendo las instrucciones del Dockerfile
+
+**`FROM python:3.12-slim`**: Usa la variante slim (~130MB) en lugar de la imagen completa (~1GB). Para la mayoría de apps Python, slim tiene todo lo que necesitas. La imagen completa solo es necesaria si necesitas herramientas de compilación como gcc para extensiones nativas.
+
+<Notice type="warning" title="No uses Alpine para Python">
+Puede que veas `python:3.12-alpine` en otros tutoriales. Sáltalo. Alpine usa musl libc en lugar de glibc, lo que provoca fallos de compilación oscuros con paquetes Python que tienen extensiones en C (numpy, pandas, Pillow, cryptography). Los tiempos de build también son mayores porque muchos paquetes tienen que compilarse desde el código fuente. Los ~80MB extra de `slim` ahorran horas de depuración.
+</Notice>
+
+**`WORKDIR /app`**: Establece el directorio de trabajo dentro del contenedor. Todos los comandos siguientes se ejecutan desde aquí.
+
+**`ENV PYTHONDONTWRITEBYTECODE=1`**: Evita que Python escriba archivos `.pyc` en disco. No hay razón para cachear bytecode en una imagen de contenedor.
+
+**`ENV PYTHONUNBUFFERED=1`**: Fuerza que stdout y stderr no usen buffer. Sin esto, `docker compose logs` puede mostrar salida retrasada o incompleta de tu app. Para más sobre variables de entorno en Docker, mira [Cómo usar las variables de entorno ARG y ENV en Docker](/es/variables-entorno-docker/).
+
+**`COPY ./my-app/requirements.txt /app`** y luego **`RUN pip install --no-cache-dir -r requirements.txt`**: Copia primero los requirements y después instala las dependencias. Este orden es intencional: Docker cachea capas, así que si solo cambia el código de tu aplicación (y no las dependencias), la capa de pip install se reutiliza de la caché y los rebuilds son rápidos. El flag `--no-cache-dir` mantiene la caché de descargas de pip fuera de la imagen.
+
+**`COPY ./my-app /app`**: Copia el resto del código de tu aplicación. Va después del pip install para que los cambios de código no disparen una reinstalación completa de dependencias.
+
+**`RUN addgroup --system app && adduser --system --group app`** y luego **`USER app`**: Crea un usuario no-root y cambia a él. Correr contenedores como root es un antipatrón de seguridad. Si un atacante escapa del proceso, tiene root en el contenedor. El usuario `app` tiene privilegios mínimos.
+
+**`CMD ["python", "main.py"]`**: El comando por defecto. Sobrescribible en `compose.yml` si necesitas un entrypoint distinto para servicios distintos.
+
+<Notice type="info" title="¿Quieres builds más rápidos?">
+<a href="https://go.bitdoze.com/uv-get-start">uv</a> es un reemplazo directo de pip que es 10-100x más rápido en resolución e instalación de dependencias. Para usarlo en tu Dockerfile, reemplaza la línea de pip install con:
+
+```dockerfile
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-cache -r requirements.txt
+```
+
+El mount de caché hace que los builds repetidos se salten la descarga de paquetes ya instalados. Para un recorrido completo de uv, mira [Primeros pasos con uv: configura tu proyecto Python en 2026](/es/empezar-uv/).
+</Notice>
+
+## Crea un directorio `my-app` con tus scripts Python
+
+Ahora crea el código de la aplicación. Aquí hay dos ejemplos comunes.
+
+### Ejemplo con NiceGUI
+
+Crea `my-app/requirements.txt`:
+
+```
+nicegui
+```
+
+Crea `my-app/main.py`:
+
+```python
+from nicegui import ui
+
+ui.label('Hello NiceGUI!')
+
+ui.run()
+```
+
+NiceGUI usa el puerto `8080` por defecto. Puedes cambiarlo con `ui.run(port=9000)` si lo necesitas. Solo asegúrate de que el mapeo de puertos en `compose.yml` coincida.
+
+Para más sobre NiceGUI:
+- [Tutorial de NiceGUI: construye una UI para tu app Python en 5 minutos](/es/empezar-nicegui/)
+- [Cómo añadir múltiples páginas a NiceGUI](/es/paginas-nicegui/)
+
+### Ejemplo con Streamlit
+
+Crea `my-app/requirements.txt`:
+
+```
+streamlit
+```
+
+Crea `my-app/main.py`:
+
+```python
+import streamlit as st
+
+st.title('Hello Streamlit!')
+st.write('This is a minimal Streamlit app running in Docker.')
+```
+
+Streamlit usa el puerto `8501` por defecto. Nota: `streamlit hello` es un comando demo integrado; las apps reales usan `streamlit run main.py`.
+
+Para un despliegue completo de Streamlit + Cloudflare Tunnel, mira [Desplegar Streamlit en un VPS con proxy a Cloudflare Tunnels](/es/desplegar-streamlit-vps-cloudflare/).
+
+<Notice type="info" title="¿NiceGUI o Streamlit?">
+Ambos son sólidos para construir UIs web Python rápidamente. NiceGUI te da más control sobre el layout y los eventos; Streamlit es más rápido para dashboards de datos. Compáralos en [Streamlit vs. NiceGUI: elige el mejor framework web Python](/es/streamlit-vs-nicegui/).
+</Notice>
+
+## Crea un archivo Docker Compose (`compose.yml`)
+
+<Tabs>
+<Tab name="NiceGUI">
+```yaml
+services:
+  web:
+    container_name: python-server
+    command: python main.py
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./my-app:/app
+    ports:
+      - "5021:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+```
+</Tab>
+<Tab name="Streamlit">
+```yaml
+services:
+  web:
+    container_name: python-server
+    command: streamlit run main.py --server.headless true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./my-app:/app
+    ports:
+      - "5021:8501"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+```
+</Tab>
+</Tabs>
+
+### Directivas clave de Compose explicadas
+
+- **`services:`**: Empieza directamente. No hace falta `version: "3"` (esa clave es obsoleta y se ignora en Compose V2).
+- **`container_name: python-server`**: Le da al contenedor un nombre fijo en lugar de uno autogenerado. Más fácil de referenciar en comandos.
+- **`command:`**: Sobrescribe el `CMD` del Dockerfile. Para NiceGUI es `python main.py`; para Streamlit, `streamlit run main.py --server.headless true`.
+- **`build:`**: Le dice a Compose que construya la imagen desde el Dockerfile local.
+- **`volumes: ./my-app:/app`**: Monta tu código fuente dentro del contenedor como bind mount. Los cambios de código en el host se reflejan inmediatamente sin rebuild.
+- **`ports: "5021:8080"`**: Mapea el puerto 5021 del host al puerto del contenedor (8080 para NiceGUI, 8501 para Streamlit). Accede a la app en `http://localhost:5021`.
+- **`restart: unless-stopped`**: Reinicia el contenedor si falla, pero no si lo paras manualmente. Un buen valor por defecto para apps alojadas en un VPS.
+- **`healthcheck:`**: Le dice a Docker que compruebe periódicamente si la app responde de verdad. Usa `urllib` de Python en lugar de `curl` porque `curl` no está instalado en `python:3.12-slim`. Una vez que pasa el healthcheck, `docker compose ps` muestra el contenedor como «healthy».
+
+<Notice type="info" title="Compose Watch para desarrollo">
+En lugar de bind mounts, puedes usar Docker Compose Watch para una sincronización de archivos más granular. Añade esto a tu `compose.yml`:
+
+```yaml
+develop:
+  watch:
+    - action: sync
+      path: ./my-app
+      target: /app
+      ignore:
+        - __pycache__/
+        - "*.pyc"
+    - action: rebuild
+      path: ./requirements.txt
+```
+
+Luego ejecuta `docker compose watch`. Los cambios de código se sincronizan al instante; los cambios de dependencias disparan un rebuild automático. Es opcional — los bind mounts siguen funcionando bien — pero Compose Watch te da patrones de ignore y acciones distintas por ruta.
+</Notice>
+
+## Arranca el stack de Docker Compose
+
+```sh
+docker compose up -d --build
+```
+
+- **`docker compose`** (con espacio): El comando V2. El viejo `docker-compose` (con guion) se eliminó en abril de 2025.
+- **`up -d`**: Arranca los contenedores en modo detached (segundo plano).
+- **`--build`**: Reconstruye la imagen si el Dockerfile cambió.
+
+Para parar el stack: `docker compose down`.
+
+Para una referencia completa sobre gestionar contenedores tras la configuración inicial, mira [Cómo actualizar un contenedor con Docker Compose](/es/actualizar-contenedor-docker-compose/).
+
+## Verifica que funciona
+
+No asumas que está corriendo. Verifícalo:
+
+**1. Comprueba el estado del contenedor:**
+
+```sh
+docker compose ps
+```
+
+Deberías ver `Up` en la columna STATUS. Tras 10-30 segundos (cuando pase el healthcheck), también debería mostrar `healthy`.
+
+```
+NAME             STATUS                   PORTS
+python-server    Up (healthy)             0.0.0.0:5021->8080/tcp
+```
+
+**2. Revisa los logs:**
+
+```sh
+docker compose logs -f web
+```
+
+Para NiceGUI, busca algo como `NiceGUI is on http://0.0.0.0:8080`. Para Streamlit, `You can now view your Streamlit app in your browser`. Pulsa `Ctrl+C` para dejar de seguir los logs.
+
+**3. Prueba el acceso HTTP:**
+
+```sh
+curl -s -o /dev/null -w "%{http_code}" http://localhost:5021
+```
+
+Espera `200`. Si obtienes `000` o un connection refused, la app no está escuchando en el puerto esperado.
+
+**4. Ábrelo en el navegador:** navega a `http://<tu-ip-vps>:5021`.
+
+<Notice type="success" title="¡Healthy!">
+Una vez que pasa el healthcheck, Docker marca el contenedor como «healthy». Esto importa porque la política de reinicio de Docker y herramientas como Dokploy usan el estado de salud para decidir si un contenedor funciona de verdad o solo está corriendo. Un contenedor unhealthy puede reiniciarse automáticamente.
+</Notice>
+
+Para más comandos Docker que usarás a diario, mira [Top 50+ comandos Docker que DEBES conocer](/es/comandos-docker/).
+
+## Añade nuevos paquetes PIP
+
+Cuando tu app necesite una nueva dependencia:
+
+1. Añade el paquete a `my-app/requirements.txt`.
+2. Reconstruye:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+El flag `--build` reconstruye la imagen con los requirements actualizados. Si usas bind mounts y solo cambiaron los requirements, la caché de capas de Docker hace que solo se repita el paso de pip install.
+
+Para profundizar en la actualización de contenedores en ejecución, mira [Cómo actualizar un contenedor con Docker Compose](/es/actualizar-contenedor-docker-compose/).
+
+## Añade un dominio con SSL usando Cloudflare Tunnels
+
+Cloudflare Tunnels te da SSL gratis sin abrir puertos en tu firewall ni comprar un certificado. Tu app queda detrás del túnel; solo el edge de Cloudflare queda expuesto.
+
+<Notice type="info" title="¿Ya tienes un Cloudflare Tunnel?">
+Si ya tienes `cloudflared` corriendo en tu VPS, solo necesitas añadir un nuevo hostname en el dashboard de Cloudflare (Access → Tunnels → tu túnel → Configure) que apunte a `http://localhost:5021`. Salta al paso 4.
+</Notice>
+
+**Paso 1: Instala `cloudflared` en tu VPS** (o ejecútalo como contenedor Docker).
+
+**Paso 2: Crea un túnel:**
+
+```sh
+cloudflared tunnel create my-python-app
+```
+
+Esto genera un ID de túnel y un archivo de credenciales.
+
+**Paso 3: Configura la regla de ingress.** Crea o edita `~/.cloudflared/config.yml`:
+
+```yaml
+tunnel: my-python-app
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: app.example.com
+    service: http://localhost:5021
+  - service: http_status:404
+```
+
+Reemplaza `<tunnel-id>` con el ID real del paso 2. Reemplaza `app.example.com` con tu dominio.
+
+**Paso 4: Añade el CNAME DNS.** En el dashboard de Cloudflare, añade un registro CNAME para `app.example.com` apuntando a `<tunnel-id>.cfargotunnel.com`.
+
+**Paso 5: Ejecuta el túnel:**
+
+```sh
+cloudflared tunnel run my-python-app
+```
+
+Tu app Python ya es accesible en `https://app.example.com` con un certificado SSL válido gestionado por Cloudflare.
+
+Para un enfoque alternativo con reverse proxy, mira [Configurar CloudPanel como reverse proxy con Docker y Dockge](/es/configurar-dockge-cloudpanel/). Si usas Streamlit específicamente, [Desplegar Streamlit en un VPS con proxy a Cloudflare Tunnels](/es/desplegar-streamlit-vps-cloudflare/) tiene un recorrido más detallado.
+
+## Solución de problemas comunes
+
+<Accordion label="Puerto ya en uso" group="troubleshooting" expanded="true">
+
+**Error:** `bind: address already in use` o `port is already allocated`
+
+**Causa:** Otro proceso está usando el puerto 5021 en el host.
+
+**Solución:**
+
+```sh
+ss -tlnp | grep 5021
+```
+
+Esto muestra qué está usando el puerto. O paras ese proceso o cambias el puerto del host en `compose.yml` (p. ej., `"5022:8080"`).
+
+</Accordion>
+
+<Accordion label="Módulo no encontrado" group="troubleshooting">
+
+**Error:** `ModuleNotFoundError: No module named 'xyz'`
+
+**Causa:** El paquete no está en `requirements.txt`, o la imagen no se reconstruyó después de añadirlo.
+
+**Solución:**
+
+```sh
+docker compose exec web bash
+pip list | grep xyz
+```
+
+Si falta el paquete, añádelo a `requirements.txt` y reconstruye con `docker compose up -d --build`.
+
+</Accordion>
+
+<Accordion label="Permiso denegado en los montajes de volúmenes" group="troubleshooting">
+
+**Error:** `PermissionError: [Errno 13] Permission denied`
+
+**Causa:** Desajuste de UID/GID entre el usuario del host y el usuario `app` del contenedor.
+
+**Solución:** Comprueba la propiedad en el host:
+
+```sh
+ls -ln my-app/
+```
+
+Si los archivos pertenecen a un UID distinto de 1000 (el UID del usuario `app` en el Dockerfile), o cambias la propiedad en el host (`chown -R 1000:1000 my-app/`) o ajustas el Dockerfile para que coincida con el UID de tu host.
+
+</Accordion>
+
+<Accordion label="El contenedor se cierra inmediatamente" group="troubleshooting">
+
+**Error:** El contenedor muestra `Exited (1)` en `docker compose ps`
+
+**Causa:** Traceback de Python al arrancar — normalmente un error de sintaxis en `main.py` o una dependencia que falta.
+
+**Solución:**
+
+```sh
+docker compose logs web
+```
+
+Lee el traceback. Culpables habituales: errores de importación, archivos que faltan (revisa las rutas del volume mount), `command` equivocado en compose.yml.
+
+</Accordion>
+
+<Accordion label="El healthcheck siempre está unhealthy" group="troubleshooting">
+
+**Error:** El contenedor se queda en «starting» y luego pasa a «unhealthy»
+
+**Causa:** La URL o el puerto del healthcheck no coinciden con el puerto en el que escucha la app.
+
+**Solución:**
+
+1. Entra en el contenedor: `docker compose exec web bash`
+2. Prueba el healthcheck manualmente: `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080')"`
+3. Si falla, comprueba en qué puerto escucha realmente la app: `python -c "import socket; print(socket.gethostname())"`
+4. Asegúrate de que el puerto del healthcheck en `compose.yml` coincide con el puerto de la app.
+
+</Accordion>
+
+Para comandos generales de limpieza cuando algo va mal, mira [Cómo limpiar todas las cosas de Docker](/es/limpiar-docker-completo/).
+
+## Consejos de endurecimiento para producción
+
+Cuando tu app funcione, unos pasos extra la dejan lista para producción:
+
+**Límites de recursos** — evita que un contenedor deje sin recursos a los demás en un VPS compartido:
+
+```yaml
+deploy:
+  resources:
+    limits:
+      cpus: '1'
+      memory: 512M
+```
+
+Añade esto bajo el servicio `web` en `compose.yml`.
+
+<Notice type="warning" title="¿Ejecutas varios contenedores?">
+Sin límites de recursos, una app Python con un memory leak puede consumir toda la RAM del VPS y tumbar otros contenedores (o el propio host). Define siempre `deploy.resources.limits` en VPS de producción. Un Hetzner CX22 con 4GB de RAM corre cómodamente 3-5 apps Python pequeñas con límites de 512MB cada una.
+</Notice>
+
+**Usuario no-root** — ya cubierto en la sección del Dockerfile. No te lo saltes.
+
+**Healthcheck** — ya cubierto. Esencial para que la política de reinicio de Docker funcione correctamente. Sin él, Docker solo sabe si el proceso está corriendo, no si la app responde realmente a peticiones.
+
+**Backups** — si tu app usa una base de datos o escribe datos persistentes, monta un volumen dedicado para ellos y haz backup en almacenamiento compatible con S3. El bind mount (`./my-app:/app`) es para el código fuente; no guardes datos ahí.
+
+**Builds multi-etapa** — si tu app necesita gcc u otras herramientas de compilación para extensiones nativas (numpy, cryptography, etc.), usa un build multi-etapa para compilar en una etapa y copiar solo los artefactos de runtime a la imagen slim final. Mantiene la imagen de producción ligera.
+
+## Conclusiones
+
+Ejecutar apps Python en Docker con Docker Compose es sencillo cuando tienes los patrones correctos. Esto es lo que te llevas:
+
+- Usa `python:3.12-slim` (ni la completa, ni Alpine) como imagen base.
+- Incluye siempre `.dockerignore`, usuario no-root, `PYTHONDONTWRITEBYTECODE` y `PYTHONUNBUFFERED`.
+- Usa `docker compose` (con espacio, no guion) — el viejo `docker-compose` V1 ya no existe.
+- Quita el `version: "3"` de tus archivos compose — es obsoleto.
+- Añade healthchecks para que Docker sepa si tu app funciona de verdad.
+- Cloudflare Tunnels te da SSL gratis sin abrir puertos del firewall.
+- Define límites de recursos cuando corras varios contenedores en un mismo VPS.
+
+Empieza con el ejemplo sencillo de NiceGUI de arriba, verifica que funciona y luego itera. El coste total de un stack VPS + Docker + Cloudflare Tunnels es menos de 5 EUR/mes — difícil de superar para una app Python autoalojada con HTTPS.
+
+Para más proyectos Docker que autoalojar, mira [Contenedores Docker para tu home server](/es/contenedores-docker-servidor-casa/).
+
+<Button text="Explora más tutoriales de Docker" link="/tags/docker/" variant="solid" color="blue" size="md" icon="arrow-right" />
