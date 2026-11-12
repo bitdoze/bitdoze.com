@@ -23,7 +23,7 @@ function readProgress(): ProgressMap {
  * Marks `lessonSlug` as visited (when provided), then reflects the stored
  * progress onto the DOM: `[data-lesson-item][data-slug]` items get
  * `data-watched`, `[data-progress-label]` gets "x/y watched" text, and
- * `[data-progress-fill]` gets its width/aria values.
+ * `progress[data-progress-track]` gets its value.
  */
 export function initCourseProgress(courseSlug: string, lessonSlug?: string): void {
   const map = readProgress();
@@ -58,9 +58,7 @@ export function initCourseProgress(courseSlug: string, lessonSlug?: string): voi
     el.textContent = `${count}/${total} watched`;
   });
 
-  scope.querySelectorAll<HTMLElement>("[data-progress-fill]").forEach((bar) => {
-    const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-    bar.style.width = `${pct}%`;
-    bar.setAttribute("aria-valuenow", String(pct));
+  scope.querySelectorAll<HTMLProgressElement>("progress[data-progress-track]").forEach((bar) => {
+    bar.value = total > 0 ? Math.round((count / total) * 100) : 0;
   });
 }
