@@ -12,6 +12,7 @@ export const translations = {
     closeMenu: "Close main menu",
     switchLang: "Español",
     switchToLang: "Switch to Español",
+    mainNav: "Main navigation",
     noEsTranslation: "No Spanish translation — go to Spanish home",
     noEnTranslation: "No English translation — go to English home",
     skipLink: "Skip to main content",
@@ -36,6 +37,11 @@ export const translations = {
     advertise: "Advertise",
     series: "Series",
     pages: "Pages",
+    selfHosting: "Self-Hosting",
+    ai: "AI",
+    linux: "Linux",
+    hardware: "Hardware",
+    more: "More",
     privacyPolicy: "Privacy Policy",
     tools: "Tools",
     titleGenerator: "Title Generator",
@@ -56,6 +62,8 @@ export const translations = {
     toggleToc: "Toggle table of contents",
     related: "Related",
     minRead: "min read",
+    takesAbout: "takes about",
+    testedOnLabel: "Tested on",
     lastUpdated: "Last updated",
     updated: "Updated",
     published: "Published",
@@ -73,6 +81,7 @@ export const translations = {
     // AmazonProduct widget
     amazonCheckPrice: "Check Price on Amazon",
     amazonPriceNote: "Price & availability at Amazon.com",
+    howITest: "How I test",
     amazonKeyFeatures: "Key Features",
     amazonWhatWeLike: "What we like",
     amazonWatchOutFor: "Watch out for",
@@ -140,7 +149,8 @@ export const translations = {
 
     // Archive pages (blog / tags / categories / authors / series)
     blogArchiveTitle: "Blog - {site}",
-    blogArchiveDesc: "Explore our latest articles, tutorials, and insights",
+    blogArchiveDesc:
+      "Tested, copy-paste-ready guides on self-hosting, DevOps, AI coding agents, and homelab hardware — newest first.",
     blogArchiveTitlePage: "Blog - Page {page} - {site}",
     blogArchiveDescPage: "Explore our articles, tutorials, and insights - Page {page}",
     allGuides: "All Guides",
@@ -166,7 +176,8 @@ export const translations = {
 
     authorArchiveTitle: "Posts by {name} - {site}",
     authorArchiveTitlePage: "Posts by {name} - Page {page} - {site}",
-    authorArchiveDesc: "Browse all posts written by {name}",
+    authorArchiveDesc:
+      "Guides and reviews by {name} — tested self-hosting and DevOps tutorials with copy-paste commands.",
     authorArchiveDescPage: "Browse posts written by {name} - Page {page}",
     authorHeading: "Author: {name}",
     guidesByAuthorOne: "{count} guide by this author",
@@ -214,6 +225,7 @@ export const translations = {
     closeMenu: "Cerrar menú principal",
     switchLang: "English",
     switchToLang: "Cambiar a English",
+    mainNav: "Navegación principal",
     noEsTranslation: "Sin traducción al español — ir al inicio en español",
     noEnTranslation: "Sin traducción al inglés — ir al inicio en inglés",
     skipLink: "Saltar al contenido principal",
@@ -238,6 +250,11 @@ export const translations = {
     advertise: "Publicidad",
     series: "Series",
     pages: "Páginas",
+    selfHosting: "Self-Hosting",
+    ai: "IA",
+    linux: "Linux",
+    hardware: "Hardware",
+    more: "Más",
     privacyPolicy: "Política de privacidad",
     tools: "Herramientas",
     titleGenerator: "Generador de títulos",
@@ -258,6 +275,8 @@ export const translations = {
     toggleToc: "Alternar tabla de contenidos",
     related: "Relacionados",
     minRead: "min de lectura",
+    takesAbout: "lleva unos",
+    testedOnLabel: "Probado en",
     lastUpdated: "Última actualización",
     updated: "Actualizado",
     published: "Publicado",
@@ -275,6 +294,7 @@ export const translations = {
     // AmazonProduct widget
     amazonCheckPrice: "Ver precio en Amazon",
     amazonPriceNote: "Precio y disponibilidad en Amazon.com",
+    howITest: "Cómo pruebo",
     amazonKeyFeatures: "Características principales",
     amazonWhatWeLike: "Lo que nos gusta",
     amazonWatchOutFor: "Ten en cuenta",
@@ -370,7 +390,8 @@ export const translations = {
 
     authorArchiveTitle: "Artículos de {name} - {site}",
     authorArchiveTitlePage: "Artículos de {name} - Página {page} - {site}",
-    authorArchiveDesc: "Explora los artículos escritos por {name}",
+    authorArchiveDesc:
+      "Guías y reseñas de {name}: autoalojamiento y DevOps probados, con comandos listos para copiar.",
     authorArchiveDescPage: "Explora los artículos de {name} - Página {page}",
     authorHeading: "Autor: {name}",
     guidesByAuthorOne: "{count} guía de este autor",
@@ -423,6 +444,11 @@ export const menuLabelKeys: Record<string, TranslationKey> = {
   Series: "series",
   News: "news",
   Pages: "pages",
+  "Self-Hosting": "selfHosting",
+  AI: "ai",
+  Linux: "linux",
+  Hardware: "hardware",
+  More: "more",
   Authors: "authors",
   Categories: "categories",
   Tags: "tags",
@@ -436,6 +462,7 @@ export const menuLabelKeys: Record<string, TranslationKey> = {
   Services: "services",
   Advertise: "advertise",
   Blog: "blog",
+  "How I Test": "howITest",
 };
 
 export function t(locale: SupportedLocale, key: TranslationKey): string {

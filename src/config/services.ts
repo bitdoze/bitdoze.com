@@ -96,8 +96,8 @@ export const servicesPageCopy = {
     es: "Necesitas ayuda con alguno de estos servicios?",
   },
   ctaDescription: {
-    en: "The contact links are placeholders for now, but the service structure is ready. Pick the service page that matches your project and use the CTA there.",
-    es: "Los enlaces de contacto son temporales por ahora, pero la estructura del servicio ya esta lista. Entra en la pagina del servicio que encaja con tu proyecto y usa el CTA desde alli.",
+    en: "Pick the service that matches your project and tell me what you are working on. You get a concrete scope, a fixed price, and a start date in the reply.",
+    es: "Elige el servicio que encaja con tu proyecto y cuéntame en qué estás trabajando. Te respondo con un alcance concreto, un precio cerrado y una fecha de inicio.",
   },
   primaryCta: {
     en: "Contact About a Project",

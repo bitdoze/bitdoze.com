@@ -5,12 +5,20 @@ export interface CategoryMeta {
   intro: string;
 }
 
+export interface CategoryEntry {
+  en: CategoryMeta;
+  es: CategoryMeta;
+  /** Hand-picked pillar guides (EN slugs — ES twins resolved via translationKey)
+   * shown as "Start here" picks on category archive page 1. */
+  startHere?: string[];
+}
+
 /**
  * Per-category label and hub-page intro copy for both locales.
  * Keys must match the taxonomy slugs enforced by the content schema
  * (see AGENTS.md "Categories & Tags Taxonomy").
  */
-export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>> = {
+export const categoryMeta: Record<string, CategoryEntry> = {
   ai: {
     en: {
       label: "AI",
@@ -22,6 +30,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Guías prácticas para ejecutar herramientas de IA por tu cuenta: agentes, LLMs, servidores MCP, asistentes de código y voz con IA — probadas en hardware y VPS reales.",
     },
+    startHere: ["ai-programming-beginners-guide", "opencode-setup-guide", "agno-get-start"],
   },
   "self-hosting": {
     en: {
@@ -34,6 +43,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Aplicaciones en Docker, paneles como Dokploy y Coolify, proxies inversos, monitorización y home labs — cada guía muestra un despliegue que funciona.",
     },
+    startHere: ["dokploy-install", "coolify-install-heroku-alternative", "install-uptime-kuma"],
   },
   linux: {
     en: {
@@ -46,6 +56,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Herramientas de línea de comandos, configuración de shell, SSH y tareas de administración — comandos listos para copiar con cada opción explicada.",
     },
+    startHere: ["best-fish-shell-plugins", "crowdsec-secure-server", "add-new-drive-lvm"],
   },
   "web-development": {
     en: {
@@ -58,6 +69,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Astro, frameworks, sitios estáticos y constructores de sitios — guías prácticas y comparaciones para lanzar proyectos web rápidos y baratos.",
     },
+    startHere: ["astro-i18n-localization", "astro-7-faster-builds", "add-contact-form-astro"],
   },
   wordpress: {
     en: {
@@ -70,6 +82,11 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Instalación, optimización y herramientas de WordPress y WooCommerce — desde el hosting hasta la configuración práctica.",
     },
+    startHere: [
+      "install-wordpress-docker",
+      "speed-up-wordpress-with-cloudflare-varnish-and-redis",
+      "secure-wordpress-2fa",
+    ],
   },
   hosting: {
     en: {
@@ -82,6 +99,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Proveedores VPS, CDNs y paneles de hosting analizados y medidos — precios y rendimiento reales, sin exageraciones.",
     },
+    startHere: ["hetzner-cloud-review", "digitalocean-vs-vultr-vs-hetzner", "dockge-install"],
   },
   tools: {
     en: {
@@ -94,6 +112,7 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Apps de productividad, utilidades SEO y gestores de paquetes — reseñas directas y guías de configuración de herramientas reales.",
     },
+    startHere: ["git-commands", "bun-package-manager", "block-ads-malware-dns-protection"],
   },
   gadgets: {
     en: {
@@ -106,6 +125,11 @@ export const categoryMeta: Record<string, Record<SupportedLocale, CategoryMeta>>
       intro:
         "Monitores, docks, audio y hardware de escritorio — especificaciones relevantes, pruebas reales y recomendaciones honestas.",
     },
+    startHere: [
+      "best-thunderbolt-5-docks-guide",
+      "best-32-inch-oled-monitors-guide",
+      "best-tb5-nvme-enclosures",
+    ],
   },
 };
 
@@ -116,4 +140,8 @@ export function getCategoryMeta(slug: string, locale: SupportedLocale): Category
       intro: "",
     }
   );
+}
+
+export function getCategoryStartHere(slug: string): string[] {
+  return categoryMeta[slug]?.startHere ?? [];
 }

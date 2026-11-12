@@ -7,8 +7,9 @@ const LINK_HEADERS = [
   `</.well-known/mcp/server-card.json>; rel="mcp-server-card"`,
 ].join(", ");
 
-// Note: markdown content negotiation (Accept: text/markdown) and No-Vary-Search
-// are handled by functions/_middleware.js on Cloudflare Pages at runtime.
+// Note: in production the same Link headers ship from `public/_headers` on `/`
+// (the Pages Function that did Accept: text/markdown negotiation was removed —
+// markdown URLs are still discoverable via <link rel="alternate"> and /md/*).
 // This middleware only runs during `astro dev` and must not read request.headers
 // to avoid the Astro prerender warning.
 export const onRequest = defineMiddleware(async (context, next) => {

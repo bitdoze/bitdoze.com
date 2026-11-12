@@ -69,12 +69,12 @@ spacing:
   2xl: "48px"
 components:
   button-primary:
-    backgroundColor: "{colors.terminal-blue}"
+    backgroundColor: "{colors.terminal-blue-deep}"
     textColor: "#ffffff"
     rounded: "{rounded.md}"
     padding: "8px 16px"
   button-primary-hover:
-    backgroundColor: "{colors.terminal-blue-deep}"
+    backgroundColor: "{colors.terminal-blue-ink}"
     textColor: "#ffffff"
   button-outline:
     backgroundColor: "{colors.paper}"
@@ -82,7 +82,7 @@ components:
     rounded: "{rounded.md}"
     padding: "8px 16px"
   cta-hero:
-    backgroundColor: "{colors.terminal-blue}"
+    backgroundColor: "{colors.terminal-blue-deep}"
     textColor: "#ffffff"
     rounded: "{rounded.lg}"
     padding: "16px 32px"
@@ -123,10 +123,10 @@ Explicitly rejected (PRODUCT.md anti-references): the ad-cluttered tutorial farm
 **Key Characteristics:**
 
 - Light-first with a designed dark twin (console palette), swapped via CSS variables.
-- One blue voice; indigo only ever appears next to it, never alone.
+- One blue voice; solid deep-blue buttons only (indigo gradient deprecated, solid #2563eb everywhere).
 - Flat by default, lift on intent — shadows and scale answer state, not decoration.
 - The code block is the most respected element on the page.
-- Four self-hosted variable faces, latin subsets only: Chivo for headings, Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Speed is still a feature: fonts are preloaded, mono only fetched where code appears.
+- Four self-hosted variable faces, latin subsets only: Chivo for headings, Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Display/serif/sans preloaded; mono only on pages that render a code block (`Layout.astro:preloadMono`, PostLayout/NewsLayout pass `true`).
 
 ## 2. Colors
 
@@ -134,11 +134,11 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 
 ### Primary
 
-- **Terminal Blue** (#3b82f6): the brand voice. Links on hover, tags, primary buttons, active nav states. Deep step (#2563eb) for hover; ink step (#1d4ed8) for text on tint backgrounds.
+- **Terminal Blue** (#3b82f6): the brand voice for accents and non-text UI. **Solid buttons use the deep step (#2563eb) at rest** — white on #3b82f6 is 3.68:1 FAIL, white on #2563eb is 5.17 PASS. Hover steps to ink (#1d4ed8) for text on tint backgrounds. Links use the wash, not solid blue text.
 
 ### Secondary
 
-- **Indigo Spark** (#6366f1): appears only as Terminal Blue's partner on the hero CTA and the nav highlight pill (a blue→indigo gradient). Never used alone, never on body elements.
+- **Indigo Spark** (#6366f1): historical blue→indigo CTA gradient — now deprecated. The shipped system is solid deep-blue buttons everywhere; indigo appears nowhere in current components. Kept in this doc for token compatibility; do not use in new UI.
 
 ### Tertiary
 
@@ -156,7 +156,7 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 
 ### Named Rules
 
-**The One Voice Rule.** Terminal Blue is the only brand hue on any screen. Indigo Spark exists solely inside the blue→indigo CTA gradient; if it appears anywhere else, it's wrong.
+**The One Voice Rule.** Terminal Blue is the only brand hue on any screen. Solid deep-blue (#2563eb) is the button voice (white 5.17 PASS; #3b82f6 3.68 FAIL). Indigo Spark is deprecated — do not use in new UI.
 
 **The Dark Twin Rule.** Every light token has a console counterpart, and dark mode must be designed with the same care as light — no pure black, no inverted-wash grays, contrast re-verified per pair.
 
@@ -175,9 +175,9 @@ Article sizes are defined on `[data-post-body]` in `global.css`, not through pro
 - **Display** (700, 3rem → 3.5rem, line-height 1.1, letter-spacing -0.02em): homepage hero headline only.
 - **Post title (H1)** (700, `clamp(2rem, …, 3.125rem)` = 32px mobile → 50px, line-height 1.08, letter-spacing -0.02em).
 - **Section (H2)** (700, 24px → 32px, line-height 1.2, -0.02em), with a hairline divider above every H2 after the first.
-- **Subsection (H3)** (650, 20px → 23px, line-height 1.3). **H4** (650, 18px, line-height 1.35).
+- **Subsection (H3)** (650, 22px → 25px, line-height 1.3). **H4** (650, 18px, line-height 1.35).
 - **Title** (700, 1.25rem, line-height 1.375): card titles, clipped to two lines.
-- **Body** (400, 17px mobile → 18px from md → 19px from 2xl, line-height 1.7) in softened reading ink `#4b5563` (`--color-text-reading`, ~7.5:1 on Paper); prose links render in the same ink at weight 500 — the underline and blue wash carry the link signal. Aleo's large x-height means these sizes read a step bigger than their px value. The measure is ~48 characters on phones and ~75 on desktop.
+- **Body** (400, 17px mobile → 18px from md → 19px from 2xl, line-height 1.7) in reading ink `#374151` (`--color-text-reading`, ~10:1 on Paper); prose links render in the same ink at weight 500 — the underline and blue wash carry the link signal. Aleo's large x-height means these sizes read a step bigger than their px value. The measure is ~48 characters on phones and ~75 on desktop.
 - **Label** (500, 0.75rem, line-height 1.5): tag chips, dates, metadata.
 - **Code** (400, 13px mobile → 14px blocks; 0.8em inline chips at weight 450).
 
@@ -207,9 +207,9 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 ### Buttons
 
 - **Shape:** gently curved (6px radius, `rounded-md`).
-- **Primary:** Terminal Blue fill, white text, medium weight, padding 8px 16px (md size), ambient-low shadow.
-- **Hover / Focus:** deepens to Terminal Blue Deep over 200ms ease-in-out; focus gets a visible ring. Outline variant swaps fill for a 2px Terminal Blue border and hover tint of blue-50.
-- **Hero CTA:** the one flamboyant element allowed — blue→indigo gradient, generous padding (16px 32px), 8px radius, semibold, ambient-high shadow; on hover it scales to 1.05 and the gradient deepens. One per page, always the primary action.
+- **Primary:** Terminal Blue Deep (#2563eb) fill, white text (5.17 PASS), medium weight, padding 8px 16px (md size), ambient-low shadow.
+- **Hover / Focus:** deepens to Terminal Blue Ink (#1d4ed8) over 200ms; focus gets a visible ring. Outline variant swaps fill for a 2px deep-blue border and hover tint of blue-50.
+- **Hero CTA:** solid deep-blue, generous padding (16px 32px), 8px radius, semibold, ambient-low shadow. One per page, always the primary action. No gradient (deprecated).
 
 ### Chips
 

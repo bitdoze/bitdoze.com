@@ -1,9 +1,13 @@
+import { getYoutubeMeta } from "@utils/youtube";
+
 type RawVideo = {
   id: string;
   title: string;
   published: Date;
   thumbnail: string;
   url: string;
+  /** "14:20"-style duration, when src/data/youtube-meta.json knows it */
+  duration?: string;
 };
 
 const feedCache = new Map<string, Promise<RawVideo[]>>();
@@ -17,6 +21,24 @@ function decodeEntities(value: string): string {
     .replace(/&#39;/g, "'");
 }
 
+/** ISO-8601 duration (PT14M20S) → "14:20" for the thumbnail badge */
+function formatDuration(iso?: string): string | undefined {
+  if (!iso) return undefined;
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso);
+  if (!m) return undefined;
+  const h = Number(m[1] ?? 0);
+  const min = Number(m[2] ?? 0);
+  const s = Number(m[3] ?? 0);
+  const totalMin = h * 60 + min;
+  if (totalMin === 0 && s === 0) return undefined;
+  return `${totalMin}:${String(s).padStart(2, "0")}`;
+}
+
+function withDuration(v: RawVideo): RawVideo {
+  const duration = formatDuration(getYoutubeMeta(v.id).duration);
+  return duration ? { ...v, duration } : v;
+}
+
 async function loadFallback(): Promise<RawVideo[]> {
   try {
     const data = await import("./youtube-fallback.json");
@@ -27,13 +49,15 @@ async function loadFallback(): Promise<RawVideo[]> {
       thumbnail?: string;
       url?: string;
     }>;
-    return list.map((v) => ({
-      id: v.id,
-      title: v.title,
-      published: new Date(v.published),
-      thumbnail: v.thumbnail || `https://img.youtube.com/vi/${v.id}/hqdefault.jpg`,
-      url: v.url || `https://www.youtube.com/watch?v=${v.id}`,
-    }));
+    return list.map((v) =>
+      withDuration({
+        id: v.id,
+        title: v.title,
+        published: new Date(v.published),
+        thumbnail: v.thumbnail || `https://img.youtube.com/vi/${v.id}/hqdefault.jpg`,
+        url: v.url || `https://www.youtube.com/watch?v=${v.id}`,
+      })
+    );
   } catch {
     return [];
   }
@@ -58,13 +82,15 @@ async function loadChannelFeed(channelId: string): Promise<RawVideo[]> {
     let match: RegExpExecArray | null;
     while ((match = videoRegex.exec(xmlText)) !== null) {
       const [, videoId, title, published] = match;
-      videos.push({
-        id: videoId,
-        title: decodeEntities(title),
-        published: new Date(published),
-        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-      });
+      videos.push(
+        withDuration({
+          id: videoId,
+          title: decodeEntities(title),
+          published: new Date(published),
+          thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+        })
+      );
     }
 
     if (videos.length === 0) {

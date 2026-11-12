@@ -15,6 +15,9 @@ import { join, relative } from "path";
 const ROOT = process.cwd();
 const POSTS_DIR = join(ROOT, "src", "content", "posts");
 const DRY_RUN = process.argv.includes("--dry-run");
+// --tags-only: keep existing categories, only normalize tags (safe pass for
+// already-migrated frontmatter — skips the heuristic category inference).
+const TAGS_ONLY = process.argv.includes("--tags-only");
 
 const ALLOWED_CATEGORIES = new Set([
   "ai",
@@ -643,15 +646,17 @@ function main() {
     const title = getField(fm, "title");
     const stem = stemOf(file);
 
-    const category = inferCategory(stem, title, oldCats, oldTags);
+    const category = TAGS_ONLY
+      ? oldCats[0] || "tools"
+      : inferCategory(stem, title, oldCats, oldTags);
     if (!ALLOWED_CATEGORIES.has(category)) {
       throw new Error(`Invalid category "${category}" for ${file}`);
     }
 
     const tags = normalizeTags(oldTags, category);
-    const newCats = [category];
+    const newCats = TAGS_ONLY ? oldCats : [category];
 
-    const catsSame = oldCats.length === 1 && oldCats[0] === category;
+    const catsSame = newCats.length === oldCats.length && newCats.every((c, i) => c === oldCats[i]);
     const tagsSame =
       oldTags.length === tags.length && oldTags.every((t, i) => toKebab(t) === tags[i]);
 

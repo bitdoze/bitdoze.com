@@ -32,6 +32,12 @@ export async function GET(context: APIContext) {
         categories,
       };
     }),
+    xmlns: { atom: "http://www.w3.org/2005/Atom" },
+    customData: [
+      "<language>es</language>",
+      `<lastBuildDate>${new Date().toUTCString()}</lastBuildDate>`,
+      `<atom:link href="${context.site || siteConfig.url}/es/rss.xml" rel="self" type="application/rss+xml" />`,
+    ].join(""),
     stylesheet: "/rss/styles.xsl",
   });
 }

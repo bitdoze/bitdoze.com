@@ -25,8 +25,10 @@ export function isPostIdInLocale(id: string, locale: SupportedLocale): boolean {
 }
 
 export function getPostLocale(post: CollectionEntry<"posts">): SupportedLocale {
-  // Path is the single source of truth: es/ prefix → Spanish.
-  return getLocaleFromSlug(getEntrySlug(post));
+  // Path is the single source of truth: the collection entry id is derived from
+  // the file location, so es/ files are Spanish. (Canonical/slug are URL inputs —
+  // a bad canonical must never relabel which locale archive a post belongs to.)
+  return getLocaleFromSlug(post.id);
 }
 
 export function getPostTranslationKey(post: CollectionEntry<"posts">): string {

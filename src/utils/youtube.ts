@@ -90,9 +90,15 @@ export function getYoutubeEmbedUrl(rawUrl: string): string | null {
  * Get the default thumbnail URL (without checking availability)
  * Useful for sync contexts where async isn't available
  */
+// IDs ytimg can't serve (playlist embeds, deleted/private videos). ytimg 404s
+// abort remote image generation at build, so keep these on the placeholder —
+// and if a build dies on a ytimg 404, the video is gone: remove the embed or
+// add its ID here.
+const NO_THUMBNAIL_IDS = new Set(["videoseries", "29RUDkQI6pc"]);
+
 export function getYoutubeThumbnailSync(rawUrl: string): string {
   const id = extractYoutubeVideoId(rawUrl);
-  if (!id) return PLACEHOLDER_THUMBNAIL;
+  if (!id || NO_THUMBNAIL_IDS.has(id)) return PLACEHOLDER_THUMBNAIL;
   return `${YOUTUBE_THUMB_BASE}${id}/${DEFAULT_THUMBNAIL}`;
 }
 

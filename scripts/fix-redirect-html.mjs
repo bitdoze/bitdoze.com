@@ -11,7 +11,7 @@
  * Usage: node scripts/fix-redirect-html.mjs [distDir]
  */
 import { readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 const DIST = process.argv[2] || "dist";
 
@@ -36,7 +36,7 @@ function isRedirectStub(html) {
   );
 }
 
-function wrapRedirect(html) {
+function wrapRedirect(html, filePath) {
   // Strip doctype if present; we'll re-add a full document.
   let body = html.replace(/<!doctype html>/i, "").trim();
 
@@ -62,8 +62,11 @@ function wrapRedirect(html) {
     headInner = `<meta charset="utf-8">\n${headInner}`;
   }
 
+  // ES redirect stubs live under dist/es/ — pass the locale through.
+  const lang = filePath.includes(`${sep}es${sep}`) ? "es" : "en";
+
   return `<!doctype html>
-<html lang="en" data-pagefind-ignore>
+<html lang="${lang}" data-pagefind-ignore>
 <head>
 ${headInner}
 </head>
@@ -80,7 +83,7 @@ let fixed = 0;
 for (const file of files) {
   const raw = readFileSync(file, "utf8");
   if (!isRedirectStub(raw)) continue;
-  writeFileSync(file, wrapRedirect(raw));
+  writeFileSync(file, wrapRedirect(raw, file));
   fixed++;
   console.log(`fixed redirect html: ${relative(process.cwd(), file)}`);
 }

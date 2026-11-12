@@ -63,9 +63,7 @@ export const lessonThumbnail = (lesson: CourseLesson): string => {
 /** Full-res 1280×720 thumbnail for og:image / social cards. */
 export const lessonOgImage = (lesson: CourseLesson): string => {
   const id = lessonVideoId(lesson);
-  return id
-    ? `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`
-    : "/images/youtube-placeholder.jpg";
+  return id ? `https://i.ytimg.com/vi/${id}/maxresdefault.jpg` : "/images/youtube-placeholder.jpg";
 };
 
 type CoursePostEntry = {
@@ -94,9 +92,7 @@ export function resolveRelatedPosts(
   context: string
 ): RelatedPost[] {
   if (!slugs?.length) return [];
-  const bySlug = new Map<string, CoursePostEntry>(
-    posts.map((post) => [getEntrySlug(post), post])
-  );
+  const bySlug = new Map<string, CoursePostEntry>(posts.map((post) => [getEntrySlug(post), post]));
   return slugs.map((slug) => {
     const post = bySlug.get(slug);
     if (!post) {

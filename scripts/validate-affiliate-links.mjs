@@ -56,6 +56,58 @@ async function inspect(directory) {
   }
 }
 if (process.argv.includes("--dist")) await inspect(path.join(root, "dist"));
+
+// Disclosure ordering: AGENTS.md requires an affiliate disclosure above the
+// first affiliate link in every article. Scans the MDX source (outside code
+// fences) and fails when a /go/ or go.bitdoze.com link precedes the first
+// disclosure block/line — or when none exists at all.
+const DISC_TITLE = /(affiliate disclosure|divulgaci[oó]n de afiliados|aviso de afiliados?)/i;
+const DISC_LINE = /^(\*\*?)?\*?(Disclosure|Divulgación|Divulgacion|Aviso de afiliados?):/i;
+const GO_LINK = /["'(]\/go\//;
+const GBC_LINK = /go\.bitdoze\.com\//;
+
+async function* walkPosts(dir) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) yield* walkPosts(file);
+    else if (/\.mdx?$/.test(entry.name)) yield file;
+  }
+}
+
+async function checkDisclosures() {
+  const postsDir = path.join(root, "src/content/posts");
+  for await (const file of walkPosts(postsDir)) {
+    const lines = (await readFile(file, "utf8")).split("\n");
+    let fmEnd = -1;
+    if (lines[0]?.trim() === "---") {
+      for (let i = 1; i < lines.length; i++)
+        if (lines[i].trim() === "---") {
+          fmEnd = i;
+          break;
+        }
+    }
+    let inCode = false,
+      firstAff = -1,
+      discLine = -1;
+    for (let i = fmEnd + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (l.trim().startsWith("```")) inCode = !inCode;
+      if (inCode) continue;
+      if (firstAff < 0 && (GO_LINK.test(l) || GBC_LINK.test(l))) firstAff = i;
+      if (discLine < 0 && (DISC_TITLE.test(l) || DISC_LINE.test(l.trim()))) discLine = i;
+    }
+    if (firstAff < 0) continue;
+    const rel = path.relative(root, file);
+    if (discLine < 0) errors.push(`${rel}: affiliate links but no disclosure block`);
+    else if (discLine > firstAff)
+      errors.push(
+        `${rel}: disclosure (line ${discLine + 1}) comes after first affiliate link (line ${firstAff + 1})`
+      );
+  }
+}
+
+if (!process.argv.includes("--dist")) await checkDisclosures();
+
 if (errors.length) {
   console.error("Affiliate link validation failed:\n" + errors.join("\n"));
   process.exitCode = 1;

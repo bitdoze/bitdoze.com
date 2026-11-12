@@ -15,7 +15,7 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 
 ## Commands
 
-- **dev**: `bun run dev` - Start development server on localhost:4321
+- **dev**: `bun run dev` - Start development server on localhost:4322
 - **build**: `bun run build:ci` - Build for production
 - **preview**: `bun run preview` - Preview production build
 - **no tests**: No test scripts configured in package.json
@@ -39,6 +39,14 @@ Before any UI/design work, read **PRODUCT.md** (strategy: brand register, web pl
 - **Imports**: Use path aliases, group by external/internal
 - **Types**: Define schema with Zod for content collections
 - **Frontmatter**: Required title, description, image, authors[]; optional meta_title; **exactly one** `categories` value from the allowed list, 1–3 `tags`
+- **quickAnswer** (optional): 1–2 line command/result shown as a green "Quick result" box above the article body — gives the DevOps reader the answer in 3s. Use **only** on install/config/fix guides that end in a verifiable terminal result (e.g. `quickAnswer: "docker compose up -d → all 3 containers healthy on :3000"`). Never on reviews, comparisons, or listicles — leave it unset there.
+- **testedOn** (optional, ≤4 entries): environments the guide was verified on (e.g. `testedOn: ["Ubuntu 24.04", "Docker 27.3"]`) — renders as a mono "Tested on" line in the post meta. Hand-filled only, never auto-generated.
+- **timeToComplete** (optional): real-world time the guide takes (e.g. `"15 min"`) — replaces reading time in the meta line when set.
+
+## Dates & Refresh Policy
+
+- `date:` = original publish date, restored from git history (`node scripts/restore-post-dates.mjs`). Never bump it on refresh.
+- Refresh = edit `lastmod:` only. `date` staying put is what keeps `datePublished` honest.
 
 ## Content Guidelines for Bitdoze Articles
 
@@ -112,7 +120,7 @@ Daily AI & tech news digests live in the `news` content collection. An external 
 ### File rules
 
 - One file per day: `src/content/news/YYYY-MM-DD.mdx` (e.g. `2026-08-20.mdx`) → published at `/news/YYYY-MM-DD/`.
-- **Rolling window of 10**: the site keeps only the newest 10 digests — when adding a new file, delete the oldest so `src/content/news/` holds at most 10 files. All surfaces (hub, digest pages, RSS, sitemap) are capped by `NEWS_DIGEST_LIMIT` in `src/utils/news.ts`; expired URLs 404 by design.
+- **Rolling window of 10**: only the newest 10 digests exist site-wide — when adding a new file, delete the oldest so `src/content/news/` holds at most 10 files AND append the pruned date to `scripts/expired-news.json` so its `/news/<date>/` URL keeps 301ing to `/news/` via `sync-redirects.mjs` (files past the window on disk get the same treatment automatically).
 - English only. Never edit past digests except factual corrections.
 - **No images** — no cover image, no inline images. Ever.
 - Frontmatter (schema-enforced, see `newsCollection` in `src/content.config.ts`):

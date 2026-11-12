@@ -4,7 +4,12 @@ import { tf } from "@i18n/ui";
 import { getEntryHref } from "@utils/content";
 import type { SupportedLocale } from "@utils/i18n";
 import { getAllAuthors, getPostsByLocale, type Post } from "@utils/postsCache";
-import { absoluteUrl, getUniqueTaxonomyValues, toTaxonomySlug } from "@utils/slugs";
+import {
+  absoluteUrl,
+  buildArchivePath,
+  getUniqueTaxonomyValues,
+  toTaxonomySlug,
+} from "@utils/slugs";
 import { localePathExists } from "@utils/translationMap";
 
 export type TaxonomyField = "tags" | "categories" | "authors";
@@ -86,6 +91,33 @@ export async function getTaxonomyPagePaths(field: TaxonomyField, locale: Support
         props: { name: value, posts: valuePosts, page, count: valuePosts.length },
       }));
   });
+}
+
+/**
+ * Reciprocal EN/ES/x-default hreflang for a taxonomy index page
+ * (/tags/<t>/, /authors/<a>/) — emitted only when the counterpart page exists.
+ */
+export async function taxonomyIndexHreflangs(
+  locale: SupportedLocale,
+  field: TaxonomyField,
+  slug: string,
+  site: string | URL | undefined
+) {
+  const enPath = buildArchivePath(field, slug, "en");
+  const esPath = buildArchivePath(field, slug, "es");
+  const enHref = absoluteUrl(enPath, site);
+  const esHref = absoluteUrl(esPath, site);
+  const hasOther = await localePathExists(
+    locale === "es" ? enPath : esPath,
+    locale === "es" ? "en" : "es"
+  );
+  return hasOther
+    ? [
+        { lang: "en", href: enHref },
+        { lang: "es", href: esHref },
+        { lang: "x-default", href: enHref },
+      ]
+    : [];
 }
 
 /** Localized title/schema/hreflang data shared by the EN and ES category index routes */

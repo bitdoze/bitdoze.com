@@ -1,5 +1,6 @@
 import { getCollection, type CollectionEntry } from "astro:content";
 import { isPostIdInLocale, type SupportedLocale } from "@utils/i18n";
+import { toTaxonomySlug } from "@utils/slugs";
 
 export type Post = CollectionEntry<"posts">;
 
@@ -33,6 +34,29 @@ export function getPostsByLocale(locale: SupportedLocale): Promise<Post[]> {
   }
   return byLocale[locale]!;
 }
+
+const tagCounts: Partial<Record<SupportedLocale, Promise<Map<string, number>>>> = {};
+
+/** Per-locale tag slug → post count, for tag-chip and archive decisions. */
+export function getTagCounts(locale: SupportedLocale): Promise<Map<string, number>> {
+  if (!tagCounts[locale]) {
+    tagCounts[locale] = getPostsByLocale(locale).then((posts) => {
+      const counts = new Map<string, number>();
+      for (const post of posts) {
+        for (const tag of post.data.tags ?? []) {
+          const key = toTaxonomySlug(tag);
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+      }
+      return counts;
+    });
+  }
+  return tagCounts[locale]!;
+}
+
+/** Newest-first date comparator — the one sort order used across the build. */
+export const byDateDesc = (a: Post, b: Post) =>
+  new Date(b.data.date || 0).getTime() - new Date(a.data.date || 0).getTime();
 
 export type Author = CollectionEntry<"authors">;
 

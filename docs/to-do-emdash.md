@@ -68,26 +68,26 @@ Each point maps to an article below. Answer these directly and honestly; that is
 
 ### Tier 1: publish first (high volume, core path)
 
-- [ ] **1. `emdash-cms-review`**: "EmDash CMS Review: Is Cloudflare's WordPress Successor Ready? (2026)"
+- [x] **1. `emdash-cms-review`**: "EmDash CMS Review: Is Cloudflare's WordPress Successor Ready? (2026)"
   - _Target:_ emdash cms (1.9k), cloudflare emdash (1.6k), emdash cloudflare (2.4k), what is emdash cms, emdash cms reddit.
   - _Why:_ The hub/pillar article, and the one every other post links back to. Existing reviews are April first impressions. Bitdoze can review it after six months, with 1.0 in view.
   - _Cover:_ what it is (Astro + DB-backed admin + Live Content Collections), who it is for and not for (the docs' own "reasons to choose another approach"), architecture diagram, templates (blog, marketing, portfolio, starter, blank), plugins/sandbox, MCP, x402, deploy targets (Workers+D1+R2 vs Node+SQLite/Postgres/libSQL). Include project health (stars, releases, npm downloads, Cloudflare blog case study), a pros/cons table, and a verdict per persona (agency, Astro dev, WP refugee, blogger).
-  - _Frontmatter:_ tags `emdash`, `astro`, `cloudflare`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "1"]`, `categories: ["web-development"]`, tags `emdash`, `astro`, `cloudflare`.
   - _Internal links:_ best-headless-cms-for-astro, astro-vs-wordpress, self-hosted-apps-cloudflare-workers.
   - _YouTube:_ "I Tested Cloudflare's WordPress Killer for 6 Months" (12–15 min). Admin walkthrough, editing and publishing, plugin permission prompt, MCP demo teaser. Thumbnail: "WordPress Killer?"
 
-- [ ] **2. `emdash-cms-tutorial`**: "EmDash CMS Tutorial: Create Your First Site Step by Step"
+- [x] **2. `emdash-cms-tutorial`**: "EmDash CMS Tutorial: Create Your First Site Step by Step"
   - _Target:_ emdash cms tutorial, emdash install, emdash cms demo.
   - _Why:_ The getting-started docs are good but short. A beginner tutorial with screenshots ranks well and feeds the video.
   - _Cover:_ Node 22.16+ check, `bun create emdash@latest` (show npm too), scaffolder choices, `/_emdash/admin` setup wizard, passkey registration, a tour of Posts/Pages/Media/Menus/Widgets, publish an edit, how `astro.config.mjs` / `src/live.config.ts` / `seed/seed.json` / `.env` (`EMDASH_ENCRYPTION_KEY`) fit together, and the first `getEmDashCollection("posts")` query. End with "next: deploy" (#3 / #4).
-  - _Frontmatter:_ `series: ["EmDash CMS", "1"]`, tags `emdash`, `astro`, `bun`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "2"]`, tags `emdash`, `astro`, `npm`.
   - _YouTube:_ "EmDash CMS Tutorial for Beginners (Zero to Published in 10 Minutes)". Screen-record the whole flow in real time. Thumbnail: "EmDash in 10 Min".
 
 - [ ] **3. `deploy-emdash-cloudflare-workers`**: "Deploy EmDash CMS to Cloudflare Workers (D1 + R2, Free Tier)"
   - _Target:_ emdash cloudflare (2.4k), cloudflare emdash free, cloudflare emdash hosting.
   - _Why:_ The highest-volume keyword, and the "default" path. Readers want real limits and costs, not just `wrangler deploy`.
   - _Cover:_ template vs existing site, the `wrangler.jsonc` bindings (`DB`, `MEDIA`, `LOADER`, cron), the Worker entry (`createScheduledHandler`, `PluginBridge`), `wrangler deploy`, custom domain route, Targeted Placement near the D1 primary, KV object cache, Workers Cache with `routeRules` (and the "logged-in editors see the cached page" gotcha), public R2 domain (never expose the `backups/` prefix), Images billing limit, Cloudflare Email Sending for magic links, secrets via `wrangler secret put`, and preview environments. Add a free vs paid Workers table.
-  - _Frontmatter:_ `series: ["EmDash CMS", "2"]`, tags `emdash`, `cloudflare`, `cloudflare-workers`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "3"]`, tags `emdash`, `cloudflare`, `cloudflare-workers`.
   - _Internal links:_ deploy-astrojs-cloudflare, build-astro-blog-free, astro-plausible-cloudflare-workers.
   - _YouTube:_ "Host a WordPress-Style CMS for $0 on Cloudflare". Thumbnail: "$0 CMS Hosting".
 
@@ -95,7 +95,7 @@ Each point maps to an article below. Answer these directly and honestly; that is
   - _Target:_ emdash cms docker, emdash docker compose, emdash hosting ($12.51 CPC).
   - _Why:_ It answers the lock-in objection directly, and nobody has a solid guide. This is Bitdoze's self-hosting strength.
   - _Cover:_ Node adapter config, the official Dockerfile plus a compose file with a named volume, `node --env-file` vs host env, SQLite WAL (no NFS/SMB), a Postgres variant (role/ownership requirements), S3/R2/Bunny media (`s3()` env vars), the **`workerd` sandbox runner on Node** (prove sandboxed plugins work off-Cloudflare), the scheduler needs an always-on process, health check, `emdash migrate --check`, and Traefik/Dokploy/Coolify deploy variants. Show a VPS sizing note.
-  - _Frontmatter:_ `series: ["EmDash CMS", "3"]`, `categories: ["self-hosting"]`, tags `emdash`, `docker`, `astro`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "4"]`, `categories: ["self-hosting"]`, tags `emdash`, `docker`, `astro`.
   - _Internal links:_ dokploy-install, dokploy-docker-compose-app, coolify-install-heroku-alternative, traefik-proxy-docker, deploy-astro-easypanel, bunny-storage-vs-s3-vs-backblaze, digitalocean-vs-vultr-vs-hetzner (hosting affiliate angle).
   - _YouTube:_ "No Cloudflare Needed: Self-Host EmDash with Docker". Thumbnail: "EmDash on Docker".
 
@@ -113,7 +113,7 @@ Each point maps to an article below. Answer these directly and honestly; that is
   - _Target:_ migrate wordpress to emdash, emdash exporter plugin, emdash wordpress.
   - _Why:_ The "only posts and pages" claim is common and partly wrong. Test it on a real WP site (use the Docker WP from install-wordpress-docker with ACF + Yoast + Gutenberg + shortcodes).
   - _Cover:_ WXR vs EmDash Exporter comparison table, the application-password flow, collection/field mapping, authors → bylines, taxonomies, the media step (SHA-1 dedupe), what breaks (shortcodes, page builders, WooCommerce, scheduled posts become drafts), a redirects plan, the pre-cutover verification checklist, and porting the theme with `getEmDashEntry` + `PortableText`.
-  - _Frontmatter:_ `series: ["EmDash CMS", "4"]`, tags `emdash`, `wordpress`, `migration`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "5"]`, tags `emdash`, `wordpress`, `migration`.
   - _Internal links:_ wordpress-to-astro-migration, es/migracion-wordpress-a-astro, export-wordpress-post-urls-titles.
   - _YouTube:_ "I Migrated a WordPress Site to EmDash: What Broke". Thumbnail: "WP → EmDash".
 
@@ -121,7 +121,7 @@ Each point maps to an article below. Answer these directly and honestly; that is
   - _Target:_ emdash astro (90), astro emdash cms, emdash cms astro, astro cms (480).
   - _Why:_ Bitdoze's Astro audience already has sites. The key decision is SSR vs prerender and what happens to MDX content.
   - _Cover:_ install the integration, `output: "server"` vs hybrid prerender (pages stay static until rebuild), Live Content Collections vs the existing file collections side by side, `getEmDashCollection` filters/pagination/drafts/`cacheHint`, `emdash-env.d.ts` types, and when **not** to (file-based MDX blogs like Bitdoze itself).
-  - _Frontmatter:_ `series: ["EmDash CMS", "5"]`, tags `emdash`, `astro`, `typescript`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "6"]`, tags `emdash`, `astro`, `typescript`.
   - _Internal links:_ astro-7-faster-builds, astro-ssg-build-optimization, astro-db-bunny-database.
   - _YouTube:_ Short-to-mid (8 min): "Give Your Astro Site a WordPress-Like Admin".
 
@@ -129,35 +129,35 @@ Each point maps to an article below. Answer these directly and honestly; that is
   - _Target:_ long tail (emdash collections, field types, emdash menus, widgets).
   - _Why:_ Moves readers from "blog" to "real site". Build something concrete, like a **tools directory** or **product reviews** collection with custom fields, taxonomy, and a menu.
   - _Cover:_ collections vs content model, field types, adding fields to a live site (existing entries get no value), taxonomies, menus, widget areas, sections/blocks, page layouts, site settings, exporting the model as a seed file, `emdash types`, and schema evolution on a deployed site.
-  - _Frontmatter:_ `series: ["EmDash CMS", "6"]`, tags `emdash`, `astro`, `cms`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "7"]`, tags `emdash`, `astro`, `cms`.
   - _YouTube:_ "Build a Custom Directory Site with EmDash".
 
 - [ ] **9. `emdash-cms-plugins`**: "EmDash Plugins: How They Work + Best Plugins to Install"
   - _Target:_ emdash plugins (140), cloudflare emdash plugins, emdash plugin marketplace, emdash cms plugin forms.
   - _Why:_ Plugin security is EmDash's headline feature and the second most searched sub-topic.
   - _Cover:_ sandboxed vs native (trust boundary table), the capability/permission prompt, installing from the registry vs `astro.config.mjs`, sandbox runners on Workers vs Node (`workerd`), upgrading plugins, and a curated list from emdashcms.org (forms/email, audit log, bulk upload, visitor stats, AI Search, Cloudflare Email) with the audit verdict shown on each. Explain what "AI-reviewed / Warning" audit badges mean.
-  - _Frontmatter:_ `series: ["EmDash CMS", "7"]`, tags `emdash`, `plugins`, `cloudflare-workers` (keep `security` out; it is a retired label).
+  - _Frontmatter:_ `series: ["EmDash CMS", "8"]`, tags `emdash`, `plugins`, `cloudflare-workers` (keep `security` out; it is a retired label).
   - _YouTube:_ "EmDash Plugins Can't Hack Your Site: Here's Why".
 
 - [ ] **10. `build-emdash-plugin`**: "Build Your First EmDash Plugin in TypeScript"
   - _Target:_ emdash plugin development, emdash plugin (long tail); developer audience.
   - _Why:_ Almost no third-party tutorials exist. The best candidate for backlinks and GitHub traffic.
   - _Cover:_ choose a format, `emdash-plugin` CLI, manifest + capabilities, hooks (e.g. auto-generate excerpt or ping IndexNow on publish), storage + settings (secret settings use `EMDASH_ENCRYPTION_KEY`), API routes, Block Kit admin UI, local test, bundling/publishing to emdashcms.org, and automated releases. Publish the plugin on GitHub as a companion repo.
-  - _Frontmatter:_ `series: ["EmDash CMS", "8"]`, tags `emdash`, `typescript`, `plugins`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "9"]`, tags `emdash`, `typescript`, `plugins`.
   - _YouTube:_ "Coding an EmDash Plugin from Scratch" (live-coding, 15–20 min).
 
 - [ ] **11. `emdash-mcp-ai-content`**: "Manage Your EmDash Site with AI: MCP Server + Claude, Codex, ChatGPT"
   - _Target:_ emdash mcp, emdash claude, emdash ai (noisy but 8.1k).
   - _Why:_ Bitdoze's AI audience is large, and the built-in MCP server is a real differentiator.
   - _Cover:_ `/_emdash/api/mcp`, OAuth vs personal access tokens, connecting Claude custom connectors / `codex mcp add` / ChatGPT developer mode / Droid, trimming scopes on the consent page, role limits (Admin/Editor/Author/Contributor), and real prompts (draft post, alt-text all images, rebuild menu, compare draft vs live, add a field). Safety workflow: contributor-role token, drafts only, human publishes. Also cover the Docs MCP for coding agents.
-  - _Frontmatter:_ `series: ["EmDash CMS", "9"]`, `categories: ["ai"]`, tags `emdash`, `mcp`, `claude`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "10"]`, `categories: ["ai"]`, tags `emdash`, `mcp`, `claude`.
   - _Internal links:_ mcp-introduction-beginners, opencode-setup-guide, hermes-agent-setup-guide.
   - _YouTube:_ "My AI Agent Runs My CMS Now" (shows the agent writing and publishing a draft). Thumbnail: "AI Runs My CMS".
 
 - [ ] **12. `emdash-themes-templates`**: "EmDash Themes and Templates: Use, Customize and Create Your Own"
   - _Target:_ emdash themes (50), em dash cms templates, emdash cms themes, emdash website builder.
   - _Cover:_ the official templates (blog / marketing / portfolio / starter / blank, plus Cloudflare variants), marketplace themes (e.g. Masthead), seed file format, building a Tailwind v4 theme, dark mode guide, and porting a WP theme (route/component mapping). EmDash is not a page builder; set that expectation up front.
-  - _Frontmatter:_ `series: ["EmDash CMS", "10"]`, tags `emdash`, `astro`, `tailwind`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "11"]`, tags `emdash`, `astro`, `tailwind`.
   - _YouTube:_ "Every EmDash Template Compared + Make Your Own".
 
 ### Tier 3: comparison, ops, and timely
@@ -172,7 +172,7 @@ Each point maps to an article below. Answer these directly and honestly; that is
 - [ ] **14. `emdash-production-checklist`**: "Running EmDash in Production: Backups, Updates, Secrets and Caching"
   - _Why:_ The "is it production-ready?" question, answered with ops detail. Great for returning readers.
   - _Cover:_ backups (SQLite backup command vs file copy, D1 time travel, automatic JSON backups in `backups/`), `EMDASH_ENCRYPTION_KEY` recovery + rotation, core migrations (`auto`/`check`/`manual`, CI), updating EmDash, schema evolution, object cache, auth hardening (passkeys, Cloudflare Access with role mapping, email setup for magic links), and site transfer. Include a printable checklist.
-  - _Frontmatter:_ `series: ["EmDash CMS", "11"]`, tags `emdash`, `backups`, `cloudflare`.
+  - _Frontmatter:_ `series: ["EmDash CMS", "12"]`, tags `emdash`, `backups`, `cloudflare`.
   - _Internal links:_ dokploy-backups-cloudflare-r2, zerobyte-restic-gui, pluton-self-hosted-backup.
 
 - [ ] **15. `emdash-hosting-cost`**: "How Much Does EmDash Cost to Host? Cloudflare vs VPS vs Managed"

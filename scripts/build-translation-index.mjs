@@ -44,10 +44,9 @@ const esByKey = new Map(es.map((p) => [p.translationKey, p]));
 // went stale (EN edited after the ES file was last touched).
 const lastCommit = new Map();
 try {
-  const log = execSync(
-    'git log --pretty="===%cs" --name-only -- "src/content/posts/"',
-    { encoding: "utf8" }
-  );
+  const log = execSync('git log --pretty="===%cs" --name-only -- "src/content/posts/"', {
+    encoding: "utf8",
+  });
   let cur = null;
   for (const line of log.split("\n")) {
     if (line.startsWith("===")) cur = line.slice(3);
@@ -89,7 +88,9 @@ if (orphans.length) {
   console.warn("WARNING: ES posts with no EN counterpart:", orphans.map((p) => p.slug).join(", "));
 }
 const seen = new Set();
-const dupes = es.filter((p) => (seen.has(p.translationKey) ? true : (seen.add(p.translationKey), false)));
+const dupes = es.filter((p) =>
+  seen.has(p.translationKey) ? true : (seen.add(p.translationKey), false)
+);
 if (dupes.length) {
   console.warn("WARNING: duplicate translationKey:", dupes.map((p) => p.translationKey).join(", "));
 }

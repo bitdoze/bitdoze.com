@@ -1,0 +1,312 @@
+---
+date: 2026-11-12T00:00:00Z
+translationKey: "rex-use-cases"
+title: "Casos de Uso de Rex: Agentes, Sesiones en el Móvil y Sandboxes en la Nube"
+meta_title: "Casos de Uso de Rex para Agentes de Código"
+description: "Flujos reales de testers en Rex: agentes dibujando diagramas en paneles divididos, Claude Code en un iPhone por Tailscale, sandboxes con rex-cloud y paneles en Lua."
+image: "@assets/images/26/11/rex-use-cases-cover.webp"
+imageAlt: "Flujos de trabajo y casos de uso de Rex con agentes en Mac, iPhone y la nube"
+categories: ["linux"]
+authors: ["Dragos"]
+tags: ["rex", "claude-code", "tailscale"]
+canonical: "https://www.bitdoze.com/es/casos-de-uso-rex/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+
+Mi [primer artículo sobre Superlogical Rex](/es/superlogical-rex/) explicaba cómo está construido el multiplexor de Mitchell Hashimoto: bytes PTY crudos enviados a cada cliente, un servidor que posee la sesión, configuración en Lua y una CLI scriptable. Cuando la beta aterriza en tu máquina, la pregunta cambia: ¿qué está haciendo la gente con Rex que no estuviera haciendo ya en tmux o Ghostty?
+
+La prueba pública se abrió el 5 de octubre de 2026 primero en macOS. Un mes después, la app de Mac y los servidores para Linux y FreeBSD ya están en manos de los testers, la app de iOS corre en TestFlight y el cliente de Windows sigue en pre-alfa. Rex sigue siendo gratuito, no pide cuenta y no recoge telemetría. Los flujos de abajo salen de la [documentación oficial del skill para agentes](https://www.superlogical.com/rex/docs/automate/agent-skill), de repositorios de la comunidad y de lo que los testers han ido compartiendo hasta mediados de noviembre de 2026.
+
+<Notice type="info" title="¿Nuevo en el modelo de sesiones de Rex?">
+  Sesión, ventana, bloque, cliente. Si esos cuatro sustantivos aún no te suenan, lee primero el briefing de arquitectura de octubre para ver en qué se diferencia Rex de tmux.
+
+  <Button text="Cómo está construido Rex" link="/es/superlogical-rex/" variant="solid" color="blue" size="sm" icon="arrow-right" iconPosition="right" />
+</Notice>
+
+## 1. Hacer que el agente dibuje la explicación en un panel dividido
+
+El flujo más sencillo de esta lista es también el primero que yo probaría.
+
+Mientras trabajaba en los conectores de bloques plegados de `@pierre/diffs`, [Amadeus](https://x.com/amadeus/status/2120673662156354002) se cansó de leer párrafos interminables del agente intentando justificar una refactorización. Como Rex soporta el protocolo de gráficos Kitty (incluso en conexiones remotas), el agente puede abrir un panel al lado y dibujar lo que está explicando. Su prompt es una sola frase:
+
+```text
+i don't quite understand what you're saying, can you create a diagram using kitty graphics protocol in a rex pane in this tab?
+```
+
+El agente divide la pestaña, pinta el diagrama en el panel nuevo y sigue conversando en la columna central. En el caso de Amadeus, ver el esquema visual de cómo se unen o cortan las líneas movidas y editadas dejó claro al instante que la simplificación que proponía Claude iba a borrar un comportamiento que la arquitectura sí necesitaba. Le paró los pies y el agente retiró la propuesta antes de tocar el commit.
+
+![Ventana de Rex de Amadeus: código a la izquierda, Claude Code en el centro y un diagrama con gráficos Kitty a la derecha mostrando cómo se unen los conectores de diffs](@assets/images/26/11/rex-amadeus-kitty-diagram.webp)
+
+Otras dos implementaciones llevan los gráficos en terminal dentro de Rex un paso más allá:
+
+- **Gráficas interactivas en WebAssembly dentro de un split.** [Patrick Smith](https://x.com/patrickgwsmith/status/2120663608040571127) renderiza gráficas interactivas directamente dentro de un panel de Rex con QIP, su runtime de componentes WebAssembly, con navegación por cursores y cambio de escala lineal/logarítmica.
+- **Imágenes inline en Claude Code y TUIOS.** Claude Code puede mostrar imágenes en línea cuando defines `CLAUDE_CODE_FORCE_TERMINAL_IMAGES` (Wassim Metallaoui [publicó un plugin de marketplace](https://github.com/wassimk/claude-marketplace) que lo deja configurado). Por su parte, [Gaurav Gosain](https://x.com/_GauravGosain/status/2120792628992344214) corre [tuios](https://github.com/Gaurav-Gosain/tuios) sobre una sesión remota de Rex desde el móvil por Tailscale, viendo gráficas PNG de benchmarks directamente dentro del hilo.
+
+![Patrick Smith renderizando una gráfica interactiva de ingresos dentro de un panel dividido de Rex mediante componentes WebAssembly de QIP](@assets/images/26/11/rex-qip-interactive-chart.webp)
+
+## 2. Dejar que el agente maneje el espacio de trabajo con `rex skill setup`
+
+Rex incluye un skill integrado para Claude Code, Codex, OpenCode y Pi. Sin él, un agente moderno puede ejecutar `rex --help` y descubrir la CLI a base de prueba y error, pero gasta tokens y tiempo en cada sesión haciéndolo.
+
+Al ejecutar `rex skill setup` (o elegir **Install Rex for Agents** desde la paleta de comandos con `Cmd+Shift+P`), Rex detecta qué agentes tienes instalados en la máquina y los configura:
+
+```sh
+rex skill setup
+rex skill setup --session-naming   # opcional: el agente nombra la sesión según la tarea
+rex skill status                   # comprobar si los skills y hooks están al día
+```
+
+Por debajo, el comando instala dos piezas:
+
+1. **El archivo del skill** (`~/.claude/skills/rex` para Claude Code, `~/.agents/skills/rex` para Codex, OpenCode y Pi). Lee su guía directamente del binario `rex` instalado, así que al actualizar Rex se actualiza lo que sabe el agente sin volver a correr el setup.
+2. **Un hook de inicio de sesión** (`~/.claude/settings.json` en Claude Code, `~/.codex/hooks.json` en Codex). Al arrancar una sesión, el hook le indica al agente que está dentro de Rex y cuál es su sesión y su bloque.
+
+Dos detalles importantes de la [documentación del skill](https://www.superlogical.com/rex/docs/automate/agent-skill): Codex ignora cualquier hook nuevo hasta que ejecutas `/hooks` una vez dentro de Codex y lo apruebas, y Claude Code no ejecuta hooks hasta que confías en la carpeta del proyecto. Si usas otro agente como Gemini CLI, Cursor Agent o Devin CLI, basta con pedirle que ejecute `rex skill show` y siga la guía impresa.
+
+| Qué le pides | Qué hace el agente |
+|---|---|
+| "Arranca el servidor de desarrollo en otra pestaña y avísame cuando esté listo." | Abre una pestaña en segundo plano sin robarte el foco y lee la pantalla hasta que el proceso dice que está escuchando. |
+| "Pasa los tests a tu lado y arregla lo que falle." | Divide la ventana actual, espera a que terminen los tests, lee los fallos de la pantalla y edita el código. |
+| "Ejecuta `\dt` en el panel de psql y dime qué tablas hay." | Escribe el comando y pulsa Return en tu bloque `psql` existente y lee el resultado. |
+| "Cambia mi Mac a esta sesión y haz el texto más grande." | Controla la interfaz de la app de Mac (requiere tener activado **Remote Control** en los ajustes de Rex). |
+| "Cierra todo lo que hayas abierto." | Cierra únicamente las pestañas y paneles que creó el agente, dejando los tuyos intactos. |
+
+Dónde actúa el agente depende de cómo lo pidas: decir "aquí" o "a tu lado" usa las variables `REX_SESSION` y `REX_BLOCK` del propio agente; decir "el panel con foco" apunta a la pestaña que estés mirando en la app; y dar el nombre de una etiqueta siempre tiene prioridad sobre ambos.
+
+```sh
+rex split
+rex capture -b logs --trim
+rex send -s build -w 2 'make test'
+rex -S studio ls
+```
+
+Varios testers ya están montando un segundo nivel de agentes encima de esto. [Luong Nguyen](https://x.com/luongnv89/status/2116677222492762513) creó un skill `/rex-agent` (junto con `agent-profile` en [github.com/luongnv89/skills](https://github.com/luongnv89/skills)) para levantar cuatro subagentes de Factory Droid en distintos proyectos desde la barra lateral, cada uno con su propio harness, modelo y nivel de razonamiento.
+
+![Barra lateral de Rex de Luong Nguyen ejecutando cuatro subagentes de Factory Droid en paralelo sobre distintos proyectos](@assets/images/26/11/rex-luong-subagents.webp)
+
+El vídeo de abajo enseña un patrón parecido con Pi: un pequeño CLI llamado `pi-agency` abre un bloque en Rex, lanza el agente trabajador y recoge la respuesta.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/zZYWQRE-0xs"
+  label="Rex como terminal remoto: sesiones persistentes y control de Pi desde otro harness"
+/>
+
+## 3. Ver qué agente está bloqueado esperándote (OSC 7501 y herramientas de la comunidad)
+
+Tener cinco agentes trabajando a la vez sirve de poco si tienes que ir pestaña por pestaña mirando cuál se ha quedado parado en un prompt de permisos. Rex lee la secuencia de escape [OSC 7501](https://www.superlogical.com/rex/docs/build/program-status), que un programa emite cuando está inactivo (`idle`), trabajando (`working`, con progreso opcional), bloqueado esperando confirmación (`blocked`), terminado (`done`) o en error (`failed`). Cuando Terraform se detiene en un `apply` o un agente pide permiso para correr un comando, Rex marca la pestaña sin foco y la sesión en la barra lateral, y puede lanzar una notificación de macOS o un badge en el Dock según el estado.
+
+Como OSC 7501 es una especificación abierta y no una API privada de Rex, otras herramientas ya la están adoptando: Bubble Tea de Charm la añadió, [Kristofer Lund la integró en aplicaciones Ratatui](https://x.com/kristoferlund/status/2120786400974983421) con `session.set_program_status(...)`, y Kitty 0.50+ también la interpreta.
+
+Tres proyectos de la comunidad se apoyan directamente en este sistema de estados y paneles:
+
+### rexlauncher: una bandeja única para agentes que te necesitan
+
+[rexlauncher, de Tornike Gomareli](https://x.com/tornikegomareli/status/2117012664048329058), abre un panel lanzador dentro de Rex con pestañas para `All`, `Needs you`, `Panes`, `Conversations`, `Screens`, `Skills`, `Layouts` y `Actions`. Cuando un agente pide permiso para ejecutar `make deploy ENV=staging` o hace una pregunta, aparece arriba del todo en `Needs you` para que puedas aprobar o responder desde el mismo sitio sin cambiar de pestaña.
+
+![Plugin rexlauncher de Tornike Gomareli dentro de Rex mostrando la cola Needs you con una aprobación de despliegue en línea](@assets/images/26/11/rex-launcher-plugin.webp)
+
+### Chompy: un cliente Android no oficial para aprobar comandos
+
+Como Superlogical aún no tiene cliente oficial para Android, [Jeff Arese escribió Chompy](https://x.com/jeffarese/status/2116553283611316573) para su propio flujo. Reúne los agentes de todos sus hosts en una sola lista ordenada por cuáles necesitan atención humana, permitiendo responder una pregunta o aprobar un comando desde el móvil sin abrir un terminal completo.
+
+### rexmod: revisión de diffs en Neovim junto al agente
+
+[rexmod, de Alpcan Aydın](https://github.com/alpcanaydin/rexmod) ([hilo con demo](https://x.com/alpcanaydin/status/2116891884157071503)), es el mod más completo hasta la fecha. Convierte una pestaña de Rex en un entorno de revisión de cuatro pasos alrededor de Claude Code, Codex, OpenCode, Pi o Antigravity CLI (`agy`):
+
+1. **Prompt.** Al enviar un mensaje, un hook del agente invoca el CLI en Go de `rexmod` para tomar una instantánea del árbol de trabajo usando un índice temporal de git (sin tocar tu índice real).
+2. **Cambio.** Mientras el agente edita archivos, un panel lateral nativo en Swift (`RexModPanel.dylib`, que muestras u ocultas con `Cmd+Shift+E`) enseña en **Last Turn** exactamente qué cambió en ese turno, junto a **Uncommitted**, **Branch**, un árbol de archivos y una pestaña **Info** con puertos abiertos y uso del plan.
+3. **Revisión.** Al hacer clic en un archivo, se abre en Neovim justo al lado del agente en la línea modificada, instalando al vuelo el parser tree-sitter y el servidor LSP con Mason si hace falta. Con `Space r` sobre una línea o selección dejas un comentario.
+4. **Feedback.** Tus comentarios pendientes se adjuntan automáticamente al siguiente mensaje que envíes al agente como notas `archivo:línea`, o puedes enviarlos al instante desde el panel.
+
+```sh
+brew trust --tap alpcanaydin/rexmod
+brew install alpcanaydin/rexmod/rexmod
+rexmod-setup
+```
+
+Un aviso importante: para incrustar su panel nativo dentro de la ventana de Rex, `rexmod` inyecta una carga de dylib en tu binario local de Rex, vuelve a firmar la app ad hoc, desactiva las actualizaciones de Sparkle y usa su propio LaunchAgent cada hora para descargar, verificar y re-parchear las versiones oficiales de Rex. Trae desinstalador (`~/Library/Application Support/rexmod/scripts/uninstall.sh`) y puedes pasar `--no-patch` si solo quieres los hooks y la integración con Neovim sin tocar el binario de Rex.
+
+![rexmod de Alpcan Aydın corriendo en Rex: Claude Code a la izquierda, Neovim en el centro y el panel de cambios Last Turn a la derecha](@assets/images/26/11/rex-rexmod-panel.webp)
+
+## 4. La misma sesión de Claude Code en tu iPhone por Tailscale
+
+Este es el caso de uso que hace que Rex se sienta distinto a "tmux, pero más bonito".
+
+El servidor de la app de macOS lleva su propio nodo de Tailscale integrado (`tsnet`); ni siquiera necesitas tener instalada la app de Tailscale para macOS en el Mac. Cuando emparejas el cliente de iOS desde TestFlight, se conecta directamente a las sesiones que ya están corriendo en tu escritorio: sin abrir puertos, sin reenvíos SSH y sin un historial de chat separado en el móvil.
+
+![Diagrama de Daniel San mostrando cómo la app de Rex en iPhone se conecta por un túnel WireGuard de Tailscale directamente al servidor Rex integrado en el Mac](@assets/images/26/11/rex-tailscale-iphone-flow.webp)
+
+[Daniel San documentó el paso a paso completo](https://x.com/dani_avila7/status/2119533029483749719), incluyendo un par de tropiezos habituales al configurar Tailscale por primera vez:
+
+1. **Inicia sesión en Tailscale desde Rex.** Abre los ajustes de Rex (`Cmd+,`), entra en **Server** y pulsa **Sign In** en la sección de Tailscale. Elige el nombre de host en ese momento (será tu dirección `nombre.tailnet.ts.net` y quedará registrado en los logs públicos de certificados cuando actives HTTPS). Deja **Tags** vacío.
+2. **No pulses Update Server ni Stop Server mientras trabajas.** Ambos botones en esa pantalla reinician el servidor local y cierran todas tus sesiones activas.
+3. **Activa los certificados HTTPS en el DNS de Tailscale.** Las tailnets nuevas vienen con los certificados HTTPS desactivados por defecto, lo que detiene Rex con el error `"HTTPS certificates are off for this tailnet"`. En la consola de administración de Tailscale, entra en **DNS**. Si quieres cambiar el nombre autogenerado `tailXXXXXX.ts.net` por uno más legible, pulsa **Rename tailnet** *antes* de activar HTTPS (una vez emitido el primer certificado, Tailscale bloquea el cambio). Después pulsa **Enable HTTPS**.
+4. **Vuelve a encender Tailscale pasando tu hostname.** Si lo activas desde el terminal, pasa siempre `--hostname`; de lo contrario, Rex renombra el nodo a `rex`:
+   ```sh
+   rex server tailscale on --hostname tu-mac
+   rex server status
+   ```
+5. **Empareja el iPhone con código QR.** Instala Tailscale desde la App Store en el iPhone con la misma cuenta y acepta la configuración VPN. En el Mac ejecuta `rex server tailscale pair`, y en la app de Rex del iPhone toca **Get Started → Pair via QR Code** para escanear el código del terminal.
+
+A partir de ahí, `rex client ls` muestra tu iPhone junto a la app del Mac con las mismas sesiones de Claude Code abiertas:
+
+- [Ravi Vasavan](https://x.com/ravivasavan/status/2120750557744996673) estuvo almorzando en Fremantle mientras corregía a Claude en una sesión que corría en su Mac Studio en Melbourne.
+- [Tuong Le](https://x.com/tuongaz/status/2120720507024867598) desinstaló la app móvil de Claude porque el control remoto de su sesión de escritorio era la única razón por la que la usaba.
+- [Victor Savkin](https://x.com/victorsavkin/status/2116893104359789036) comenta que Rex ya es la app que más usa tanto en el portátil como en el iPhone.
+- [Mikyo King](https://x.com/mikeldking/status/2120653238026535128) apunta la advertencia real: la interfaz móvil aún está verde comparada con la de Mac, y llevar todos tus agentes en el bolsillo hace bastante más difícil desconectar cuando estás viendo una serie en el sofá.
+
+## 5. Un servidor Linux o FreeBSD en la barra lateral
+
+Los hosts remotos en Rex no son sesiones SSH disfrazadas. En Linux y FreeBSD, la [documentación oficial de servidor](https://www.superlogical.com/rex/docs/linux/server-modes) ofrece tres modos de despliegue:
+
+| Modo | Servicio / comando | Corre como | Cuándo usarlo |
+|---|---|---|---|
+| **Personal** | `rex server start` (o cualquier comando `rex`) | Tu cuenta de usuario | Máquina de desarrollo o VPS de un solo usuario |
+| **Shared** | `rex.service` / `rex.socket` | Cuenta `rex` dedicada | Equipo pequeño de confianza compartiendo una misma cuenta |
+| **Login** | `rex-login-server.service` / `rex-login-server.socket` | `root` → cuenta de cada usuario vía PAM | Servidor multiusuario donde cada persona entra con su propio usuario del sistema |
+
+En el modo **Login** (`rex-login-server`), Rex consulta `/etc/rex/accounts.jsonc` (o `services.rex.loginServer` en NixOS), verifica la identidad de red de quien llama (por ejemplo `tailscale:alice@example.com`), abre una sesión de sistema real mediante PAM (`/etc/pam.d/rex-login-server`) aplicando límites de recursos y `systemd-logind`, y entrega la conexión al servidor Rex personal de ese usuario. La sesión aparece en `who`, y los servidores de cada cuenta siguen corriendo aunque `rex-login-server` se reinicie o se actualice. Ten en cuenta que hoy el servidor de login se basa en identidad de red como Tailscale y no usa contraseñas ni claves SSH todavía (el soporte para claves SSH existentes está en desarrollo).
+
+Desde tu Mac, un agente o script puede apuntar a cualquier servidor remoto con `-S`:
+
+```sh
+rex -S root@build.example.ts.net ls
+rex -S remote new build --json
+rex -S remote window new -s <session> tests --keep-open --json -- npm test
+rex -S remote capture -s <session> -b <block> --trim
+```
+
+[Sam Morgan](https://x.com/_smorgan/status/2119069969560285610) conecta su Mac a un servidor Linux de desarrollo para que los agentes abran paneles de tests y edición que él puede inspeccionar sin depender de Cursor. [Noppakorn Kaewsalabnil](https://x.com/PunGrumpy/status/2120776544192962942) mantiene sus sesiones remotas intactas incluso cuando la propia app de Rex se actualiza, y [Steve Yegge](https://x.com/Steve_Yegge/status/2108393181196722238) corrió Emacs con más de 20 agentes desde el Wi-Fi de un hotel al otro lado de EE. UU. sintiéndolo casi local.
+
+### Máquinas Linux efímeras en la nube con `rex-cloud`
+
+Si quieres darle una máquina Linux aislada a un agente sin montar un VPS, Vercel Labs ha publicado [rex-cloud](https://github.com/vercel-labs/rex-cloud) (un prototipo MIT independiente de Superlogical). Levanta una máquina virtual Ubuntu de 2 vCPUs y 4 GB de RAM en Vercel Sandbox con Node.js, Git, Claude Code y Codex preinstalados, y conecta el servidor Rex del sandbox a un socket Unix privado en tu Mac.
+
+![Ventana de Rex de Daniel San mostrando un host en la nube de Vercel Sandbox llamado remote en la barra lateral corriendo Claude Code sobre Ubuntu](@assets/images/26/11/rex-cloud-sidebar.webp)
+
+Daniel San [probó el flujo el 10 de noviembre](https://x.com/dani_avila7/status/2119986632451362925) y dejó anotados varios detalles prácticos que ahorran tiempo:
+
+1. **Actualiza Rex a la build 1758+ y reinicia el servidor local.** Usa **Rex → Install Update** (`Shift+Cmd+U`) y luego entra en **Settings → Server → Update Server…** para que el proceso servidor cargue la versión nueva (si no, Rex rechaza el socket del host cloud).
+2. **Instala y arranca `rex-cloud`.** Aún no está publicado en el registro de npm, así que se instala desde el tarball de la release en GitHub:
+   ```sh
+   npm install --global https://github.com/vercel-labs/rex-cloud/releases/download/v0.1.0-prototype.4/vercel-labs-rex-cloud-0.1.0-prototype.4.tgz
+   rex-cloud start remote
+   ```
+   Si tu shell exporta `VERCEL_ORG_ID` y `VERCEL_PROJECT_ID` de otro proyecto, límpialas antes (o ejecuta `rex-cloud setup`) para que `rex-cloud` cree su propio proyecto de seguimiento. La máquina está lista en unos 10 segundos.
+3. **Añade el socket a la barra lateral una sola vez.** En **Settings → Remote Hosts → Add Remote Host…**, pega como URL la ruta `/tmp/rex-cloud-.../sandbox-remote.sock` que imprime el comando y ponle de nombre `remote`. Esa ruta de socket se mantiene fija aunque pares y vuelvas a arrancar la máquina.
+4. **Gestiona el ciclo de vida del sandbox.** Como la VM en la nube no tiene navegador, la primera vez que ejecutas `claude` imprime una URL de login que abres en tu Mac para pegar el código de vuelta. A partir de ahí, las instantáneas de disco conservan tus repositorios clonados, herramientas instaladas y la sesión iniciada de Claude cuando paras la máquina:
+   ```sh
+   rex-cloud extend remote --by 2h   # ampliar tiempo sin cortar los procesos en marcha
+   rex-cloud stop remote             # parar el cómputo y guardar instantánea de disco
+   rex-cloud start remote            # arrancar desde la instantánea (~10s)
+   rex-cloud delete remote --yes     # borrar la máquina y sus instantáneas
+   ```
+
+Dos Macs con la misma cuenta de Vercel pueden conectarse simultáneamente a la misma máquina cloud en ejecución, o puedes pasar `--shared` para que otros miembros del mismo proyecto de Vercel entren a la misma sesión. Los límites siguen las tarifas de Vercel Sandbox:
+
+| Recurso | Hobby | Pro / Enterprise |
+|---|---|---|
+| Duración máxima por sesión | 45 minutos | 24 horas |
+| Cómputo | 5 horas al mes incluidas | $0.128 / hora |
+| Memoria | 420 GB-hora incluidos | $0.0212 / GB-hora |
+| Disco | 15 GB incluidos | $0.08 / GB-mes |
+
+## 6. Paneles laterales en Lua, eventos `rex.on` y paneles flotantes
+
+El archivo de configuración (`~/.config/rex/init.lua`) da para mucho más que atajos de teclado. Como las acciones definidas con `rex.action` pueden dividir paneles, invocar comandos y suscribirse a eventos del servidor con `rex.on`, los testers están montando sus propios paneles laterales sin esperar a que vengan en la interfaz por defecto.
+
+### `rex-extensions` de Luong Nguyen (`github`, `mcc`, `tabs`, `sshtab`)
+
+El mejor ejemplo open source ahora mismo es [luongnv89/rex-extensions](https://github.com/luongnv89/rex-extensions) ([hilo de demostración](https://x.com/luongnv89/status/2120667131033608400)). Incluye cuatro extensiones independientes, cada una con un script `install.js` que añade el `dofile(...)` y `rex.bind(...)` a tu `init.lua`, valida con `rex config check` y recarga la configuración al instante:
+
+- **`github` (`Cmd+Shift+G`):** Abre un panel lateral derecho con los pull requests e issues abiertos del repositorio actual en GitHub o GitLab (usando `gh` o `glab`). Cada fila tiene un botón para lanzar una revisión de PR o resolver un issue con un agente usando el perfil (harness, modelo, nivel de razonamiento) y prompt que elijas.
+- **`mcc` (`Cmd+Shift+U`):** Muestra en una franja inferior el consumo de cuota de 5 horas y semanal de Claude Code en múltiples cuentas de [mcc](https://github.com/luongnv89/mcc), junto con uso de CPU, memoria y red de la máquina. Como es un bloque normal de Rex, también se ve desde la app del iPhone.
+- **`tabs` (`Cmd+Shift+L`):** Etiqueta automáticamente cada sesión con el nombre de la máquina y cada pestaña con `carpeta · programa` (por ejemplo, `devbox` sobre `skills · claude`), funcionando incluso a través de SSH.
+- **`sshtab` (`Cmd+Alt+T`):** Cualquier pestaña o split nuevo que abras desde un panel conectado por SSH se conecta automáticamente a esa misma máquina remota con las mismas opciones. Además, su función **Restore Agent Sessions** detecta cuando Rex se reinicia y vuelve a escribir automáticamente el comando de reanudación (`claude --resume ...`, `codex resume <id>`, OpenCode, Cursor Agent o Pi) en cada panel durante los primeros 120 segundos.
+
+```sh
+git clone https://github.com/luongnv89/rex-extensions ~/.config/rex/rex-extensions
+node ~/.config/rex/rex-extensions/github/install.js
+node ~/.config/rex/rex-extensions/mcc/install.js
+node ~/.config/rex/rex-extensions/tabs/install.js
+node ~/.config/rex/rex-extensions/sshtab/install.js
+```
+
+Si quieres probar una extensión sin tocar tu `init.lua`, puedes ejecutarla directamente sobre tu sesión activa con `rex do ~/.config/rex/rex-extensions/github/rex-github.lua --action github_panel`.
+
+![Espacio de trabajo de Luong Nguyen en Rex con rex-extensions: Claude Code en el centro, el panel rex-github de PRs e issues a la derecha y la barra de cuota rex-mcc abajo](@assets/images/26/11/rex-luong-extensions.webp)
+
+### Scripts de eventos en vivo con `rex.on`
+
+Además de acciones puntuales, un script Lua lanzado con `rex do` puede escuchar eventos del servidor mediante [`rex.on`](https://www.superlogical.com/rex/docs/automate/lua-events) y quedarse corriendo en segundo plano. La documentación oficial incluye este ejemplo de 9 líneas que actualiza la etiqueta de cada bloque cada vez que cambias de directorio en el shell:
+
+```lua
+-- label.lua: etiquetar cada panel con el directorio actual
+rex.on("terminal.pwd_changed", function(ctx, ev)
+  local dir = ev.pwd:match("([^/]+)/?$")
+  rex.session.set_block_label{
+    block_id = ctx.block_id,
+    label    = dir,
+  }
+end)
+```
+
+### Paneles flotantes scriptables
+
+La [demo de paneles flotantes de Mitchell Hashimoto](https://x.com/mitchellh/status/2116296333506359646) enseña la versión oficial de una ventana scratch: paneles que flotan sobre el layout principal de tu editor, admiten sus propios splits internos (como una TUI de Git a la izquierda y dos shells Nu a la derecha) y se muestran u ocultan mediante atajo de teclado o API en Lua.
+
+![Demo de Mitchell Hashimoto de paneles flotantes en Rex: una TUI de Git Changes y dos shells divididos flotando sobre Neovim](@assets/images/26/11/rex-floating-panes.webp)
+
+Y si quieres que tu agente consulte la documentación de Rex, el changelog o hilos antiguos del Discord de la beta sin salir del terminal, Superlogical ofrece un [servidor MCP comunitario](https://www.superlogical.com/rex/docs/beta/community-mcp) protegido con OAuth de Discord. Daniel San [resumió qué incluye](https://medium.com/@dan.avila7/superlogical-mcp-puts-the-rex-docs-changelog-and-discord-threads-in-your-claude-code-session-886af7fc88c1): solo recuerda llamarlo `superlogical` y no `rex` al registrarlo para no chocar con el skill de la CLI `rex`.
+
+## Qué caso de uso probar primero
+
+| Si quieres... | Qué necesitas | Sáltatelo si... |
+|---|---|---|
+| Hacer que el agente dibuje diagramas junto al chat | Beta de Mac + un agente que pueda ejecutar `rex split` | Solo lees scrollback de texto plano |
+| Dejar que Claude Code o Codex corran tests y servidores en splits | `rex skill setup` (y aprobar `/hooks` en Codex) | Tu agente no puede ejecutar comandos locales |
+| Consultar o dirigir sesiones de escritorio desde el iPhone | Build de TestFlight en iOS + HTTPS en Tailscale + emparejamiento QR | Usas Android (mira el cliente no oficial Chompy) |
+| Tener un servidor Linux o FreeBSD como host local en la barra lateral | Servidor Rex en Linux/FreeBSD + Tailscale | Necesitas servidor en Windows (sigue en pruebas internas) |
+| Levantar una VM Linux efímera en la nube en 10 segundos | Rex 1758+, cuenta de Vercel, [rex-cloud](https://github.com/vercel-labs/rex-cloud) | Tus tareas duran más que el límite del plan o el proceso vivo debe sobrevivir a un `stop` |
+| Panel de PRs, barra de cuota de Claude o auto-reanudar agentes tras reinicio | [luongnv89/rex-extensions](https://github.com/luongnv89/rex-extensions) + Node 20+ | Prefieres usar únicamente lo que viene de serie en la UI oficial |
+
+## Aristas que los testers siguen encontrando
+
+Rex publica actualizaciones casi a diario, así que varios de estos puntos cambiarán pronto, pero son las limitaciones reales en noviembre de 2026:
+
+- **Un reinicio del servidor local conserva el layout pero pierde los procesos en marcha.** Al actualizar el servidor de Rex en el Mac, los paneles vuelven como shells vacíos. [Penn](https://x.com/bubbleinpit/status/2120748195508883468) contaba que tener que reanudar a mano una docena de agentes tras cada actualización le hizo volver a orquestadores dedicados. Instalar `sshtab` de `rex-extensions` (`restore_agent_sessions`) soluciona buena parte de esta fricción en Claude Code y Codex reescribiendo el comando de resume al arrancar, aunque la persistencia nativa de procesos entre actualizaciones del servidor solo existe hoy en los servidores por usuario de `rex-login-server` en Linux.
+- **La interfaz de iOS va por detrás de la de Mac.** Conectar por Tailscale y responder a un agente funciona muy bien, pero la UX móvil todavía está claramente en fase temprana.
+- **`rexmod` parchea el binario local de Rex.** Inyectar una dylib y sustituir el actualizador Sparkle por un LaunchAgent propio está genial para cacharrear el fin de semana, pero no para imponerlo en el flujo de un equipo.
+- **`rex-cloud` guarda el disco, no la memoria.** Cuando un sandbox de Vercel se detiene o alcanza su tiempo límite, el repositorio y el login de Claude se conservan en la instantánea de disco, pero los procesos en ejecución y el scrollback desaparecen.
+- **Sin broadcast de teclado todavía.** Varios testers echaron en falta la función de iTerm2 para escribir a la vez en varios paneles; aún no existe.
+- **Los clientes de escritorio para Windows y Linux siguen en cola.** Los servidores para Linux y FreeBSD ya se pueden instalar hoy, mientras que el cliente de Windows (que Alasdair Monk enseñó en pre-alfa el 5 de noviembre) y la app de escritorio de Linux siguen en desarrollo interno.
+
+## FAQ
+
+<Accordion label="¿Necesito leer primero el artículo de arquitectura de Rex?" group="faq">
+  Solo si quieres entender el porqué técnico. Esta guía da por hecho que sabes que Rex es emulador de terminal y multiplexor en una sola app (basada en libghostty) donde un servidor en segundo plano mantiene vivas las sesiones. Lee el [artículo de arquitectura de octubre](/es/superlogical-rex/) para los detalles sobre el streaming PTY, las reglas de objetivos de la CLI y el modelo de acciones en Lua.
+</Accordion>
+
+<Accordion label="¿Qué agentes funcionan con rex skill setup?" group="faq">
+  `rex skill setup` configura directamente Claude Code (`~/.claude/skills/rex` + hook en settings), Codex (`~/.agents/skills/rex` + hooks), OpenCode y Pi. Cualquier otro agente que pueda ejecutar comandos de shell puede correr `rex skill show` para leer las instrucciones y manejar Rex mediante la CLI `rex`.
+</Accordion>
+
+<Accordion label="¿En qué se diferencia la app de Rex para iPhone de la app móvil de Claude?" group="faq">
+  La app de Rex para iOS es un cliente de terminal conectado a tu servidor Rex en el Mac o en Linux a través de Tailscale. Estás viendo y escribiendo exactamente en los mismos paneles en vivo de Claude Code, Codex, Neovim o bash que corren en tu ordenador, con acceso completo a tus archivos y herramientas locales.
+</Accordion>
+
+<Accordion label="¿Es rex-cloud un producto oficial de Superlogical?" group="faq">
+  No. [rex-cloud](https://github.com/vercel-labs/rex-cloud) es un prototipo experimental con licencia MIT creado por Vercel Labs. Instala el servidor Linux de Rex dentro de una máquina virtual de Vercel Sandbox y lo expone mediante un socket Unix privado en tu Mac. El consumo que supere las horas incluidas lo factura Vercel Sandbox, no Superlogical.
+</Accordion>
+
+<Accordion label="¿Dónde consigo acceso a la beta de Rex?" group="faq">
+  Apúntate en la [nota de inicio de pruebas públicas](https://www.superlogical.com/updates/public-testing-beginning). Las invitaciones llevan saliendo en oleadas desde octubre, y una vez dentro del Discord de Rex Beta también puedes registrarte para la build de iOS en TestFlight y usar el servidor MCP comunitario de Superlogical.
+</Accordion>
+
+## Dónde encaja Rex frente a los demás multiplexores
+
+Rex es la apuesta de que el multiplexor debe ser el propio emulador de terminal, y de que un agente debe poder automatizar cada split, pestaña y estado igual que una persona. Si prefieres un plano de control open source para agentes que corra dentro del terminal que ya usas, revisa mi [reseña de Herdr](/es/herdr-multiplexor-agentes/), los [mejores clientes Herdr](/es/mejores-clientes-herdr/) y los [mejores plugins Herdr](/es/mejores-plugins-herdr/). Si buscas sesiones gestionadas por servidor con bloques nativos (grafo de Git, SQLite, Kanban) en macOS, Linux y Windows, lee mi [análisis de Tern](/es/terminal-tern/). Y para ver todo el panorama cara a cara, tienes la [comparativa de los mejores multiplexores de terminal](/es/mejores-multiplexores-terminal/).

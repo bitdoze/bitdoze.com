@@ -23,6 +23,10 @@ export function codeBlockHeader() {
 
       const lang = String(this.options.lang ?? "text").toLowerCase();
       const label = LANG_LABELS[lang] ?? lang;
+      // ```lang title="docker-compose.yml" → filename shown beside the lang chip,
+      // DigitalOcean-style: readers know which file the block belongs in.
+      const meta = String(this.options.meta?.__raw ?? "");
+      const filename = meta.match(/title="([^"]+)"/)?.[1];
 
       root.children = [
         {
@@ -41,6 +45,16 @@ export function codeBlockHeader() {
                   properties: { className: ["code-block-lang"] },
                   children: [{ type: "text", value: label }],
                 },
+                ...(filename
+                  ? [
+                      {
+                        type: "element",
+                        tagName: "span",
+                        properties: { className: ["code-block-filename"] },
+                        children: [{ type: "text", value: filename }],
+                      },
+                    ]
+                  : []),
               ],
             },
             pre,
@@ -81,6 +95,12 @@ export function trimTokenStyles() {
       const m = style.match(COLOR_STYLE);
       if (!m) continue;
       const color = m[1].toLowerCase();
+      // github-dark's comment gray (#6a737d on #24292e) is 3.04:1 — fails WCAG
+      // AA. Rewrite it to #9ca3af (~5.9:1); a subtle tone shift, same hue.
+      if (color === "#6a737d") {
+        child.properties.style = style.replace(m[0], `color: #9ca3af`);
+        continue;
+      }
       if (defaultFg && color === defaultFg) {
         const rest = style.replace(m[0], "").replace(/^[;\s]+|[;\s]+$/g, "");
         if (rest) child.properties.style = rest;
@@ -116,22 +136,14 @@ export function trimTokenStyles() {
   return {
     name: "bitdoze:trim-token-styles",
     root(root) {
-      // Resolve the theme's default foreground color
-      const themes = this.options?.themes;
-      const theme =
-        themes && typeof themes === "object" ? Object.values(themes)[0] : this.options?.theme;
-      const defaultFg =
-        typeof theme === "object" && theme
-          ? (
-              theme.fg ??
-              theme.settings?.find?.(
-                (s) => !s.scope || (Array.isArray(s.scope) && s.scope.length === 0)
-              )?.settings?.foreground
-            )?.toLowerCase?.()
-          : typeof theme === "string"
-            ? undefined
-            : undefined;
-      visit(root, defaultFg ?? null);
+      // The default foreground is the `color` Shiki paints on <pre> — this works
+      // whether the theme is a name ("github-dark") or an object, unlike
+      // probing this.options.themes/theme (undefined for string themes).
+      const pre = root.children?.find((n) => n.type === "element" && n.tagName === "pre");
+      const m = COLOR_STYLE.exec(
+        typeof pre?.properties?.style === "string" ? pre.properties.style : ""
+      );
+      visit(root, m?.[1]?.toLowerCase() ?? null);
     },
   };
 }
@@ -143,6 +155,76 @@ const FILENAME_LIKE = /\.(png|jpe?g|webp|gif|svg|avif)$/i;
  * The caption is a <span> after the <img> (a <figcaption> can't live inside <p>), aria-hidden so
  * screen readers don't hear the alt twice. Must run before Astro's image marker, which strips alt.
  */
+const AFFILIATE_LINK = /^\/go\/|:\/\/go\.bitdoze\.com\//;
+
+/**
+ * Satteri hast plugin: affiliate links must be declared `rel="sponsored"` for
+ * search-engine compliance (Google policy). Adds it to any <a> pointing at a
+ * /go/ redirect page or go.bitdoze.com, merging with rel values already present.
+ */
+export const affiliateLinkRel = {
+  name: "bitdoze:affiliate-link-rel",
+  element: {
+    filter: ["a"],
+    visit(node, ctx) {
+      const href = typeof node.properties?.href === "string" ? node.properties.href : "";
+      if (!AFFILIATE_LINK.test(href)) return;
+      const rel = new Set(
+        String(node.properties.rel ?? "")
+          .split(/\s+/)
+          .filter(Boolean)
+      );
+      rel.add("sponsored");
+      rel.add("nofollow");
+      ctx.setProperty(node, "rel", [...rel].join(" "));
+    },
+  },
+};
+
+/**
+ * Satteri hast plugin: GFM task-list checkboxes render as bare disabled
+ * <input>s with no label — axe `label` violation. Give each box an
+ * aria-label built from the item's text so the text labels the box.
+ */
+export const taskListLabels = {
+  name: "bitdoze:task-list-labels",
+  element: {
+    filter: ["input"],
+    visit(node, ctx) {
+      if (node.properties?.type !== "checkbox") return;
+      const li = ctx.parent(node);
+      if (!li || li.tagName !== "li") return;
+      const text = ctx.textContent(li).trim();
+      ctx.setProperty(node, "ariaLabel", text || "Task list item");
+    },
+  },
+};
+
+/**
+ * Satteri hast plugin: wrap every <table> in a keyboard-scrollable
+ * <div class="table-scroll" role="region" tabindex="0"> so overflowing tables
+ * are scrollable by keyboard and get an accessible name. PostLayout's script
+ * adds .is-scrollable when scrollWidth > clientWidth (mask only when needed).
+ */
+export const tableScrollWrapper = {
+  name: "bitdoze:table-scroll",
+  element: {
+    filter: ["table"],
+    visit(node, ctx) {
+      ctx.wrapNode(node, {
+        type: "element",
+        tagName: "div",
+        properties: {
+          className: ["table-scroll"],
+          role: "region",
+          tabIndex: 0,
+          ariaLabel: "Scrollable table",
+        },
+      });
+    },
+  },
+};
+
 export const imageCaptions = {
   name: "bitdoze:image-captions",
   element: {

@@ -4,6 +4,7 @@
  * Uses facade pattern: shows thumbnail + play button, loads iframe only on interaction
  * Significantly improves Core Web Vitals by deferring ~1MB of YouTube JS
  */
+import { getImage } from "astro:assets";
 import {
   extractYoutubeVideoId,
   getYoutubeEmbedUrl,
@@ -19,9 +20,11 @@ interface Props {
   description?: string;
   uploadDate?: string | Date;
   duration?: string;
+  /** LCP case (course lesson player): load thumbnail eagerly at high priority. */
+  eager?: boolean;
 }
 
-const { url, label, className, description, uploadDate, duration } = Astro.props;
+const { url, label, className, description, uploadDate, duration, eager = false } = Astro.props;
 
 const embedUrl = getYoutubeEmbedUrl(url);
 const thumbnail = getYoutubeThumbnailSync(url);
@@ -43,6 +46,15 @@ if (uploadDateRaw) {
   uploadDateIso = Number.isNaN(parsedDate.getTime()) ? undefined : parsedDate.toISOString();
 }
 const durationIso = duration ?? videoMeta.duration;
+
+// Self-host the thumbnail through the asset pipeline when possible. ytimg
+// 404s (deleted/private videos) must not fail the build — fall back to the
+// hotlinked URL and let the browser handle it.
+const canOptimize = thumbnail.startsWith("https://") && !thumbnail.includes("placehold");
+const optimizedThumb = canOptimize
+  ? await getImage({ src: thumbnail, width: 480, height: 360, format: "webp" }).catch(() => null)
+  : null;
+const thumbSrc = optimizedThumb?.src ?? thumbnail;
 
 const videoSchema =
   isPlayable && videoId
@@ -76,13 +88,17 @@ const videoSchema =
     disabled={!isPlayable}
     data-video-title={label}
   >
-    {/* Thumbnail Image - Using native img for compatibility with playlists and remote URLs */}
+    {/* Thumbnail is self-hosted WebP when the asset pipeline could optimize it
+        (frontmatter getImage), else the raw ytimg/placeholder URL — the JSON-LD
+        thumbnailUrl above always keeps the canonical ytimg URL. */}
     <img
-      src={thumbnail}
+      src={thumbSrc}
+      srcset={optimizedThumb?.srcSet?.attribute}
       alt={label}
-      width="1280"
-      height="720"
-      loading="lazy"
+      width="480"
+      height="360"
+      loading={eager ? "eager" : "lazy"}
+      fetchpriority={eager ? "high" : "auto"}
       decoding="async"
       class="h-full w-full object-cover"
     />
@@ -159,18 +175,17 @@ const videoSchema =
       }
     });
 
-    // Handle touch events explicitly for mobile
-    document.addEventListener(
-      "touchend",
-      (event) => {
-        const trigger = (event.target as Element)?.closest("[data-youtube-trigger]");
-        if (trigger instanceof HTMLButtonElement && trigger.dataset.embedUrl) {
-          event.preventDefault();
-          activateVideo(trigger);
-        }
-      },
-      { passive: false }
-    );
+    // Handle touch events explicitly for mobile. Bound per-trigger (not on
+    // document) and passive — the click handler does the preventDefault work.
+    document.querySelectorAll<HTMLButtonElement>("[data-youtube-trigger]").forEach((trigger) => {
+      trigger.addEventListener(
+        "touchend",
+        () => {
+          if (trigger.dataset.embedUrl) activateVideo(trigger);
+        },
+        { passive: true }
+      );
+    });
 
     // Keyboard activation (Enter and Space for accessibility)
     document.addEventListener("keydown", (event) => {

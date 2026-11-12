@@ -16,6 +16,9 @@ export const redirects = {
 
   // Slug fixes (old paths were linked from posts/external shares)
   "/ai-coading-tools/": "/ai-coding-tools/",
+  "/go/gmktec-n150/": "/go/beelink-mini-s13/",
+  "/uptime-kuma-tool/": "/install-uptime-kuma/",
+  "/es/herramienta-uptime-kuma/": "/es/instalar-uptime-kuma/",
   "/astro-vs-nextjs-vs-tanstack-start-which-wins/":
     "/astro-vs-nextjs-vs-tanstack-start-which-wins-2026/",
 

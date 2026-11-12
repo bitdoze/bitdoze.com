@@ -52,12 +52,26 @@ const postsCollection = defineCollection({
                 .replace(/^-+|-+$/g, "")
             )
             .filter(Boolean);
-          return [...new Set(cleaned)].slice(0, 3);
+          const unique = [...new Set(cleaned)];
+          // Hard fail (not silent truncation) so the author picks the 3 most
+          // specific tags — truncation used to drop the specific one (§7.6).
+          if (unique.length > 3) {
+            throw new Error(
+              `tags: ${unique.length} tags after normalization (${unique.join(", ")}) — keep the 3 most specific`
+            );
+          }
+          return unique;
         }),
       series: z.tuple([z.string(), z.string()]).optional(),
       translationKey: z.string().optional(),
       canonical: z.url().optional(),
       draft: z.boolean().optional(),
+      /** Opt-in quick answer — 1-2 line command/result shown as a success Notice above prose (install/config guides only). */
+      quickAnswer: z.string().optional(),
+      /** Hand-filled proof of testing — environments the guide was verified on (e.g. ["Ubuntu 24.04", "Docker 27.3"]). Never auto-generated. */
+      testedOn: z.array(z.string()).max(4).optional(),
+      /** Hand-filled real-world time the guide takes (e.g. "15 min") — replaces reading time in the meta line when set. */
+      timeToComplete: z.string().optional(),
     }),
 });
 

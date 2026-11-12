@@ -8,7 +8,7 @@ test("public/_redirects matches src/config/redirects.mjs", async () => {
   const committed = await readFile(new URL("../public/_redirects", import.meta.url), "utf8");
   assert.equal(
     committed,
-    renderRedirects(redirects),
+    await renderRedirects(redirects),
     "public/_redirects is stale — edit src/config/redirects.mjs and run `node scripts/sync-redirects.mjs`"
   );
 });

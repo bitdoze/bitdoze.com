@@ -50,13 +50,16 @@ const extractVideosFromBody = (
       const playerUrl = `https://www.youtube.com/embed/${videoId}`;
       const thumbnail = getYoutubeThumbnailSync(rawUrl);
       const description = fallbackDescription || label;
+      // Match the on-page VideoObject: the real YouTube upload date from
+      // youtube-meta.json wins; the post date is only a fallback.
+      const uploadDate = getYoutubeMeta(videoId).uploadDate ?? publicationDate;
 
       return {
         title: label,
         description,
         thumbnail,
         playerUrl,
-        publicationDate: publicationDate?.toISOString(),
+        publicationDate: uploadDate ? new Date(uploadDate).toISOString() : undefined,
       };
     })
     .filter(isDefined);

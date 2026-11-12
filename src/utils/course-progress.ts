@@ -54,11 +54,9 @@ export function initCourseProgress(courseSlug: string, lessonSlug?: string): voi
   const total = totalAttr ? parseInt(totalAttr, 10) : items.length;
   const count = Math.min(visited.size, total || visited.size);
 
-  scope
-    .querySelectorAll<HTMLElement>("[data-progress-label]")
-    .forEach((el) => {
-      el.textContent = `${count}/${total} watched`;
-    });
+  scope.querySelectorAll<HTMLElement>("[data-progress-label]").forEach((el) => {
+    el.textContent = `${count}/${total} watched`;
+  });
 
   scope.querySelectorAll<HTMLElement>("[data-progress-fill]").forEach((bar) => {
     const pct = total > 0 ? Math.round((count / total) * 100) : 0;

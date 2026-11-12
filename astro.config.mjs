@@ -4,7 +4,14 @@ import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import { satteri } from "@astrojs/markdown-satteri";
 import icon from "astro-icon";
-import { codeBlockHeader, imageCaptions, trimTokenStyles } from "./src/utils/markdown-plugins.mjs";
+import {
+  affiliateLinkRel,
+  codeBlockHeader,
+  imageCaptions,
+  tableScrollWrapper,
+  taskListLabels,
+  trimTokenStyles,
+} from "./src/utils/markdown-plugins.mjs";
 import { redirects } from "./src/config/redirects.mjs";
 import { siteConfig } from "./src/config/site.ts";
 // Sitemap handled by custom sitemap-en.xml.ts and sitemap-es.xml.ts
@@ -35,7 +42,9 @@ export default defineConfig({
 
   // MDX extends this config, so posts get the same code headers and image captions.
   markdown: {
-    processor: satteri({ hastPlugins: [imageCaptions] }),
+    processor: satteri({
+      hastPlugins: [affiliateLinkRel, taskListLabels, tableScrollWrapper, imageCaptions],
+    }),
     shikiConfig: {
       transformers: [trimTokenStyles(), codeBlockHeader()],
     },
@@ -47,6 +56,13 @@ export default defineConfig({
     incrementalBuild: true,
     // Optimize imported SVGs at build time (~165 SVGs ship under _astro).
     svgOptimizer: svgoOptimizer(),
+  },
+
+  build: {
+    // Component CSS (~13 KB/page) ships as a shared external file that caches
+    // across navigations instead of being inlined into every HTML document.
+    // The theme bootstrap + critical CSS stay inline (is:inline is untouched).
+    inlineStylesheets: "never",
   },
 
   // Font pipeline: subsets, optimized metric-matched fallbacks (size-adjust —

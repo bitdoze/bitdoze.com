@@ -82,9 +82,7 @@ for (const row of rows.slice(1)) {
   const pad = (n) => String(n).padStart(2, "0");
   meta[id] = {
     uploadDate: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    ...(Number.isFinite(seconds) && seconds > 0
-      ? { duration: secondsToIsoDuration(seconds) }
-      : {}),
+    ...(Number.isFinite(seconds) && seconds > 0 ? { duration: secondsToIsoDuration(seconds) } : {}),
   };
   imported += 1;
 }

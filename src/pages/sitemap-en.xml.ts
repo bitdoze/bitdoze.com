@@ -39,6 +39,7 @@ export async function GET(context: APIContext) {
     "/terms/",
     "/news/",
     "/courses/",
+    "/self-hosted/",
   ];
   const services = getServices("en").map((service) => `/services/${service.slug.en}/`);
 
@@ -69,9 +70,13 @@ export async function GET(context: APIContext) {
     return urlEntry(href, digest.data.date?.toISOString().split("T")[0]);
   });
 
-  const allUrls = [...staticPages, ...services, ...coursePages, ...categoryPages, ...authorPages].map((path) =>
-    urlEntry(new URL(path, site).toString())
-  );
+  const allUrls = [
+    ...staticPages,
+    ...services,
+    ...coursePages,
+    ...categoryPages,
+    ...authorPages,
+  ].map((path) => urlEntry(new URL(path, site).toString()));
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${[...allUrls, ...postEntries, ...newsEntries].join("\n")}</urlset>`;
 
   return new Response(xml, {
