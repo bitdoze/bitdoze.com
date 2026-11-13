@@ -26,18 +26,18 @@ colors:
   notice-danger: "#ef4444"
 typography:
   display:
-    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "3.5rem"
     fontWeight: 700
     lineHeight: 1.1
     letterSpacing: "-0.02em"
   headline:
-    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.5rem"
     fontWeight: 700
     lineHeight: 1.25
   title:
-    fontFamily: "'Chivo Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "1.25rem"
     fontWeight: 700
     lineHeight: 1.375
@@ -126,7 +126,7 @@ Explicitly rejected (PRODUCT.md anti-references): the ad-cluttered tutorial farm
 - One blue voice; solid deep-blue buttons only (indigo gradient deprecated, solid #2563eb everywhere).
 - Flat by default, lift on intent — shadows and scale answer state, not decoration.
 - The code block is the most respected element on the page.
-- Four self-hosted variable faces, latin subsets only: Chivo for headings, Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Display/serif/sans preloaded; mono only on pages that render a code block (`Layout.astro:preloadMono`, PostLayout/NewsLayout pass `true`).
+- Three self-hosted variable faces, latin subsets only: Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Headings use the native system stack (`--font-display`) — zero font bytes. Sans preloaded everywhere; serif only on post/news pages; mono only on pages that render a code block (`Layout.astro:preloadMono`/`preloadSerif`, PostLayout/NewsLayout pass `true`).
 
 ## 2. Colors
 
@@ -162,11 +162,11 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 
 ## 3. Typography
 
-**Display Font:** Chivo Variable (`@fontsource-variable/chivo`, preloaded). Applied to h1–h4 through `--font-display`.
+**Display Font:** native system stack (`ui-sans-serif, system-ui, …`). Applied to h1–h4 through `--font-display`; no webfont ships for headings.
 **Body Font:** Aleo Variable (`@fontsource-variable/aleo`, normal + italic, preloaded) through `--font-serif`, applied to `.prose` article body. UI chrome (nav, cards, meta) stays on Source Sans 3 Variable through `--font-sans`.
 **Mono Font:** JetBrains Mono Variable (`@fontsource-variable/jetbrains-mono`, ~40 KB latin, not preloaded, only downloaded on pages that render code) through `--font-mono`. Ligatures are off so commands read exactly as typed.
 
-**Character:** headings carry the brand voice through a sharp editorial grotesque (Chivo, in the Smashing Magazine register); long reading sits on a warm slab serif (Aleo); code gets a face designed for telling 0/O and 1/l/I apart.
+**Character:** headings carry the brand voice through the OS's own grotesque at 650–700 with tight tracking (the download cost of a distinctive display face wasn't paying for itself); long reading sits on a warm slab serif (Aleo); code gets a face designed for telling 0/O and 1/l/I apart.
 
 ### Hierarchy
 
@@ -183,7 +183,7 @@ Article sizes are defined on `[data-post-body]` in `global.css`, not through pro
 
 ### Named Rules
 
-**The Three Faces Rule.** Exactly three self-hosted variable faces, latin subset only (covers EN + ES): display, body, mono. Preload only the display and body latin files; never preload mono. No fourth webfont, no third-party font CDNs, no static weight files.
+**The Three Faces Rule.** Exactly three self-hosted variable faces, latin subset only (covers EN + ES): sans, body (serif), mono. Headings render the native system stack — no display webfont. Preload only the sans latin file (and body on posts/news); never preload mono. No fourth webfont, no third-party font CDNs, no static weight files.
 
 **The Wash Link Rule.** Prose links are ink-colored with a translucent blue wash behind the baseline that grows on hover (34% → 54% of the line box). They are never the default browser blue underline.
 

@@ -6,6 +6,7 @@ import { satteri } from "@astrojs/markdown-satteri";
 import icon from "astro-icon";
 import {
   affiliateLinkRel,
+  articleImageSizes,
   codeBlockHeader,
   imageCaptions,
   tableScrollWrapper,
@@ -43,7 +44,7 @@ export default defineConfig({
   // MDX extends this config, so posts get the same code headers and image captions.
   markdown: {
     processor: satteri({
-      hastPlugins: [affiliateLinkRel, taskListLabels, tableScrollWrapper, imageCaptions],
+      hastPlugins: [affiliateLinkRel, taskListLabels, tableScrollWrapper, articleImageSizes, imageCaptions],
     }),
     shikiConfig: {
       transformers: [trimTokenStyles(), codeBlockHeader()],
@@ -59,25 +60,16 @@ export default defineConfig({
   },
 
   build: {
-    // Component CSS (~13 KB/page) ships as a shared external file that caches
-    // across navigations instead of being inlined into every HTML document.
-    // The theme bootstrap + critical CSS stay inline (is:inline is untouched).
-    inlineStylesheets: "never",
+    // "auto": stylesheets under Vite's assetsInlineLimit (4 KB) inline into the
+    // HTML — ~10 per-component sheets of 1.6-2.6 KB each were chaining as
+    // render-blocking requests. Layout.css (~22 KB) stays external + cached.
+    inlineStylesheets: "auto",
   },
 
   // Font pipeline: subsets, optimized metric-matched fallbacks (size-adjust —
   // prevents CLS on swap), and preload hints. The CSS vars hold the generated
   // family stacks; @theme in global.css maps them to Tailwind's --font-*.
   fonts: [
-    {
-      provider: fontProviders.fontsource(),
-      name: "Chivo",
-      cssVariable: "--font-stack-display",
-      weights: ["100 900"],
-      styles: ["normal"],
-      subsets: ["latin"],
-      fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
-    },
     {
       provider: fontProviders.fontsource(),
       name: "Source Sans 3",
@@ -141,7 +133,7 @@ export default defineConfig({
     // Responsive images: every <Image>/<Picture> without its own layout emits a
     // srcset on this shared breakpoint ladder (consolidates variant explosion).
     layout: "constrained",
-    breakpoints: [480, 768, 1024, 1440],
+    breakpoints: [480, 750, 768, 1024, 1440],
     responsiveStyles: true,
     remotePatterns: [
       {

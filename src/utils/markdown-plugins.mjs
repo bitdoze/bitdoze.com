@@ -84,7 +84,10 @@ export function trimTokenStyles() {
       : null;
 
   const visit = (node, defaultFg) => {
-    if (node.type !== "element" || !Array.isArray(node.children)) return;
+    // Accept root nodes too: the transformer entry is the hast root
+    // ({type:"root", children:[pre]}) — requiring "element" returned early
+    // and made the whole pass a no-op.
+    if (!Array.isArray(node.children)) return;
     for (const child of node.children) visit(child, defaultFg);
 
     // Strip default-foreground color styles on spans
@@ -221,6 +224,31 @@ export const tableScrollWrapper = {
           ariaLabel: "Scrollable table",
         },
       });
+    },
+  },
+};
+
+/**
+ * Satteri hast plugin: stamp the article-column `sizes` on every content image.
+ * Astro's imageToComponent (which runs after user hastPlugins) forwards every
+ * img property to the <Image> component, and getImage only fills `sizes` when
+ * unset — so this wins. Without it, constrained layout emits
+ * sizes="(min-width:1600px) 1600px, 100vw" from the intrinsic width, and
+ * browsers fetch a ~1440px variant for a ≤752px slot.
+ * Same value as PostLayout's cover image: full-width below xl, ~720-752px
+ * inside the article grid at xl and up.
+ */
+export const articleImageSizes = {
+  name: "bitdoze:article-image-sizes",
+  element: {
+    filter: ["img"],
+    visit(node, ctx) {
+      if (node.properties?.sizes) return;
+      ctx.setProperty(
+        node,
+        "sizes",
+        "(max-width: 1280px) calc(100vw - 2rem), (max-width: 1536px) 720px, 752px"
+      );
     },
   },
 };
