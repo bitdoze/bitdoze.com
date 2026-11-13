@@ -23,18 +23,16 @@ export function getPagination({
   const startIndex = (currentPage - 1) * postsPerPage;
   const endIndex = Math.min(startIndex + postsPerPage, totalPosts);
 
-  // Generate URLs for previous and next pages
+  // Generate URLs for previous and next pages with consistent trailing slashes
+  const normalizedBase = basePath.endsWith("/") ? basePath : `${basePath}/`;
   const prevUrl =
     currentPage > 1
       ? currentPage === 2
-        ? basePath
-        : `${basePath}${basePath.endsWith("/") ? "" : "/"}page/${currentPage - 1}/`
+        ? normalizedBase
+        : `${normalizedBase}page/${currentPage - 1}/`
       : null;
 
-  const nextUrl =
-    currentPage < totalPages
-      ? `${basePath}${basePath.endsWith("/") ? "" : "/"}page/${currentPage + 1}/`
-      : null;
+  const nextUrl = currentPage < totalPages ? `${normalizedBase}page/${currentPage + 1}/` : null;
 
   return {
     currentPage,

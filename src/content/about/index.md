@@ -1,7 +1,7 @@
 ---
 title: "About"
 meta_title: "About"
-image: "/dragos.jpeg"
+image: "/images/authors/dragos.webp"
 draft: false
 
 what_i_do:

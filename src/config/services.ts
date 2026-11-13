@@ -33,7 +33,6 @@ export type ServiceConfig = {
     es: string;
   };
   icon: string;
-  accent: string;
   title: LocalizedText;
   shortDescription: LocalizedText;
   heroDescription: LocalizedText;
@@ -53,7 +52,7 @@ export const servicesPageCopy = {
   },
   title: {
     en: "Technical Services Built Around the Guides You Already Read",
-    es: "Servicios tecnicos basados en las guias que ya lees aqui",
+    es: "Servicios técnicos basados en las guías que ya lees aquí",
   },
   description: {
     en: "I help with Astro sites, AI agent workflows, VPS infrastructure, self-hosted stacks, and Dokploy deployments. The services below are shaped by the same topics already covered across Bitdoze.",
@@ -61,19 +60,19 @@ export const servicesPageCopy = {
   },
   trustLabel: {
     en: "What you can hire me for",
-    es: "En que te puedo ayudar",
+    es: "En qué te puedo ayudar",
   },
   sectionTitle: {
     en: "Service Areas",
-    es: "Areas de servicio",
+    es: "Áreas de servicio",
   },
   sectionDescription: {
     en: "Each service has its own page with scope, fit, deliverables, FAQs, and relevant articles.",
-    es: "Cada servicio tiene su propia pagina con alcance, encaje, entregables, FAQ y articulos relacionados.",
+    es: "Cada servicio tiene su propia página con alcance, encaje, entregables, FAQ y artículos relacionados.",
   },
   processTitle: {
     en: "How Projects Usually Work",
-    es: "Como suelen funcionar los proyectos",
+    es: "Cómo suelen funcionar los proyectos",
   },
   processSteps: {
     en: [
@@ -83,8 +82,8 @@ export const servicesPageCopy = {
     ],
     es: [
       "Primero definimos el problema real, no solo la herramienta que crees que necesitas.",
-      "Reviso la configuracion, el contenido o la infraestructura actual y propongo un alcance realista.",
-      "La implementacion se centra en dejar un resultado limpio que puedas mantener despues de la entrega.",
+      "Reviso la configuración, el contenido o la infraestructura actual y propongo un alcance realista.",
+      "La implementación se centra en dejar un resultado limpio que puedas mantener después de la entrega.",
     ],
   },
   faqTitle: {
@@ -93,7 +92,7 @@ export const servicesPageCopy = {
   },
   ctaTitle: {
     en: "Need help with one of these?",
-    es: "Necesitas ayuda con alguno de estos servicios?",
+    es: "¿Necesitas ayuda con alguno de estos servicios?",
   },
   ctaDescription: {
     en: "Pick the service that matches your project and tell me what you are working on. You get a concrete scope, a fixed price, and a start date in the reply.",
@@ -111,31 +110,31 @@ export const servicesPageCopy = {
     {
       question: {
         en: "Can you work from existing articles or rough notes?",
-        es: "Puedes trabajar desde articulos existentes o notas a medio hacer?",
+        es: "¿Puedes trabajar desde artículos existentes o notas a medio hacer?",
       },
       answer: {
         en: "Yes. That is usually the fastest path. Existing posts, repo notes, server docs, or a rough architecture sketch are enough to scope the work.",
-        es: "Si. Normalmente es la forma mas rapida. Articulos existentes, notas del repositorio, documentacion del servidor o un esquema rapido de arquitectura suelen ser suficientes para definir el alcance.",
+        es: "Sí. Normalmente es la forma más rápida. Artículos existentes, notas del repositorio, documentación del servidor o un esquema rápido de arquitectura suelen ser suficientes para definir el alcance.",
       },
     },
     {
       question: {
         en: "Do you only work on greenfield projects?",
-        es: "Solo trabajas en proyectos desde cero?",
+        es: "¿Solo trabajas en proyectos desde cero?",
       },
       answer: {
         en: "No. Most work starts from an existing site, VPS, or self-hosted stack that needs cleanup, migration, or a more reliable deployment flow.",
-        es: "No. La mayoria de trabajos parten de un sitio, VPS o stack self-hosted ya existente que necesita limpieza, migracion o un flujo de despliegue mas fiable.",
+        es: "No. La mayoría de trabajos parten de un sitio, VPS o stack self-hosted ya existente que necesita limpieza, migración o un flujo de despliegue más fiable.",
       },
     },
     {
       question: {
         en: "Can a project combine multiple services?",
-        es: "Un proyecto puede combinar varios servicios?",
+        es: "¿Un proyecto puede combinar varios servicios?",
       },
       answer: {
         en: "Yes. A common setup is Astro plus VPS deployment, or Dokploy plus a self-hosted app rollout with monitoring and backups.",
-        es: "Si. Un caso comun es Astro con despliegue en VPS, o Dokploy junto con el despliegue de una app self-hosted con monitoreo y backups.",
+        es: "Sí. Un caso común es Astro con despliegue en VPS, o Dokploy junto con el despliegue de una app self-hosted con monitoreo y backups.",
       },
     },
   ],
@@ -149,22 +148,21 @@ export const services: ServiceConfig[] = [
       es: "desarrollo-astro",
     },
     icon: "mdi:rocket-launch-outline",
-    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Astro Website Development",
       es: "Desarrollo de sitios con Astro",
     },
     shortDescription: {
       en: "Build or improve fast content sites, docs, landing pages, and multilingual Astro setups.",
-      es: "Crear o mejorar sitios rapidos de contenido, documentacion, landings y setups multilenguaje en Astro.",
+      es: "Crear o mejorar sitios rápidos de contenido, documentación, landings y setups multilenguaje en Astro.",
     },
     heroDescription: {
       en: "Astro work for blogs, resource sites, content platforms, and multilingual marketing pages with a clear publishing workflow.",
-      es: "Trabajo con Astro para blogs, sitios de recursos, plataformas de contenido y paginas de marketing multilenguaje con un flujo de publicacion claro.",
+      es: "Trabajo con Astro para blogs, sitios de recursos, plataformas de contenido y páginas de marketing multilenguaje con un flujo de publicación claro.",
     },
     intro: {
       en: "This fits teams or solo founders who want a site that stays fast, easy to edit, and clean to deploy. It is a good match for migrations away from WordPress, performance cleanup, and structured content work.",
-      es: "Esto encaja con equipos o founders que quieren un sitio rapido, facil de editar y limpio de desplegar. Va bien para migraciones desde WordPress, mejoras de rendimiento y trabajo con contenido estructurado.",
+      es: "Esto encaja con equipos o founders que quieren un sitio rápido, fácil de editar y limpio de desplegar. Va bien para migraciones desde WordPress, mejoras de rendimiento y trabajo con contenido estructurado.",
     },
     idealFor: {
       en: [
@@ -173,7 +171,7 @@ export const services: ServiceConfig[] = [
         "Multilingual sites with SEO-focused routing and hreflang support",
       ],
       es: [
-        "Sitios con mucho contenido que necesitan mas velocidad y mejor estructura",
+        "Sitios con mucho contenido que necesitan más velocidad y mejor estructura",
         "Migraciones a Astro desde WordPress u otros CMS",
         "Sitios multilenguaje con rutas SEO y soporte hreflang",
       ],
@@ -186,7 +184,7 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Collection structure, page templates, shared components, and content workflows that do not collapse once the site grows.",
-          es: "Estructura de colecciones, templates de pagina, componentes compartidos y flujos de contenido que no se rompen cuando el sitio crece.",
+          es: "Estructura de colecciones, templates de página, componentes compartidos y flujos de contenido que no se rompen cuando el sitio crece.",
         },
       },
       {
@@ -196,7 +194,7 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Lean pages, better asset handling, and practical cleanup around layout, navigation, and page speed.",
-          es: "Paginas ligeras, mejor gestion de assets y limpieza practica en layout, navegacion y velocidad.",
+          es: "Páginas ligeras, mejor gestión de assets y limpieza práctica en layout, navegación y velocidad.",
         },
       },
       {
@@ -206,7 +204,7 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Build and deployment flow that works on static hosting, VPS, or your current platform without fragile manual steps.",
-          es: "Flujo de build y despliegue que funciona en hosting estatico, VPS o tu plataforma actual sin pasos manuales fragiles.",
+          es: "Flujo de build y despliegue que funciona en hosting estático, VPS o tu plataforma actual sin pasos manuales frágiles.",
         },
       },
     ],
@@ -218,7 +216,7 @@ export const services: ServiceConfig[] = [
       ],
       es: [
         "Revisar estructura de contenido, templates y problemas actuales",
-        "Definir arquitectura de paginas, reutilizacion de componentes y plan de migracion",
+        "Definir arquitectura de páginas, reutilización de componentes y plan de migración",
         "Implementar y entregar un codebase de Astro mantenible",
       ],
     },
@@ -229,30 +227,30 @@ export const services: ServiceConfig[] = [
         "A deployment path that is easier to repeat",
       ],
       es: [
-        "Un sitio de publicacion mas rapido y con menos ruido frontend",
-        "Templates claros para futuras paginas y secciones",
-        "Un camino de despliegue mas facil de repetir",
+        "Un sitio de publicación más rápido y con menos ruido frontend",
+        "Templates claros para futuras páginas y secciones",
+        "Un camino de despliegue más fácil de repetir",
       ],
     },
     faq: [
       {
         question: {
           en: "Can you work on an existing Astro codebase instead of starting fresh?",
-          es: "Puedes trabajar sobre un proyecto Astro existente en lugar de empezar de cero?",
+          es: "¿Puedes trabajar sobre un proyecto Astro existente en lugar de empezar de cero?",
         },
         answer: {
           en: "Yes. A cleanup or extension of an existing Astro project is usually more useful than a rewrite unless the current structure is beyond repair.",
-          es: "Si. Limpiar o ampliar un proyecto Astro existente suele ser mas util que reescribirlo, salvo que la estructura actual este demasiado rota.",
+          es: "Sí. Limpiar o ampliar un proyecto Astro existente suele ser más útil que reescribirlo, salvo que la estructura actual esté demasiado rota.",
         },
       },
       {
         question: {
           en: "Can you add multilingual routing and SEO support?",
-          es: "Puedes anadir rutas multilenguaje y soporte SEO?",
+          es: "¿Puedes añadir rutas multilenguaje y soporte SEO?",
         },
         answer: {
           en: "Yes. That includes localized routes, language switching, hreflang tags, and content organization that is manageable long term.",
-          es: "Si. Eso incluye rutas localizadas, cambio de idioma, etiquetas hreflang y una organizacion del contenido que siga siendo manejable a largo plazo.",
+          es: "Sí. Eso incluye rutas localizadas, cambio de idioma, etiquetas hreflang y una organización del contenido que siga siendo manejable a largo plazo.",
         },
       },
     ],
@@ -269,7 +267,6 @@ export const services: ServiceConfig[] = [
       es: "desarrollo-agentes-ia",
     },
     icon: "mdi:robot-outline",
-    accent: "from-blue-600 to-blue-700",
     title: {
       en: "AI Agent Development",
       es: "Desarrollo de agentes IA",
@@ -280,11 +277,11 @@ export const services: ServiceConfig[] = [
     },
     heroDescription: {
       en: "Agent systems that are practical, scoped around real tasks, and deployable on infrastructure you control.",
-      es: "Sistemas de agentes que sean practicos, tengan un alcance claro y se puedan desplegar en infraestructura que controles.",
+      es: "Sistemas de agentes que sean prácticos, tengan un alcance claro y se puedan desplegar en infraestructura que controles.",
     },
     intro: {
       en: "This service is for teams testing an internal AI workflow, founders building an AI-first product feature, or operators who want agent systems they can actually run and maintain.",
-      es: "Este servicio es para equipos que estan probando flujos internos con IA, founders que construyen una funcionalidad AI-first o perfiles tecnicos que quieren sistemas de agentes que puedan ejecutar y mantener.",
+      es: "Este servicio es para equipos que están probando flujos internos con IA, founders que construyen una funcionalidad AI-first o perfiles técnicos que quieren sistemas de agentes que puedan ejecutar y mantener.",
     },
     idealFor: {
       en: [
@@ -302,11 +299,11 @@ export const services: ServiceConfig[] = [
       {
         title: {
           en: "Agent workflow design",
-          es: "Diseno del flujo de agentes",
+          es: "Diseño del flujo de agentes",
         },
         description: {
           en: "Task boundaries, model choices, tool integration, and execution flow based on what the agent actually needs to do.",
-          es: "Limites de tareas, eleccion de modelos, integracion de herramientas y flujo de ejecucion segun lo que el agente realmente necesita hacer.",
+          es: "Límites de tareas, elección de modelos, integración de herramientas y flujo de ejecución según lo que el agente realmente necesita hacer.",
         },
       },
       {
@@ -316,17 +313,17 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Containerized local or VPS deployment, environment handling, and the basic observability needed to keep it usable.",
-          es: "Despliegue local o en VPS con contenedores, manejo de entornos y la observabilidad basica necesaria para que siga siendo util.",
+          es: "Despliegue local o en VPS con contenedores, manejo de entornos y la observabilidad básica necesaria para que siga siendo útil.",
         },
       },
       {
         title: {
           en: "Practical guardrails",
-          es: "Guardrails practicos",
+          es: "Guardrails prácticos",
         },
         description: {
           en: "Clear limits around prompts, tools, and system behavior so the result is less fragile and easier to debug.",
-          es: "Limites claros sobre prompts, herramientas y comportamiento del sistema para que el resultado sea menos fragil y mas facil de depurar.",
+          es: "Límites claros sobre prompts, herramientas y comportamiento del sistema para que el resultado sea menos frágil y más fácil de depurar.",
         },
       },
     ],
@@ -339,7 +336,7 @@ export const services: ServiceConfig[] = [
       es: [
         "Definir la tarea que el agente debe asumir y lo que sigue siendo manual",
         "Elegir framework, modelo, acceso a herramientas y modelo de hosting",
-        "Entregar una implementacion funcional con pasos de despliegue repetibles",
+        "Entregar una implementación funcional con pasos de despliegue repetibles",
       ],
     },
     outcomes: {
@@ -349,30 +346,30 @@ export const services: ServiceConfig[] = [
         "Fewer moving parts than most overbuilt agent prototypes",
       ],
       es: [
-        "Un flujo de IA mas claro en lugar de una demo vaga",
+        "Un flujo de IA más claro en lugar de una demo vaga",
         "Un setup de agentes que realmente funcione fuera de un notebook",
-        "Menos piezas moviles que la mayoria de prototipos sobrecomplicados",
+        "Menos piezas móviles que la mayoría de prototipos sobrecomplicados",
       ],
     },
     faq: [
       {
         question: {
           en: "Do you only work with one framework?",
-          es: "Solo trabajas con un framework?",
+          es: "¿Solo trabajas con un framework?",
         },
         answer: {
           en: "No. The framework depends on the task. Agno, Google ADK, MCP-based tooling, or a simpler Python service can all be valid choices.",
-          es: "No. El framework depende de la tarea. Agno, Google ADK, tooling basado en MCP o incluso un servicio Python mas simple pueden ser elecciones validas.",
+          es: "No. El framework depende de la tarea. Agno, Google ADK, tooling basado en MCP o incluso un servicio Python más simple pueden ser elecciones válidas.",
         },
       },
       {
         question: {
           en: "Can this be self-hosted?",
-          es: "Esto se puede self-hostear?",
+          es: "¿Esto se puede self-hostear?",
         },
         answer: {
           en: "Yes, when the tooling stack allows it. Self-hosted deployments are often the right fit for internal use cases or privacy-sensitive workflows.",
-          es: "Si, cuando el stack lo permite. Los despliegues self-hosted suelen encajar bien en casos internos o en flujos sensibles a la privacidad.",
+          es: "Sí, cuando el stack lo permite. Los despliegues self-hosted suelen encajar bien en casos internos o en flujos sensibles a la privacidad.",
         },
       },
     ],
@@ -390,22 +387,21 @@ export const services: ServiceConfig[] = [
       es: "configuracion-vps-servidores",
     },
     icon: "mdi:server-network",
-    accent: "from-blue-600 to-blue-700",
     title: {
       en: "VPS Setup and Hardening",
-      es: "Configuracion y hardening de VPS",
+      es: "Configuración y hardening de VPS",
     },
     shortDescription: {
       en: "Provision servers, secure access, add monitoring, and prepare a cleaner base for apps and websites.",
-      es: "Provisionar servidores, asegurar accesos, anadir monitoreo y dejar una base mas limpia para apps y sitios.",
+      es: "Provisionar servidores, asegurar accesos, añadir monitoreo y dejar una base más limpia para apps y sitios.",
     },
     heroDescription: {
       en: "Practical VPS work for operators who want a solid base before layering on apps, automation, or content platforms.",
-      es: "Trabajo practico sobre VPS para quien necesita una base solida antes de montar apps, automatizacion o plataformas de contenido.",
+      es: "Trabajo práctico sobre VPS para quien necesita una base sólida antes de montar apps, automatización o plataformas de contenido.",
     },
     intro: {
       en: "If you already have a server but do not trust its setup, or you need a new one configured properly from the start, this service covers the boring but important parts that keep future work stable.",
-      es: "Si ya tienes un servidor pero no confias en su configuracion, o necesitas uno nuevo bien montado desde el inicio, este servicio cubre la parte aburrida pero importante que hace estable todo lo demas.",
+      es: "Si ya tienes un servidor pero no confías en su configuración, o necesitas uno nuevo bien montado desde el inicio, este servicio cubre la parte aburrida pero importante que hace estable todo lo demás.",
     },
     idealFor: {
       en: [
@@ -415,7 +411,7 @@ export const services: ServiceConfig[] = [
       ],
       es: [
         "Nuevos despliegues VPS que necesitan una base limpia",
-        "Servidores existentes con una configuracion floja de SSH, firewall, backups o monitoreo",
+        "Servidores existentes con una configuración floja de SSH, firewall, backups o monitoreo",
         "Equipos que preparan infraestructura para sitios, apps Docker o herramientas internas",
       ],
     },
@@ -423,11 +419,11 @@ export const services: ServiceConfig[] = [
       {
         title: {
           en: "Base server setup",
-          es: "Configuracion base del servidor",
+          es: "Configuración base del servidor",
         },
         description: {
           en: "SSH access cleanup, user setup, package baseline, and a saner starting point than the provider default.",
-          es: "Limpieza del acceso SSH, configuracion de usuarios, paquetes base y un punto de partida mas sensato que el default del proveedor.",
+          es: "Limpieza del acceso SSH, configuración de usuarios, paquetes base y un punto de partida más sensato que el default del proveedor.",
         },
       },
       {
@@ -437,7 +433,7 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Firewall, access policy, backup approach, and monitoring choices aligned with the actual stack you want to run.",
-          es: "Firewall, politicas de acceso, estrategia de backup y decisiones de monitoreo alineadas con el stack real que quieres ejecutar.",
+          es: "Firewall, políticas de acceso, estrategia de backup y decisiones de monitoreo alineadas con el stack real que quieres ejecutar.",
         },
       },
       {
@@ -447,7 +443,7 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Reverse proxy, container runtime, or panel setup depending on whether you want raw Docker, Dokploy, CloudPanel, or another workflow.",
-          es: "Reverse proxy, runtime de contenedores o panel, segun si quieres Docker puro, Dokploy, CloudPanel u otro flujo.",
+          es: "Reverse proxy, runtime de contenedores o panel, según si quieres Docker puro, Dokploy, CloudPanel u otro flujo.",
         },
       },
     ],
@@ -459,7 +455,7 @@ export const services: ServiceConfig[] = [
       ],
       es: [
         "Revisar proveedor, OS, modelo de acceso y objetivos de despliegue",
-        "Endurecer el servidor y quitar defaults debiles",
+        "Endurecer el servidor y quitar defaults débiles",
         "Preparar el stack para la siguiente capa: sitio, app o plataforma self-hosted",
       ],
     },
@@ -470,8 +466,8 @@ export const services: ServiceConfig[] = [
         "Less ad-hoc setup work before every new deployment",
       ],
       es: [
-        "Una base de servidor mas limpia y con menos riesgos evitables",
-        "Mejor visibilidad sobre caidas y errores",
+        "Una base de servidor más limpia y con menos riesgos evitables",
+        "Mejor visibilidad sobre caídas y errores",
         "Menos trabajo improvisado antes de cada despliegue nuevo",
       ],
     },
@@ -479,21 +475,21 @@ export const services: ServiceConfig[] = [
       {
         question: {
           en: "Can you work with an existing VPS instead of a fresh server?",
-          es: "Puedes trabajar sobre un VPS existente en vez de uno nuevo?",
+          es: "¿Puedes trabajar sobre un VPS existente en vez de uno nuevo?",
         },
         answer: {
           en: "Yes. Existing servers are common, but I will usually start by identifying what should be kept, cleaned up, or rebuilt.",
-          es: "Si. Es muy comun trabajar sobre servidores ya existentes, pero normalmente empiezo identificando que conviene mantener, limpiar o rehacer.",
+          es: "Sí. Es muy común trabajar sobre servidores ya existentes, pero normalmente empiezo identificando qué conviene mantener, limpiar o rehacer.",
         },
       },
       {
         question: {
           en: "Do you also handle monitoring and backup basics?",
-          es: "Tambien cubres monitoreo y backups basicos?",
+          es: "¿También cubres monitoreo y backups básicos?",
         },
         answer: {
           en: "Yes. That is part of making the server usable in practice, not just technically online.",
-          es: "Si. Eso forma parte de dejar el servidor util de verdad, no solo tecnicamente encendido.",
+          es: "Sí. Eso forma parte de dejar el servidor útil de verdad, no solo técnicamente encendido.",
         },
       },
     ],
@@ -510,14 +506,13 @@ export const services: ServiceConfig[] = [
       es: "despliegue-dokploy",
     },
     icon: "mdi:layers-triple-outline",
-    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Dokploy Deployment and Setup",
       es: "Despliegue y setup con Dokploy",
     },
     shortDescription: {
       en: "Set up Dokploy, structure projects, and turn scattered Docker deployments into a cleaner workflow.",
-      es: "Montar Dokploy, estructurar proyectos y convertir despliegues Docker dispersos en un flujo mas limpio.",
+      es: "Montar Dokploy, estructurar proyectos y convertir despliegues Docker dispersos en un flujo más limpio.",
     },
     heroDescription: {
       en: "Dokploy work for teams that want a straightforward self-hosted deployment layer without living in raw shell scripts forever.",
@@ -525,7 +520,7 @@ export const services: ServiceConfig[] = [
     },
     intro: {
       en: "This fits people moving off manual Docker commands, projects that need a simpler deployment panel, or teams standardizing how they ship apps and services on their own VPS.",
-      es: "Esto encaja con quien quiere salir de comandos Docker manuales, con proyectos que necesitan un panel de despliegue mas simple o con equipos que quieren estandarizar como publican apps y servicios en su propio VPS.",
+      es: "Esto encaja con quien quiere salir de comandos Docker manuales, con proyectos que necesitan un panel de despliegue más simple o con equipos que quieren estandarizar cómo publican apps y servicios en su propio VPS.",
     },
     idealFor: {
       en: [
@@ -535,7 +530,7 @@ export const services: ServiceConfig[] = [
       ],
       es: [
         "Primer setup de Dokploy sobre un VPS limpio",
-        "Instalaciones de Dokploy existentes que necesitan una estructura mas ordenada",
+        "Instalaciones de Dokploy existentes que necesitan una estructura más ordenada",
         "Equipos que gestionan varias apps, dominios, backups o servicios basados en compose",
       ],
     },
@@ -543,11 +538,11 @@ export const services: ServiceConfig[] = [
       {
         title: {
           en: "Dokploy installation and baseline",
-          es: "Instalacion y base de Dokploy",
+          es: "Instalación y base de Dokploy",
         },
         description: {
           en: "Provider setup, Dokploy installation, domain and proxy planning, plus the basic environment decisions that matter later.",
-          es: "Setup del proveedor, instalacion de Dokploy, plan de dominios y proxy, mas las decisiones de entorno que despues si importan.",
+          es: "Setup del proveedor, instalación de Dokploy, plan de dominios y proxy, más las decisiones de entorno que después sí importan.",
         },
       },
       {
@@ -557,17 +552,17 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Application layout, compose-based services, environment handling, and a deployment model that is easier to understand months later.",
-          es: "Organizacion de aplicaciones, servicios basados en compose, manejo de entornos y un modelo de despliegue mas facil de entender meses despues.",
+          es: "Organización de aplicaciones, servicios basados en compose, manejo de entornos y un modelo de despliegue más fácil de entender meses después.",
         },
       },
       {
         title: {
           en: "Backups and operational basics",
-          es: "Backups y operacion basica",
+          es: "Backups y operación básica",
         },
         description: {
           en: "Storage, backup paths, and simple guardrails so the panel does not become another fragile layer.",
-          es: "Storage, rutas de backup y guardrails simples para que el panel no se convierta en otra capa fragil.",
+          es: "Storage, rutas de backup y guardrails simples para que el panel no se convierta en otra capa frágil.",
         },
       },
     ],
@@ -590,30 +585,30 @@ export const services: ServiceConfig[] = [
         "A more predictable self-hosted app workflow",
       ],
       es: [
-        "Un panel de despliegue mas simple para cambios continuos en apps",
+        "Un panel de despliegue más simple para cambios continuos en apps",
         "Menos deriva entre proyectos gestionados solo con shell",
-        "Un flujo mas predecible para apps self-hosted",
+        "Un flujo más predecible para apps self-hosted",
       ],
     },
     faq: [
       {
         question: {
           en: "Can you migrate existing Docker Compose apps into Dokploy?",
-          es: "Puedes migrar apps Docker Compose existentes a Dokploy?",
+          es: "¿Puedes migrar apps Docker Compose existentes a Dokploy?",
         },
         answer: {
           en: "Yes, in many cases. The first step is checking whether the existing compose setup maps cleanly or needs some restructuring first.",
-          es: "Si, en muchos casos. El primer paso es ver si el compose actual se puede trasladar tal cual o si antes necesita algo de reestructuracion.",
+          es: "Sí, en muchos casos. El primer paso es ver si el compose actual se puede trasladar tal cual o si antes necesita algo de reestructuración.",
         },
       },
       {
         question: {
           en: "Do you also handle storage and backups around Dokploy?",
-          es: "Tambien cubres storage y backups alrededor de Dokploy?",
+          es: "¿También cubres storage y backups alrededor de Dokploy?",
         },
         answer: {
           en: "Yes. Dokploy on its own is not enough if the surrounding server and backup approach are weak.",
-          es: "Si. Dokploy por si solo no basta si el servidor de alrededor y la estrategia de backups son flojos.",
+          es: "Sí. Dokploy por sí solo no basta si el servidor de alrededor y la estrategia de backups son flojos.",
         },
       },
     ],
@@ -630,22 +625,21 @@ export const services: ServiceConfig[] = [
       es: "aplicaciones-self-hosted",
     },
     icon: "mdi:docker",
-    accent: "from-blue-600 to-blue-700",
     title: {
       en: "Self-Hosted App Deployment",
       es: "Despliegue de apps self-hosted",
     },
     shortDescription: {
       en: "Deploy useful open source apps on your own infrastructure with a setup you can keep operating.",
-      es: "Desplegar apps open source utiles en tu propia infraestructura con un setup que puedas seguir operando.",
+      es: "Desplegar apps open source útiles en tu propia infraestructura con un setup que puedas seguir operando.",
     },
     heroDescription: {
       en: "Self-hosted stacks for search, monitoring, docs, file sharing, AI tooling, and the infrastructure around them.",
-      es: "Stacks self-hosted para busqueda, monitoreo, documentacion, comparticion de archivos, tooling IA y la infraestructura que los rodea.",
+      es: "Stacks self-hosted para búsqueda, monitoreo, documentación, compartición de archivos, tooling IA y la infraestructura que los rodea.",
     },
     intro: {
       en: "This service is a fit when you know the app you want to run, but you do not want to waste days stitching together containers, reverse proxy, storage, backups, and updates.",
-      es: "Este servicio encaja cuando sabes que app quieres ejecutar, pero no quieres perder dias uniendo contenedores, reverse proxy, storage, backups y actualizaciones.",
+      es: "Este servicio encaja cuando sabes qué app quieres ejecutar, pero no quieres perder días uniendo contenedores, reverse proxy, storage, backups y actualizaciones.",
     },
     idealFor: {
       en: [
@@ -655,7 +649,7 @@ export const services: ServiceConfig[] = [
       ],
       es: [
         "Equipos que reemplazan SaaS por una herramienta self-hosted",
-        "Perfiles tecnicos montando un home lab o un stack util para produccion",
+        "Perfiles técnicos montando un home lab o un stack útil para producción",
         "Proyectos que necesitan despliegue de apps junto con reverse proxy, TLS, backups y monitoreo",
       ],
     },
@@ -663,7 +657,7 @@ export const services: ServiceConfig[] = [
       {
         title: {
           en: "App deployment planning",
-          es: "Planificacion del despliegue",
+          es: "Planificación del despliegue",
         },
         description: {
           en: "Check resource fit, storage needs, network layout, and whether the app is realistic for your VPS or local server.",
@@ -677,13 +671,13 @@ export const services: ServiceConfig[] = [
         },
         description: {
           en: "Container setup, domain or local access, TLS if needed, and the update path that keeps the app maintainable.",
-          es: "Setup de contenedores, acceso por dominio o local, TLS si hace falta y una ruta de actualizacion que mantenga la app util.",
+          es: "Setup de contenedores, acceso por dominio o local, TLS si hace falta y una ruta de actualización que mantenga la app útil.",
         },
       },
       {
         title: {
           en: "Documentation for the handoff",
-          es: "Documentacion para la entrega",
+          es: "Documentación para la entrega",
         },
         description: {
           en: "The important commands, file locations, and decisions so the service is not a black box after deployment.",
@@ -700,7 +694,7 @@ export const services: ServiceConfig[] = [
       es: [
         "Elegir la app y el enfoque de hosting adecuados para la necesidad",
         "Desplegar el stack incluyendo las piezas operativas que faltan",
-        "Documentar las partes moviles para que el servicio siga siendo manejable",
+        "Documentar las partes móviles para que el servicio siga siendo manejable",
       ],
     },
     outcomes: {
@@ -712,28 +706,28 @@ export const services: ServiceConfig[] = [
       es: [
         "Una app self-hosted funcionando y con menos trampas ocultas",
         "Menos tiempo perdido en arreglos aleatorios de Docker",
-        "Un stack que puedas actualizar y entender despues",
+        "Un stack que puedas actualizar y entender después",
       ],
     },
     faq: [
       {
         question: {
           en: "Can you deploy more than one app in the same project?",
-          es: "Puedes desplegar mas de una app dentro del mismo proyecto?",
+          es: "¿Puedes desplegar más de una app dentro del mismo proyecto?",
         },
         answer: {
           en: "Yes, as long as the scope is clear. A lot of self-hosted work is really about the stack around the app, not just one container.",
-          es: "Si, siempre que el alcance este claro. Mucho trabajo self-hosted trata mas del stack alrededor de la app que de un solo contenedor.",
+          es: "Sí, siempre que el alcance esté claro. Mucho trabajo self-hosted trata más del stack alrededor de la app que de un solo contenedor.",
         },
       },
       {
         question: {
           en: "Do you only work with home-lab setups?",
-          es: "Solo trabajas con setups de home lab?",
+          es: "¿Solo trabajas con setups de home lab?",
         },
         answer: {
           en: "No. The same patterns can apply to a personal server, an internal team tool, or a small production deployment.",
-          es: "No. Los mismos patrones sirven para un servidor personal, una herramienta interna de equipo o un despliegue pequeno en produccion.",
+          es: "No. Los mismos patrones sirven para un servidor personal, una herramienta interna de equipo o un despliegue pequeño en producción.",
         },
       },
     ],

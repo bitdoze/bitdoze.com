@@ -30,6 +30,7 @@ export async function GET(context: APIContext) {
     "/categories/",
     "/authors/",
     "/about/",
+    "/how-i-test/",
     "/resources/",
     "/contact/",
     "/series/",

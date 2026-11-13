@@ -132,7 +132,7 @@ export const translations = {
     svcReadArticle: "Read article",
     svcContactHeading: "If this matches your project, reach out",
     svcContactBody:
-      "The contact links are placeholders for now, but this page already defines the kind of work and fit clearly.",
+      "Each service has a clear scope from the start — send over your current setup, timeline, and what needs fixing.",
     svcContact: "Contact",
     svcSeeAllServices: "See all services",
     svcFaq: "Frequently asked questions",
@@ -216,6 +216,12 @@ export const translations = {
     allRightsReserved: "All rights reserved.",
     siteTagline:
       "Practical DevOps, programming, and self-hosting guides for developers and operators.",
+    breadcrumbLabel: "Breadcrumb",
+    paginationLabel: "Pagination",
+    prevPageAria: "Go to previous page",
+    previousLabel: "Previous",
+    nextPageAria: "Go to next page",
+    nextLabel: "Next",
   },
   es: {
     // Header / nav
@@ -345,7 +351,7 @@ export const translations = {
     svcReadArticle: "Leer artículo",
     svcContactHeading: "Si esto encaja con tu proyecto, escríbeme",
     svcContactBody:
-      "Por ahora los enlaces de contacto siguen como placeholder, pero la página ya marca el tipo de trabajo y el encaje esperado.",
+      "Cada servicio parte de un alcance claro — cuéntame tu configuración actual, plazos y qué necesitas resolver.",
     svcContact: "Contactar",
     svcSeeAllServices: "Ver todos los servicios",
     svcFaq: "Preguntas frecuentes",
@@ -430,6 +436,12 @@ export const translations = {
     allRightsReserved: "Todos los derechos reservados.",
     siteTagline:
       "Guías prácticas de DevOps, programación y self-hosting para desarrolladores y operadores.",
+    breadcrumbLabel: "Ruta de navegación",
+    paginationLabel: "Paginación",
+    prevPageAria: "Ir a la página anterior",
+    previousLabel: "Anterior",
+    nextPageAria: "Ir a la página siguiente",
+    nextLabel: "Siguiente",
   },
 } as const;
 

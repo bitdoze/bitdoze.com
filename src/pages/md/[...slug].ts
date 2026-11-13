@@ -30,15 +30,8 @@ export async function getStaticPaths() {
   return [...posts, ...news];
 }
 
-/**
- * Render the raw MDX body to plain markdown for agent consumers:
- *  - drop import/export statements (build-time code, meaningless to readers)
- *  - YouTubeEmbed/Button become markdown links
- *  - Notice/Accordion wrappers become blockquotes/plain text
- *  - any remaining JSX tags are unwrapped to their text content
- */
-function mdxToMarkdown(body: string): string {
-  let md = body;
+function transformProseSegment(segment: string): string {
+  let md = segment;
   md = md.replace(/^import\s[^\n]*\n/gm, "").replace(/^export\s[^\n]*\n/gm, "");
   md = md.replace(
     /<YouTubeEmbed\s+[^>]*?url="([^"]+)"[^>]*?label="([^"]*)"[^>]*?\/>/g,
@@ -66,12 +59,32 @@ function mdxToMarkdown(body: string): string {
     const link = m.match(/productLink="([^"]+)"/)?.[1];
     return name ? `\nProduct: ${link ? `[${name}](${link})` : name}\n` : "";
   });
-  // Notice/Accordion and any other paired JSX: keep inner text, drop the tags.
-  md = md.replace(/<\/?(?:Notice|Accordion|ListCheck|Tabs|TabItem)[^>]*>/g, "\n");
-  // Strip remaining JSX/HTML tags but keep inner content.
+  // Notice/Accordion titles & Tab headings so labels survive unwrapping.
+  md = md.replace(/<(?:Notice|Accordion)\b[^>]*\b(?:title|label)="([^"]+)"[^>]*>/g, "\n**$1**\n\n");
+  md = md.replace(/<Tab\b[^>]*\bname="([^"]+)"[^>]*>/g, "\n### $1\n\n");
+  md = md.replace(/<\/?(?:Notice|Accordion|ListCheck|Tabs|Tab|TabItem|ul|ol)[^>]*>/g, "\n");
+  md = md.replace(/<li[^>]*>/gi, "\n- ");
+  md = md.replace(/<\/li>/gi, "");
+  // Strip remaining JSX/HTML tags outside code blocks while keeping inner content.
   md = md.replace(/<\/?[A-Za-z][^>]*>/g, "");
-  md = md.replace(/\{[^}\n]*\}/g, ""); // leftover {} expressions
-  return md.replace(/\n{3,}/g, "\n\n").trim();
+  md = md.replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
+  md = md.replace(/\{[^}\n]*\}/g, "");
+  return md;
+}
+
+/**
+ * Render the raw MDX body to plain markdown for agent consumers while keeping
+ * fenced code blocks completely verbatim (braces, JSX/HTML examples, env vars).
+ */
+function mdxToMarkdown(body: string): string {
+  const parts = body.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g);
+  const transformed = parts.map((part, index) =>
+    index % 2 === 1 ? part : transformProseSegment(part)
+  );
+  return transformed
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export const GET: APIRoute = async ({ props }) => {

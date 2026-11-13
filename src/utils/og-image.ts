@@ -27,7 +27,8 @@ export async function generateOgImage({ title, subtitle }: OgImageOptions): Prom
           justifyContent: "space-between",
           width: "100%",
           height: "100%",
-          background: "linear-gradient(135deg, #0f172a 0%, #1e3a8a 50%, #3730a3 100%)",
+          background: "#0f172a",
+          borderTop: "12px solid #2563eb",
           padding: "80px",
         },
         children: [

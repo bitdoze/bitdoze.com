@@ -4,7 +4,6 @@ const LINK_HEADERS = [
   `</.well-known/api-catalog>; rel="api-catalog"`,
   `</rss.xml>; rel="alternate"; type="application/rss+xml"; title="Bitdoze RSS Feed"`,
   `</llms.txt>; rel="llms-txt"`,
-  `</.well-known/mcp/server-card.json>; rel="mcp-server-card"`,
 ].join(", ");
 
 // Note: in production the same Link headers ship from `public/_headers` on `/`

@@ -16,6 +16,7 @@
 import { readdir, readFile } from "node:fs/promises";
 
 const NEWS_DIR = new URL("../src/content/news/", import.meta.url);
+const NEWS_DIGEST_LIMIT = 10;
 
 const RULES = [
   { re: /^(import|export)\s/m, msg: "import/export statement" },
@@ -33,6 +34,13 @@ function stripCodeFences(body) {
 
 let failed = 0;
 const files = (await readdir(NEWS_DIR)).filter((f) => /\.mdx?$/.test(f));
+
+if (files.length > NEWS_DIGEST_LIMIT) {
+  console.error(
+    `news/: ${files.length} digests on disk exceeds rolling window of ${NEWS_DIGEST_LIMIT} — prune oldest and add date to scripts/expired-news.json`
+  );
+  failed++;
+}
 
 for (const file of files) {
   const raw = await readFile(new URL(file, NEWS_DIR), "utf8");

@@ -33,6 +33,7 @@ const extractVideosFromBody = (
   body: string,
   fallbackTitle: string,
   fallbackDescription: string | undefined,
+  site: string | URL,
   publicationDate?: Date
 ): VideoEntry[] => {
   const matches = body.match(YOUTUBE_EMBED_REGEX) || [];
@@ -45,10 +46,10 @@ const extractVideosFromBody = (
       if (!rawUrl) return null;
 
       const videoId = extractYoutubeVideoId(rawUrl);
-      if (!videoId) return null;
+      if (!videoId || videoId === "videoseries") return null;
 
       const playerUrl = `https://www.youtube.com/embed/${videoId}`;
-      const thumbnail = getYoutubeThumbnailSync(rawUrl);
+      const thumbnail = buildAbsoluteUrl(getYoutubeThumbnailSync(rawUrl), site);
       const description = fallbackDescription || label;
       // Match the on-page VideoObject: the real YouTube upload date from
       // youtube-meta.json wins; the post date is only a fallback.
@@ -78,6 +79,7 @@ export async function GET(context: APIContext) {
         body,
         post.data.title,
         post.data.description,
+        site,
         post.data.date
       );
 
@@ -98,7 +100,7 @@ export async function GET(context: APIContext) {
         const video: VideoEntry = {
           title: lesson.title,
           description: lesson.description || course.description,
-          thumbnail: getYoutubeThumbnailSync(lesson.video),
+          thumbnail: buildAbsoluteUrl(getYoutubeThumbnailSync(lesson.video), site),
           playerUrl: `https://www.youtube.com/embed/${videoId}`,
           publicationDate: uploadDate ? new Date(uploadDate).toISOString() : undefined,
         };

@@ -7,6 +7,7 @@ import youtubeMetaJson from "../data/youtube-meta.json";
 const PLACEHOLDER_THUMBNAIL = "/images/youtube-placeholder.jpg";
 const YOUTUBE_EMBED_BASE = "https://www.youtube.com/embed/";
 const VALID_ID_PATTERN = /^[\w-]{11}$/;
+const VALID_LIST_PATTERN = /^[\w-]{10,}$/;
 const KNOWN_PREFIXES = ["www.", "m.", "music.", "gaming."];
 const YOUTUBE_THUMB_BASE = "https://i3.ytimg.com/vi/";
 const DEFAULT_THUMBNAIL = "hqdefault.jpg";
@@ -78,12 +79,29 @@ export function extractYoutubeVideoId(rawUrl: string): string | null {
   return null;
 }
 
+export function extractYoutubeListId(rawUrl: string): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl);
+    if (!normalizeHost(url.hostname).endsWith("youtube.com")) return null;
+    const list = url.searchParams.get("list");
+    return list && VALID_LIST_PATTERN.test(list) ? list : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Get the embed URL for a YouTube video with autoplay enabled
+ * Get the embed URL for a YouTube video (or playlist embed) with autoplay enabled
  */
 export function getYoutubeEmbedUrl(rawUrl: string): string | null {
   const id = extractYoutubeVideoId(rawUrl);
-  return id ? `${YOUTUBE_EMBED_BASE}${id}?autoplay=1` : null;
+  if (!id) return null;
+  if (id === "videoseries") {
+    const listId = extractYoutubeListId(rawUrl);
+    return listId ? `${YOUTUBE_EMBED_BASE}videoseries?list=${listId}&autoplay=1` : null;
+  }
+  return `${YOUTUBE_EMBED_BASE}${id}?autoplay=1`;
 }
 
 /**

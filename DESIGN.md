@@ -233,7 +233,7 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 ### Navigation
 
 - **Style:** sticky top bar (64px), translucent with backdrop blur; links at 0.875rem medium weight, ink-muted, hover to Terminal Blue.
-- **Highlight:** the single nav CTA is a blue→indigo gradient pill — the same gesture as the hero CTA.
+- **Highlight:** the single nav CTA uses solid Terminal Blue Deep (`#2563eb`), matching the hero CTA.
 - **Dropdowns:** floating panels (8px radius, ambient-high shadow, hairline border) with a fade/slide-in over 300ms.
 
 ### Article Body (the signature surface)
@@ -249,7 +249,7 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 
 ### Do:
 
-- **Do** keep Terminal Blue the only brand hue per screen; Indigo Spark appears solely inside the CTA gradient (The One Voice Rule).
+- **Do** keep Terminal Blue the only brand hue per screen (The One Voice Rule).
 - **Do** design dark mode from the console palette and re-verify every text/background pair at ≥4.5:1 (WCAG AA per PRODUCT.md).
 - **Do** hold body text at Ink (#111827) on Paper, and keep Ink Subtle (#9ca3af) for large or non-essential text only.
 - **Do** make every shadow or scale transform answer a state change — hover, focus, active (The Lift-on-Intent Rule).
@@ -259,9 +259,9 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 ### Don't:
 
 - **Don't** ship the ad-cluttered tutorial-farm feel: no popups, no interstitial affiliate blocks, no content buried under chrome (PRODUCT.md anti-reference, verbatim).
-- **Don't** use the generic AI-blog aesthetic: no purple gradients beyond the single blue→indigo CTA gesture, no glassmorphism as decoration, no glow effects.
+- **Don't** use the generic AI-blog aesthetic: no purple/indigo gradients, no glassmorphism as decoration, no glow effects.
 - **Don't** drift into the corporate docs-portal look: no dry gray-on-gray pages stripped of the blue voice and the practitioner tone.
 - **Don't** become a Medium/Substack clone: Bitdoze has its own header, its own cards, its own typography rhythm — a reader should know where they are blindfolded.
-- **Don't** add webfonts beyond the three self-hosted faces, or preload the mono face (The Three Faces Rule).
-- **Don't** use Indigo Spark alone, on body text, or on large surfaces.
+- **Don't** add webfonts, `@font-face` rules, or external font CDNs (The Zero Webfonts Rule).
+- **Don't** use Indigo Spark anywhere in new UI.
 - **Don't** add side stripes, gradient text, or ambient animation beyond the documented lift-on-intent.

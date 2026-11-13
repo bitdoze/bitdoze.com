@@ -69,3 +69,11 @@ export function buildArchivePagePath(
 export function serializeJsonLd(data: unknown): string {
   return JSON.stringify(data).replace(/</g, "\\u003c");
 }
+
+/**
+ * Normalize a post slug into a valid CSS `<custom-ident>` for `view-transition-name`
+ * (Spanish post slugs contain `/`, which is invalid unescaped in CSS idents).
+ */
+export function toTransitionName(prefix: string, slug: string): string {
+  return `${prefix}-${slug.replace(/\//g, "-")}`;
+}

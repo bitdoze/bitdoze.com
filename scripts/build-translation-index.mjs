@@ -58,7 +58,7 @@ try {
 
 const articles = en
   .map((p) => {
-    const t = esByKey.get(p.slug);
+    const t = esByKey.get(p.translationKey);
     const enGitDate = lastCommit.get(p.file) ?? null;
     const esGitDate = t ? (lastCommit.get(t.file) ?? null) : null;
     return {
@@ -82,8 +82,8 @@ const articles = en
   .sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
 
 // Warn on ES orphans / duplicate keys (bad input, not fatal)
-const enSlugs = new Set(en.map((p) => p.slug));
-const orphans = es.filter((p) => !enSlugs.has(p.translationKey));
+const enKeys = new Set(en.map((p) => p.translationKey));
+const orphans = es.filter((p) => !enKeys.has(p.translationKey));
 if (orphans.length) {
   console.warn("WARNING: ES posts with no EN counterpart:", orphans.map((p) => p.slug).join(", "));
 }

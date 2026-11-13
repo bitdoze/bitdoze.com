@@ -25,7 +25,7 @@ Guides that actually work. Every article is tested, copy-paste-ready, and curren
 - Primary CTA: click the affiliate recommendations inside articles. Fallback: browse related guides and stay on-site.
 - The line a visitor remembers after 10 seconds: "DevOps guides that actually work."
 - Belief ladder: (1) this guide actually solved my problem — the article delivers value first; (2) the author tests what they recommend — trust transfers from the guide to the picks; (3) this product is worth paying for — the affiliate click feels safe.
-- Proof on hand: 10+ years of IT experience with 4+ years focused on DevOps; an archive of 400+ published guides (335 English, 64 Spanish); the @webdoze YouTube channel and social audience; real client work from the services business.
+- Proof on hand: 10+ years of IT experience with 4+ years focused on DevOps; an archive of 800+ published guides (409 English, 407 Spanish); the @webdoze YouTube channel and social audience; real client work from the services business.
 
 ## Brand Personality
 

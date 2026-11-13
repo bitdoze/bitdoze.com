@@ -44,7 +44,13 @@ export default defineConfig({
   // MDX extends this config, so posts get the same code headers and image captions.
   markdown: {
     processor: satteri({
-      hastPlugins: [affiliateLinkRel, taskListLabels, tableScrollWrapper, articleImageSizes, imageCaptions],
+      hastPlugins: [
+        affiliateLinkRel,
+        taskListLabels,
+        tableScrollWrapper,
+        articleImageSizes,
+        imageCaptions,
+      ],
     }),
     shikiConfig: {
       transformers: [trimTokenStyles(), codeBlockHeader()],
