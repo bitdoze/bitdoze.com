@@ -1,5 +1,5 @@
 // @ts-check
-import { defineConfig, fontProviders, svgoOptimizer } from "astro/config";
+import { defineConfig, svgoOptimizer } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import { satteri } from "@astrojs/markdown-satteri";
@@ -66,38 +66,8 @@ export default defineConfig({
     inlineStylesheets: "auto",
   },
 
-  // Font pipeline: subsets, optimized metric-matched fallbacks (size-adjust —
-  // prevents CLS on swap), and preload hints. The CSS vars hold the generated
-  // family stacks; @theme in global.css maps them to Tailwind's --font-*.
-  fonts: [
-    {
-      provider: fontProviders.fontsource(),
-      name: "Source Sans 3",
-      cssVariable: "--font-stack-sans",
-      weights: ["200 900"],
-      styles: ["normal"],
-      subsets: ["latin"],
-      fallbacks: ["ui-sans-serif", "system-ui", "sans-serif"],
-    },
-    {
-      provider: fontProviders.fontsource(),
-      name: "Aleo",
-      cssVariable: "--font-stack-serif",
-      weights: ["100 900"],
-      styles: ["normal", "italic"],
-      subsets: ["latin"],
-      fallbacks: ["ui-serif", "Georgia", "serif"],
-    },
-    {
-      provider: fontProviders.fontsource(),
-      name: "JetBrains Mono",
-      cssVariable: "--font-stack-mono",
-      weights: ["100 800"],
-      styles: ["normal"],
-      subsets: ["latin"],
-      fallbacks: ["ui-monospace", "monospace"],
-    },
-  ],
+  // No webfonts: every role maps to a native system stack in global.css
+  // (@theme --font-*). Zero font downloads, zero preloads, zero @font-face.
 
   // Class-scoped styles drop the ~7 MB of data-astro-cid attributes sitewide.
   scopedStyleStrategy: "class",

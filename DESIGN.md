@@ -42,17 +42,17 @@ typography:
     fontWeight: 700
     lineHeight: 1.375
   body:
-    fontFamily: "'Aleo Variable', ui-serif, Georgia, serif"
+    fontFamily: "ui-serif, 'Iowan Old Style', Georgia, 'Times New Roman', serif"
     fontSize: "1.0625rem → 1.125rem (md) → 1.1875rem (2xl)"
     fontWeight: 400
     lineHeight: 1.7
   label:
-    fontFamily: "'Source Sans 3 Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
     fontSize: "0.75rem"
     fontWeight: 500
     lineHeight: 1.5
   code:
-    fontFamily: "'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
     fontSize: "0.8125rem → 0.875rem (md) in blocks; 0.8em inline"
     fontWeight: 400
 rounded:
@@ -126,7 +126,7 @@ Explicitly rejected (PRODUCT.md anti-references): the ad-cluttered tutorial farm
 - One blue voice; solid deep-blue buttons only (indigo gradient deprecated, solid #2563eb everywhere).
 - Flat by default, lift on intent — shadows and scale answer state, not decoration.
 - The code block is the most respected element on the page.
-- Three self-hosted variable faces, latin subsets only: Aleo for article reading, Source Sans 3 for UI chrome, JetBrains Mono for code. Headings use the native system stack (`--font-display`) — zero font bytes. Sans preloaded everywhere; serif only on post/news pages; mono only on pages that render a code block (`Layout.astro:preloadMono`/`preloadSerif`, PostLayout/NewsLayout pass `true`).
+- Zero webfonts — every type role is a native system stack: system sans for headings and UI chrome, a Georgia/ui-serif reading serif for article body, ui-monospace for code. No downloads, no preloads, no @font-face.
 
 ## 2. Colors
 
@@ -163,10 +163,10 @@ The palette is a single confident blue against quiet paper neutrals, with a desi
 ## 3. Typography
 
 **Display Font:** native system stack (`ui-sans-serif, system-ui, …`). Applied to h1–h4 through `--font-display`; no webfont ships for headings.
-**Body Font:** Aleo Variable (`@fontsource-variable/aleo`, normal + italic, preloaded) through `--font-serif`, applied to `.prose` article body. UI chrome (nav, cards, meta) stays on Source Sans 3 Variable through `--font-sans`.
-**Mono Font:** JetBrains Mono Variable (`@fontsource-variable/jetbrains-mono`, ~40 KB latin, not preloaded, only downloaded on pages that render code) through `--font-mono`. Ligatures are off so commands read exactly as typed.
+**Body Font:** native serif (`ui-serif, "Iowan Old Style", Georgia, …`) through `--font-serif`, applied to `.prose` article body. UI chrome (nav, cards, meta) stays on the system sans stack through `--font-sans`.
+**Mono Font:** native mono (`ui-monospace, SFMono-Regular, Menlo, …`) through `--font-mono`. Ligatures are off so commands read exactly as typed.
 
-**Character:** headings carry the brand voice through the OS's own grotesque at 650–700 with tight tracking (the download cost of a distinctive display face wasn't paying for itself); long reading sits on a warm slab serif (Aleo); code gets a face designed for telling 0/O and 1/l/I apart.
+**Character:** headings carry the brand voice through the OS's own grotesque at 650–700 with tight tracking; long reading sits on a native serif (Georgia/Iowan — big x-height, warm like Aleo was); code renders in the platform's own mono, which also reads exactly like the terminal it describes.
 
 ### Hierarchy
 
@@ -177,13 +177,13 @@ Article sizes are defined on `[data-post-body]` in `global.css`, not through pro
 - **Section (H2)** (700, 24px → 32px, line-height 1.2, -0.02em), with a hairline divider above every H2 after the first.
 - **Subsection (H3)** (650, 22px → 25px, line-height 1.3). **H4** (650, 18px, line-height 1.35).
 - **Title** (700, 1.25rem, line-height 1.375): card titles, clipped to two lines.
-- **Body** (400, 17px mobile → 18px from md → 19px from 2xl, line-height 1.7) in reading ink `#374151` (`--color-text-reading`, ~10:1 on Paper); prose links render in the same ink at weight 500 — the underline and blue wash carry the link signal. Aleo's large x-height means these sizes read a step bigger than their px value. The measure is ~48 characters on phones and ~75 on desktop.
+- **Body** (400, 17px mobile → 18px from md → 19px from 2xl, line-height 1.7) in reading ink `#374151` (`--color-text-reading`, ~10:1 on Paper); prose links render in the same ink at weight 500 — the underline and blue wash carry the link signal. The serif stack's large x-height means these sizes read a step bigger than their px value. The measure is ~48 characters on phones and ~75 on desktop.
 - **Label** (500, 0.75rem, line-height 1.5): tag chips, dates, metadata.
 - **Code** (400, 13px mobile → 14px blocks; 0.8em inline chips at weight 450).
 
 ### Named Rules
 
-**The Three Faces Rule.** Exactly three self-hosted variable faces, latin subset only (covers EN + ES): sans, body (serif), mono. Headings render the native system stack — no display webfont. Preload only the sans latin file (and body on posts/news); never preload mono. No fourth webfont, no third-party font CDNs, no static weight files.
+**The Zero Webfonts Rule.** Every type role is a native system stack — no self-hosted faces, no @font-face, no preloads, no third-party font CDNs. The download cost of distinctive faces wasn't paying for itself on a mid-task search audience.
 
 **The Wash Link Rule.** Prose links are ink-colored with a translucent blue wash behind the baseline that grows on hover (34% → 54% of the line box). They are never the default browser blue underline.
 
