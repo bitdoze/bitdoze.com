@@ -1,0 +1,208 @@
+---
+date: 2026-11-13
+translationKey: "holyarrs-docker-guide"
+title: "Guía de HolyArrs con Docker: sustituye Sonarr, Radarr, Lidarr, Bazarr, Prowlarr y Overseerr con una sola app de 15 MB"
+meta_title: "Configurar HolyArrs en Docker: una app de 15 MB en vez de seis contenedores *arr"
+description: "Instala HolyArrs con Docker Compose y reemplaza todo el stack *arr de seis aplicaciones con un solo contenedor de 15 MB. Incluye conexión con qBittorrent, importador en paralelo y limitaciones reales."
+image: "@assets/images/26/11/holyarrs-docker-cover.webp"
+imageAlt: "HolyArrs, gestor multimedia todo en uno que sustituye seis aplicaciones arr"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["holyarrs", "docker", "media-server"]
+quickAnswer: "docker compose up -d → abre http://servidor:6262, crea la cuenta propietaria y añade tu gestor de descargas y una Fuente"
+timeToComplete: "15 min"
+canonical: "https://www.bitdoze.com/es/guia-holyarrs-docker/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import { Picture } from "astro:assets";
+import holyarrsUi from "@assets/images/26/11/holyarrs-ui.webp";
+
+Una instalación habitual de automatización multimedia suele montar seis aplicaciones distintas: Sonarr para series, Radarr para películas, Lidarr para música, Prowlarr para indexadores, Bazarr para subtítulos y Overseerr para que tu familia pueda pedir contenido. Son seis contenedores, seis inicios de sesión, seis ciclos de actualización y seis claves API que tienes que ir copiando entre sí para que se entiendan.
+
+HolyArrs reescribe todo ese conjunto en Go dentro de un único contenedor autoalojado. La imagen descarga unos 15 MB, marca alrededor de 140 MiB de RAM en las pruebas del proyecto con una biblioteca de 10.000 títulos y superó las 1.000 estrellas en GitHub poco después de presentarse en Show HN. Como su importador integrado solo lee tus aplicaciones actuales sin modificarlas, puedes levantarlo en paralelo a tu stack *arr y comparar resultados sin romper nada. Esta guía repasa la instalación con Docker Compose, la conexión con qBittorrent y Jellyfin, la migración no destructiva y los compromisos de un proyecto joven antes de apagar tus contenedores antiguos.
+
+<Notice type="info" title="Proyecto joven: pruébalo en paralelo, no de golpe">
+  HolyArrs llegó a la versión 1.0 en noviembre de 2026. El importador está pensado para convivir junto a tu stack actual y no toca su configuración, así que la ruta prudente es sencilla: instálalo, importa tus datos, compara lanzamientos durante una semana y mantén tus contenedores anteriores hasta quedar convencido.
+</Notice>
+
+## Qué sustituye HolyArrs en cifras
+
+Según la comparativa del propio proyecto en amd64 frente a las imágenes estándar de linuxserver.io:
+
+| | Tamaño de descarga | Accesos | Puertos web |
+|---|---|---|---|
+| Sonarr + Radarr + Lidarr + Prowlarr + Bazarr + Overseerr | 718,2 MB | 6 | 6 |
+| **HolyArrs** | **14,9 MB** | **1** | **1 (6262)** |
+
+En disco supone unas 48 veces menos espacio. Donde más se nota en un VPS pequeño o en una Raspberry Pi es en memoria: seis servicios .NET en reposo frente a un único binario en Go que ronda los ~140 MiB de RAM con 10.000 títulos y 55.000 películas y episodios indexados en las cifras publicadas por el proyecto.
+
+Lo que no cambia es su papel alrededor: HolyArrs no descarga archivos por su cuenta. Controla el cliente que ya tengas (qBittorrent, Transmission, Deluge, rTorrent, aria2, SABnzbd o NZBGet), consulta indexadores Torznab/Newznab o sincroniza con Prowlarr/Jackett y avisa a Plex, Jellyfin o Emby cuando llega material nuevo. Las seis piezas de gestión quedan unificadas; el cliente de descargas y el servidor multimedia siguen en su sitio.
+
+## Qué necesitas antes de empezar
+
+<ListCheck>
+  <ul>
+    <li>Un servidor con Docker y Docker Compose (sirve la misma máquina donde ya corren tus *arr)</li>
+    <li>URL y credenciales de tu cliente de descargas (qBittorrent, SABnzbd, etc.)</li>
+    <li>Datos de tus indexadores: URLs y claves Torznab/Newznab, o la URL y clave API de tu Prowlarr</li>
+    <li>El UID/GID propietario de tus carpetas multimedia (ejecuta `id tu_usuario` para comprobarlo)</li>
+    <li>Una ruta en disco local para `/config` (nunca en carpeta de red, ya que la base de datos necesita I/O local)</li>
+    <li>Opcional para migrar: URLs y claves API de tus instancias de Sonarr, Radarr, Lidarr, Prowlarr, Bazarr u Overseerr</li>
+  </ul>
+</ListCheck>
+
+Antes de crear el compose, revisa la estructura de carpetas. La plantilla oficial de HolyArrs mapea `/movies`, `/tv`, `/music` y `/downloads` por separado, pero montar una sola carpeta padre `/media` con las cuatro subcarpetas dentro (y usar exactamente ese mismo montaje en el cliente de descargas) permite mover archivos terminados al instante de forma atómica sin copiar gigabytes dos veces. Ambas opciones funcionan desde la interfaz; la carpeta padre única ahorra mucha escritura en disco.
+
+## Instalar HolyArrs con Docker Compose
+
+```bash
+mkdir -p /opt/holyarrs/config
+cd /opt/holyarrs
+```
+
+Archivo Compose fijado en la versión `1.1.0`, que incorporó 44 idiomas y soporte para `aria2`:
+
+```yaml
+name: holyarrs
+services:
+  holyarrs:
+    image: holyarrs/holyarrs:1.1.0
+    container_name: holyarrs
+    environment:
+      - PUID=1000        # match `id youruser`
+      - PGID=1000
+      - TZ=Europe/Bucharest
+    volumes:
+      - /opt/holyarrs/config:/config          # local disk only
+      - /mnt/media:/media                     # one parent: /media/{movies,tv,music,downloads}
+    ports:
+      - 6262:6262
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+docker logs -f holyarrs
+```
+
+Con un directorio padre `/media` que agrupa `movies`, `tv`, `music` y `downloads`, y qBittorrent montando `/mnt/media/downloads` en `/media/downloads` dentro de su contenedor, HolyArrs traslada descargas completas sin duplicar lecturas ni escrituras. Si el cliente de descargas corre en otro equipo, monta el mismo recurso NFS/SMB con idéntica ruta en ambos servidores (manteniendo `/config` siempre en disco local).
+
+<Notice type="success" title="Comprueba que ha arrancado">
+  `curl -sI http://localhost:6262 | head -1` debería devolver `200` o `302`, y `docker compose ps` mostrará el contenedor en ejecución sin reinicios. Si entra en bucle de reinicio, `docker logs holyarrs` suele apuntar a permisos sobre `/config`.
+</Notice>
+
+## Primer arranque: propietario, carpetas y descargas
+
+Abre `http://tu-servidor:6262` y crea la cuenta propietaria de inmediato. No existe contraseña por defecto y **la primera persona en entrar al panel pasa a ser propietaria**; en una red compartida conviene hacerlo nada más arrancar el contenedor.
+
+El asistente inicial pide tres datos básicos:
+
+1. **Carpetas de biblioteca.** Indica las rutas vistas dentro del contenedor (`/media/movies`, `/media/tv`), no las rutas reales del host.
+2. **Cliente de descargas.** Elige qBittorrent e introduce su URL y usuario. Si ambos corren en Docker, `localhost` apunta al propio contenedor de HolyArrs, así que usa el nombre del servicio qBittorrent dentro de una red Docker compartida o la IP del host.
+3. **Una Fuente (Source).** Añade cualquier indexador Torznab/Newznab o enlaza tu Prowlarr existente. HolyArrs acepta los indexadores empujados desde la sincronización de Prowlarr, así que puedes pasar toda tu lista de una vez.
+
+Al terminar entrarás en Explore, con un diseño cercano a una plataforma de streaming: al pasar el cursor por un título reproduce su tráiler, puedes solicitar una serie completa o una temporada concreta y tus reglas Pick (tamaño, calidad e idioma) deciden qué versión descargar.
+
+<Picture src={holyarrsUi} alt="Vista Explore de HolyArrs: biblioteca multimedia en un solo panel con cuadrícula de carátulas, cola de peticiones y estado de descargas" formats={["webp"]} />
+
+## Importar tu stack *arr actual (sin romper nada)
+
+Aquí está la gran ventaja para probarlo sin riesgo. Ve a **Settings > Move from other apps**, introduce la URL y la clave API de cada aplicación antigua (o sube un zip de copia de seguridad), pulsa **Try it** para hacer un simulacro y confirma con **Move**. El importador se limita a leer tus servicios actuales, así que Sonarr, Radarr y compañía siguen funcionando intactos y puedes dar marcha atrás cuando quieras.
+
+| Origen | Qué se importa |
+|---|---|
+| Sonarr, Radarr, Lidarr | Carpetas, títulos, perfiles de calidad (como reglas Pick), exclusiones, formato de nombres, indexadores y clientes de descarga |
+| Prowlarr | Indexadores convertidos en Sources |
+| Bazarr | Idiomas de subtítulos predeterminados |
+| Seerr / Overseerr | Usuarios y sus peticiones pendientes o aprobadas |
+| qBittorrent, SABnzbd | Conexiones con los gestores de descargas |
+
+No se trasladan formatos personalizados (custom formats), etiquetas, historial de capturas ni contraseñas guardadas; deberás volver a introducir secretos o importarlos aparte. Los archivos multimedia en disco ni se mueven ni se borran.
+
+La estrategia más segura consiste en importar todo, mantener activos tus contenedores actuales y observar una semana de estrenos desde el calendario de HolyArrs. Si algún lanzamiento falla, puedes contrastar el motivo directamente frente al stack que ya conoces.
+
+## Conectar con Jellyfin (o Plex/Emby)
+
+En **Settings > Media servers**, añade la URL de Jellyfin y una clave API (`Jellyfin Dashboard > API Keys > New`). HolyArrs envía un aviso específico nada más importar un archivo para que el nuevo episodio aparezca enseguida sin esperar al escaneo programado. Si Jellyfin corre en Docker en la misma máquina, usa su nombre de contenedor dentro de una red Docker compartida o la IP del puente Docker en vez de `localhost`.
+
+¿Aún no tienes servidor multimedia? Nuestra [guía para autoalojar Jellyfin](/es/autoalojar-jellyfin/) detalla el montaje completo con Docker y transcodificación por hardware, y en [mejor NAS para Plex y Jellyfin](/es/mejor-nas-plex-jellyfin/) comparamos equipos de almacenamiento si partes desde cero.
+
+## Mantenimiento: copias, actualizaciones y `doctor`
+
+Tres detalles importantes tras dejarlo en marcha:
+
+**La clave maestra (`holyarrs.key`).** Las contraseñas y claves API guardadas se cifran con `holyarrs.key` dentro de `/config`, y las copias de seguridad normales la excluyen a propósito. Entra en **Settings > Backups > Download key kit** y guarda una copia fuera del servidor. Si pierdes `holyarrs.key`, las credenciales respaldadas no podrán descifrarse.
+
+**Actualizaciones** con el flujo habitual de Compose:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Si una versión cambia el esquema interno, HolyArrs guarda automáticamente una copia previa. Para revertirla ejecuta `docker exec holyarrs /holyarrs restore --pre-update` y reinicia el contenedor.
+
+**Diagnóstico sin shell.** La imagen prescinde de shell interno, algo bueno para reducir superficie de ataque pero incómodo si esperas entrar con `docker exec -it holyarrs bash`. En su lugar trae comandos integrados:
+
+```bash
+docker exec holyarrs /holyarrs doctor        # OK/WARN/FAIL config check with fixes
+docker exec -i holyarrs /holyarrs reset-owner  # locked out of owner account
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' holyarrs
+```
+
+<Notice type="warning" title="No abras el puerto 6262 a internet">
+  No existe contraseña por defecto y el primer usuario que accede se queda la cuenta propietaria. Déjalo dentro de tu LAN, accede por Tailscale o WireGuard, o colócalo detrás de un proxy inverso con HTTPS como explicamos en la [guía de Traefik con Docker](/es/traefik-proxy-docker/). Aquí una exposición accidental afecta a toda tu biblioteca a la vez.
+</Notice>
+
+## Qué le falta todavía
+
+El README del proyecto deja claras sus limitaciones actuales, y conviene tenerlas presentes antes de sustituir todo:
+
+- **Sin cliente de descargas integrado:** depende de qBittorrent, SABnzbd o alguno de los demás clientes compatibles, aunque uno integrado figura en la hoja de ruta.
+- **Sin funciones de IA ni MCP** en la rama 1.x.
+- **Solo interfaz web:** todavía no hay apps nativas para móvil o televisor, aunque la web se adapta bien al navegador del teléfono.
+- **Sección de música incompleta:** el descubrimiento musical dentro de Explore sigue en desarrollo.
+- **Servidor centralizado de metadatos:** las carátulas, tráilers y listas llegan desde un servicio operado y costeado por el autor. Te ahorra configurar claves personales de TMDb o TVDb, pero introduce una dependencia externa. Tus descargas y bibliotecas existentes siguen funcionando si ese servidor cae, aunque la exploración visual depende de él.
+
+Esa dependencia centralizada de metadatos es la mayor diferencia estructural frente a Sonarr y Radarr, que consultan directamente TMDb y TVDb. Hoy HolyArrs está mantenido principalmente por un único desarrollador (`CoderLuii`, bajo licencia AGPL-3.0 con CLA), así que conservar tu stack previo respaldado sigue siendo lo más sensato.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Pueden seguir activos Sonarr y Radarr mientras pruebo HolyArrs?" group="faq" expanded="true">
+Sí. El importador solo lee la configuración existente sin escribir nada en tus contenedores actuales. Dejar las seis aplicaciones en paralelo mientras evalúas las reglas y capturas durante unas semanas es el flujo recomendado antes de ir apagando los antiguos servicios uno a uno.
+</Accordion>
+
+<Accordion label="¿Sigo necesitando Prowlarr?" group="faq">
+No es obligatorio, aunque resulta práctico. HolyArrs acepta indexadores Torznab y Newznab directamente, pero si ya usas Prowlarr puedes sincronizar tus fuentes hacia HolyArrs sin volver a teclear claves o copiarlas con el importador.
+</Accordion>
+
+<Accordion label="¿Funciona HolyArrs en una Raspberry Pi o un NAS?" group="faq">
+Sí. Publica imágenes para amd64, arm64 y armv7, cubriendo Raspberry Pi 4/5 y muchos NAS ARM. La única regla estricta es mantener `/config` en disco local (SSD o tarjeta SD) y nunca en un montaje de red SMB/NFS; las carpetas multimedia sí pueden ir en red.
+</Accordion>
+
+<Accordion label="¿Es gratis de verdad? ¿Dónde está el truco?" group="faq">
+Es gratuito y open source bajo AGPL-3.0, sin versiones de pago bloqueando funciones. La contrapartida práctica está en su servidor de metadatos, sostenido del bolsillo del autor y patrocinadores en GitHub: si algún día deja de financiarse, las búsquedas enriquecidas son la parte que podría resentirse.
+</Accordion>
+
+<Accordion label="¿Qué pasa con mis peticiones al migrar desde Overseerr?" group="faq">
+El importador traslada usuarios y sus peticiones pendientes o aprobadas para que sigan su curso en HolyArrs. El historial previo de descargas y las etiquetas personalizadas no se transfieren.
+</Accordion>
+
+## Conclusión
+
+Merece una prueba rápida si estás cansado de mantener seis inicios de sesión, seis archivos de configuración y más de 700 MB de imágenes solo para automatizar descargas. HolyArrs cubre el ciclo principal (buscar, solicitar, enviar al cliente, importar y avisar a Plex o Jellyfin) dentro de un único contenedor muy ligero.
+
+Mantén el stack anterior junto a él durante un tiempo. Cualquier reescritura 1.x frente a seis aplicaciones .NET veteranas tendrá roces puntuales con indexadores concretos, reglas de nombrado exigentes o clientes específicos. Como el importador tarda 15 minutos y no toca nada existente, evaluarlo en paralelo apenas conlleva riesgo.
+
+<Button text="Autoalojar Jellyfin a continuación" link="/es/autoalojar-jellyfin/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Artículos relacionados
+
+- [Autoalojar Jellyfin con Docker Compose](/es/autoalojar-jellyfin/) (el servidor multimedia al que avisa HolyArrs)
+- [Mejor NAS para Plex y Jellyfin](/es/mejor-nas-plex-jellyfin/) (cajas de almacenamiento para tu biblioteca)
+- [Mejores contenedores Docker para un servidor en casa](/es/contenedores-docker-servidor-casa/) (qué más ejecutar en el mismo host)
+- [Traefik como proxy inverso para Docker](/es/traefik-proxy-docker/) (para exponer HolyArrs con HTTPS)
+- [Secretos en Docker Compose](/es/secretos-docker-compose/) (sacar claves API fuera de archivos Compose en texto plano)

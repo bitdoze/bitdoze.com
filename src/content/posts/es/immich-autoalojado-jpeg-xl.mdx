@@ -1,0 +1,188 @@
+---
+date: 2026-11-13
+translationKey: "immich-self-hosted-jpeg-xl"
+title: "Guía de Immich autoalojado: Docker + reduce tu biblioteca de fotos un 20–50% con JPEG XL y AV1"
+meta_title: "Guía Immich Docker Compose + compresión JPEG XL y AV1 (v3.4)"
+description: "Autoaloja Immich con Docker Compose y recorta el espacio ocupado entre un 20% y un 50% pasando originales a JPEG XL y AV1. Novedades de v3.4, immich-convert-originals y copias seguras."
+image: "@assets/images/26/11/immich-docker-cover.webp"
+imageAlt: "Biblioteca fotográfica autoalojada con Immich y compresión JPEG XL"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["immich", "docker", "photos"]
+quickAnswer: "docker compose up -d → Immich en :2283; immich-convert-originals en :8000 reduce bibliotecas un 20–50%"
+timeToComplete: "30 min"
+canonical: "https://www.bitdoze.com/es/immich-autoalojado-jpeg-xl/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import { Picture } from "astro:assets";
+import immichUi from "@assets/images/26/11/immich-library-ui.webp";
+
+Immich es lo más parecido a tener Google Photos en tu propio servidor: copia automática desde el móvil, reconocimiento facial, mapa de ubicaciones, álbumes compartidos y una línea temporal fluida incluso con bibliotecas enormes. El problema de siempre es el espacio en disco, que solo crece. La versión **3.4.0**, publicada el 10 de noviembre de 2026, trajo una de las mejoras más pedidas desde hace más de un año: soporte nativo de **JPEG XL** tanto en el servidor como en las aplicaciones móviles.
+
+Abajo tienes un despliegue limpio con Docker Compose para Immich v3.4.0 y el flujo para convertir originales existentes a JPEG XL y AV1 con `immich-convert-originals`, recuperando entre un 20% y un 50% de almacenamiento sin perder datos EXIF, coordenadas GPS, favoritos ni pertenencia a álbumes.
+
+<Notice type="info" title="Novedades de Immich v3.4.0 (10 de noviembre de 2026)">
+  Immich 3.4 incorpora generación de miniaturas en servidor y decodificación móvil para JPEG XL, edición de etiquetas desde el móvil, nuevos disparadores de flujos de trabajo incluido `Asset OCR Extraction` (ideal para archivar recibos en álbumes según el texto detectado), compresión con `pigz` en copias de la base de datos cuando está disponible, ajustes en FUTO Backups y refuerzo de seguridad con una política CSP más estricta sin `unsafe-inline`. La versión v3.3.6 anterior desactivó la telemetría que `onnxruntime` enviaba a Microsoft, así que quédate en v3.3.6+ o sube directo a v3.4.0.
+</Notice>
+
+## Qué necesitas
+
+<ListCheck>
+  <ul>
+    <li>Un equipo con Docker y Docker Compose; 4 GB de RAM son un mínimo cómodo, o menos si desactivas el aprendizaje automático</li>
+    <li>Almacenamiento local para la base de datos Postgres (nunca en carpeta de red) y disco amplio para las fotos</li>
+    <li>Puerto 2283 libre</li>
+    <li>Fotos y vídeos para subir o una colección previa para optimizar</li>
+    <li>Opcional: Intel Quick Sync o NVENC para transcodificar vídeo (los YAML de aceleración vienen en la release)</li>
+  </ul>
+</ListCheck>
+
+En hardware, un mini PC con Intel N100/N150 mueve Immich muy bien porque el trabajo pesado (miniaturas e inferencia ML) ocurre a rachas. Nuestro listado de [mejores mini PCs para servidor doméstico](/es/mejor-mini-pc-servidor-casa/) reúne opciones actuales, y en [mejores NAS para Docker y Proxmox](/es/mejores-nas-homelab-docker-proxmox/) repasamos cajas pensadas para centralizar almacenamiento y contenedores.
+
+## Instalar Immich con Docker Compose
+
+La propia release incluye los archivos oficiales de Compose; fija la versión desde el principio para controlar las actualizaciones:
+
+```bash
+mkdir -p /opt/immich && cd /opt/immich
+wget https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml
+wget https://github.com/immich-app/immich/releases/latest/download/example.env -O .env
+```
+
+Edita `.env` con las variables clave:
+
+```bash
+UPLOAD_LOCATION=/mnt/photos/library      # your library disk. big; can be a mounted share
+DB_DATA_LOCATION=/opt/immich/postgres    # local disk, SSD preferred. NEVER a network share
+TZ=Europe/Bucharest
+IMMICH_VERSION=v3.4.0                    # pin it; 'release' floats
+DB_PASSWORD=change-me-to-a-long-random-string
+```
+
+El stack levanta cuatro servicios: `immich-server` (interfaz web y API en el puerto 2283), `immich-machine-learning` (caras y búsqueda CLIP), `redis` (colas) y `database` (PostgreSQL 14 con `VectorChord` y `pgvector` para búsqueda vectorial). Arranca y verifica:
+
+```bash
+docker compose up -d
+docker compose ps
+curl -sI http://localhost:2283 | head -1    # expect 200 or 302
+```
+
+Abre `http://servidor:2283`, crea la cuenta administradora e instala la app móvil para empezar a subir fotos en segundo plano o al cargar el teléfono.
+
+<Notice type="success" title="Verifica todo antes de importar 500 GB">
+  Sube primero unas 20 fotos de prueba desde la web, confirma que aparecen en la fecha correcta y prueba la copia de un álbum desde el móvil. Si las miniaturas y el mapa cargan bien, ya puedes importar el resto. Depurar problemas en mitad de una carga masiva es mucho más pesado.
+</Notice>
+
+Detalles prácticos del Compose oficial:
+
+- `UPLOAD_LOCATION` admite montajes de red (NFS/SMB); únicamente el directorio de PostgreSQL exige disco local.
+- Fija `IMMICH_VERSION=v3.4.0` en lugar de `release` o `v3`. Immich avanza rápido y de vez en cuando introduce cambios incompatibles en versiones menores, así que conviene leer las notas antes de actualizar.
+- El contenedor ML es el que más memoria pide. En servidores de 4 GB puedes poner `IMMICH_MACHINE_LEARNING_ENABLED=false` o apuntar `MACHINE_LEARNING_URL` a otra máquina más potente en tu red.
+- La transcodificación acelerada por hardware se habilita con `hwaccel.transcoding.yml` incluido en el paquete de la release (usando `quicksync` en CPUs Intel con iGPU).
+
+### Acceso remoto
+
+Mantén el puerto 2283 fuera de internet si no pasa por TLS. Un proxy inverso con Caddy se resuelve en dos líneas (`photos.example.com { reverse_proxy immich-server:2283 }`), o bien puedes dejarlo cerrado del todo y conectar mediante [Tailscale o Headscale autoalojado](/es/headscale-tailscale-autoalojado/). Las aplicaciones móviles de Immich trabajan sin problemas sobre Tailscale.
+
+## El problema del espacio y qué aporta JPEG XL
+
+Immich guarda los originales tal como salen del teléfono o la cámara. Varios años de fotos y clips 4K llenan rápido 300–800 GB, y un archivo DSLR salta pronto a varios terabytes. Ahorro habitual tras recomprimir:
+
+| Tipo de archivo | Formato de origen | Formato destino | Ahorro típico |
+|---|---|---|---|
+| Fotos móviles | HEIC / PNG / RAW | JPEG XL | 20–40% menos peso |
+| Vídeos | MP4/MOV H.264 | AV1 (MP4) | 30–50% menos peso |
+| JPEG de cámara o web | JPEG | JPEG XL | Reempaquetado sin pérdida (exacto bit a bit, reversible) |
+
+Pasar de JPEG a JPEG XL realiza un reempaquetado sin pérdida, de modo que incluso puedes reconstruir el archivo JPEG original byte a byte si hace falta. En HEIC y vídeo H.264, el recorte llega gracias a códecs mucho más eficientes.
+
+Antes de la v3.4.0, convertir tus originales a `.jxl` complicaba el uso diario porque el servidor no generaba bien vistas previas y la app móvil no decodificaba JXL de forma nativa. Ahora que servidor y cliente soportan el flujo completo, reducir el archivo histórico no penaliza la navegación en móviles ni tablets.
+
+## Reducir la biblioteca con immich-convert-originals
+
+[immich-convert-originals](https://github.com/fabianwimberger/immich-convert-originals) es una aplicación web autoalojada de Fabian Wimberger que transcodifica colecciones de Immich por lotes a JPEG XL, HEIC o AVIF en fotos y AV1 en vídeo. Trabaja contra la API de Immich: descarga el original, codifica en local, sube el nuevo archivo, copia metadatos, verifica el resultado y envía el archivo viejo a la papelera de Immich.
+
+Conserva datos EXIF, ubicación GPS, favoritos, valoraciones, estado archivado y álbumes, además de mantener enlazadas las fotos y vídeos de las Live Photos. El progreso queda guardado en SQLite para reanudar lotes interrumpidos, y dispone de un modo simulacro (dry-run) para medir el ahorro antes de tocar nada.
+
+Despliégalo en un proyecto Compose aparte junto a Immich:
+
+```yaml
+# /opt/immich-convert/docker-compose.yml
+services:
+  converter:
+    image: ghcr.io/fabianwimberger/immich-convert-originals:latest
+    container_name: immich-convert
+    ports:
+      - "127.0.0.1:8000:8000"   # no built-in auth, keep bound to localhost
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+```
+
+Redirige el puerto `8000` por SSH si administras el servidor en remoto (`ssh -L 8000:localhost:8000 usuario@servidor`) y entra en `http://localhost:8000`. Introduce tu URL de Immich terminada en `/api` junto con una clave API generada desde tu perfil en **Account Settings > API Keys** (con permisos de lectura, subida y borrado de assets y álbumes, o permiso `all` mientras dura la conversión). Después sigue este orden:
+
+1. **Haz un dry-run en un álbum pequeño.** Mide el ahorro estimado y revisa un par de archivos convertidos tanto en navegador como en móvil.
+2. **Empieza por los JPEG.** El salto JPEG → JXL no tiene pérdida y es reversible, así que es la ganancia con menos riesgo.
+3. **Deja los vídeos AV1 para después.** Codificar AV1 por CPU lleva horas en colecciones grandes; apóyate en la cola reanudable en tandas nocturnas.
+4. **Elige modo subida o modo local.** El modo subida reemplaza originales dentro de Immich mandando los viejos a la papelera de 30 días. El modo local escribe los archivos en carpetas `<year>/<month>` en disco sin modificar tu servidor vivo si prefieres reimportar a mano.
+
+<Notice type="warning" title="Dos avisos antes de procesar toda la biblioteca">
+  1. **Haz copia de seguridad primero.** Aunque la herramienta verifica antes de mover nada a la papelera de 30 días, un fallo contra fotos irreemplazables no merece la apuesta. Una tarea con `restic` hacia otro disco o un patrón como el de nuestra guía de [backups con Dokploy en Cloudflare R2](/es/backups-dokploy-cloudflare-r2/) basta.
+  2. **Álbumes compartidos de pareja y resincronización móvil.** El modo subida omite elementos compartidos por tu pareja. Además, algunos teléfonos vuelven a subir el original en la siguiente copia si cambia el fichero, así que comprueba cómo gestiona duplicados tu app antes de dar por fallida una tanda.
+</Notice>
+
+Si solo te preocupa adelgazar vídeos pesados sin tocar fotos, [immich-recompress](https://github.com/lukasganster/immich-recompress) ofrece un panel sencillo apoyado en HandBrake (`x264`, `x265` o `AV1`, con límite de resolución opcional) y paso de revisión antes de sustituir.
+
+## La experiencia móvil: HomeRoll
+
+La app oficial de Immich resuelve muy bien la copia automática y la gestión, aunque en iOS mucha gente echa en falta las transiciones y gestos nativos de Fotos de Apple al navegar años de recuerdos. [HomeRoll](https://github.com/silentprovider423/HomeRoll) es un cliente nativo en SwiftUI/UIKit pensado para conectar contra tu servidor Immich imitando la experiencia de Apple Photos (con proyectos hermanos para macOS y Apple TV).
+
+Un reparto práctico consiste en mantener la app oficial de Immich encargándose de las subidas en segundo plano y dejar HomeRoll en el iPhone para revisar la galería. Como HomeRoll es un proyecto joven bajo licencia MIT que se instala mediante sideloading o compilación propia (AltStore/SideStore), conviene verificar compatibilidad tras actualizar el servidor de Immich antes de instalarlo en los teléfonos de toda la familia.
+
+## Operación día a día
+
+**Actualizaciones.** Cambia `IMMICH_VERSION` en `.env` y ejecuta `docker compose pull && docker compose up -d`. Revisa siempre las notas de la versión por si incluye migraciones de índices largas en PostgreSQL.
+
+**Copias de seguridad.** Immich guarda volcados automáticos de Postgres dentro de `UPLOAD_LOCATION/backups`, y la versión 3.4.0 los acelera comprimiendo con `pigz` cuando está disponible, además de mejorar el soporte para FUTO Backups. Ten en cuenta que los volcados de base de datos solo protegen metadatos, álbumes y caras: acompáñalos con un `restic` o `rsync` de `UPLOAD_LOCATION` hacia otro dispositivo, porque un RAID protege frente a un disco roto, no frente a un borrado accidental.
+
+**Bibliotecas externas.** Si ya tienes un archivo histórico ordenado en disco, móntalo en solo lectura dentro del contenedor y añádelo como *External Library* desde administración en lugar de subir terabytes por la API.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Es Immich bastante estable para guardar mi única copia familiar?" group="faq" expanded="true">
+Immich mantiene el aviso de desarrollo activo, pero su arquitectura de almacenamiento resulta muy transparente: los archivos quedan como ficheros normales en un árbol de carpetas que puedes copiar con cualquier herramienta y la base de datos se respalda en volcados estándar de PostgreSQL. Es sólido para uso diario, aunque nunca debe ser tu única copia de fotos importantes, igual que tampoco debería serlo la nube comercial.
+</Accordion>
+
+<Accordion label="¿Funciona JPEG XL en teléfonos y navegadores?" group="faq">
+Dentro de Immich sí gracias a la v3.4: el servidor genera vistas previas desde JXL y las apps móviles lo decodifican en local. Fuera de Immich el soporte en navegadores sigue desigual (Safari lo soporta y Chrome no), aunque al compartir enlaces públicos Immich entrega previsualizaciones transcodificadas a quien abra el álbum en navegadores sin JXL.
+</Accordion>
+
+<Accordion label="¿Cuánto espacio se ahorra en la práctica?" group="faq">
+Los rangos habituales rondan un 20–40% en fotos y un 30–50% en vídeos, aunque un dry-run sobre un álbum propio te dará la cifra exacta para tus cámaras. En una biblioteca de 1 TB supone liberar entre 200 y 500 GB.
+</Accordion>
+
+<Accordion label="¿Immich frente a Nextcloud Photos o PhotoPrism?" group="faq">
+Para sustituir Google Photos con copia automática desde el móvil, Immich lleva la delantera por ritmo de desarrollo y calidad de clientes móviles. Nextcloud Photos tiene sentido si ya centralizas archivos y usuarios en Nextcloud; PhotoPrism sigue fuerte en etiquetado y búsqueda, pero su flujo de subida móvil resulta más torpe.
+</Accordion>
+
+<Accordion label="¿Puede correr Immich en una Raspberry Pi?" group="faq">
+Publica contenedores arm64 y funciona para bibliotecas moderadas, aunque la indexación facial/CLIP castiga CPUs ARM de bajo consumo y Postgres exige disco local rápido. Con el precio actual de la Pi 5 de 16 GB, un mini PC N150 cuesta menos y termina las colas de ML bastante antes, como vemos en nuestra [comparativa entre Raspberry Pi 5 y mini PC](/es/raspberry-pi-5-vs-mini-pc/).
+</Accordion>
+
+## Conclusión
+
+Con previsualizaciones en servidor y decodificación JPEG XL nativa en móviles desde la v3.4.0, autoalojar tu galería deja de implicar almacenar originales pesados sin alternativa práctica. Despliega Immich con versión fija, prueba las copias del móvil durante una semana y ejecuta un simulacro con `immich-convert-originals` en un álbum de prueba antes de comprimir toda tu colección.
+
+<Button text="Más aplicaciones para tu servidor doméstico" link="/es/contenedores-docker-servidor-casa/" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Artículos relacionados
+
+- [Mejores contenedores Docker para un servidor en casa](/es/contenedores-docker-servidor-casa/) (el resto del stack)
+- [Mejor mini PC para un servidor doméstico](/es/mejor-mini-pc-servidor-casa/) (hardware donde ejecutarlo)
+- [Mejores NAS para Docker y Proxmox](/es/mejores-nas-homelab-docker-proxmox/) (dónde alojar la biblioteca)
+- [Configurar Headscale y Tailscale autoalojado](/es/headscale-tailscale-autoalojado/) (acceso privado para el móvil)
+- [Backups de Dokploy en Cloudflare R2](/es/backups-dokploy-cloudflare-r2/) (estrategia de copia fuera del servidor)
