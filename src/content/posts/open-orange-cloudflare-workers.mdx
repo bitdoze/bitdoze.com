@@ -1,0 +1,271 @@
+---
+date: 2026-11-14
+lastmod: 2026-11-14T00:00:00Z
+title: "OpenOrange: Run Cloudflare Workers on Your Own Servers"
+meta_title: "OpenOrange: Self-Host Cloudflare Workers + Durable Objects"
+description: "OpenOrange runs your existing Cloudflare Workers and Durable Objects on AWS, GCP, Azure, or your own VPS. I installed it and tested dev and deploy. Here's how it works, what it costs, and where it breaks."
+image: "../../assets/images/26/11/open-orange-cover.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["cloudflare-workers", "open-orange", "durable-objects"]
+canonical: "https://www.bitdoze.com/open-orange-cloudflare-workers/"
+quickAnswer: "pnpm add -g open-orange && orange dev → your Worker answers on :8787, with every Durable Object running as a Rivet Actor on its own SQLite file."
+testedOn: ["Ubuntu 24.04", "Node.js 24", "pnpm 11", "open-orange 1.0.1"]
+timeToComplete: "10 min"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import { Picture } from "astro:assets";
+import imagCloudToServers from "../../assets/images/26/11/open-orange-cloud-to-servers.webp";
+import imagArchitecture from "../../assets/images/26/11/open-orange-architecture.png";
+import imagSelfHost from "../../assets/images/26/11/open-orange-self-host.png";
+import imagMigrate from "../../assets/images/26/11/open-orange-migrate-do.png";
+
+*Disclosure: this guide contains referral links. If you buy through them, I may earn a commission at no extra cost to you.*
+
+Cloudflare Workers is a great platform until it isn't. The free tier is generous, the paid tier is cheap at small scale, and everything works right up to the moment you hit a wall: 128 MB of memory per Worker, 30 seconds of CPU per request, 10 GB per Durable Object, and a `nodejs_compat` shim standing between you and the real Node.js. Then comes the second discovery. Durable Objects keep their state inside Cloudflare, and there is no export button.
+
+[OpenOrange](https://github.com/rivet-dev/open-orange), launched by Rivet on November 12, is the cleanest exit ramp I have seen so far. It is an Apache-2.0 runtime that takes your existing Worker project, `wrangler.jsonc` and all, and runs it on AWS, Google Cloud, Azure, or a box under your desk. `wrangler dev` becomes `orange dev`. Durable Objects become Rivet Actors, each with its own SQLite database. No code changes.
+
+I installed it, ran a Durable Object on my own machine, and walked the deploy path. Short version: the promise mostly holds up, which is more than I expected from a repo that is two days old.
+
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/ykeVET4LtA4"
+  label="Introducing OpenOrange — Rivet's official walkthrough"
+/>
+
+## What OpenOrange is
+
+OpenOrange is a CLI (`orange`, installed from npm as `open-orange`) plus a runtime that implements the Workers API on plain Node.js. It does not run `workerd`, Cloudflare's open-source runtime. It reads your Wrangler config, maps every binding onto Rivet's actor infrastructure, and reuses Cloudflare's own MIT-licensed code where it can (the Workflows engine, for example).
+
+Rivet, the company behind it, builds actor-based infrastructure: long-lived, stateful processes with their own storage. That turns out to be almost exactly what a Durable Object is, which makes OpenOrange less of a port and more of a marriage between two very similar ideas.
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imagCloudToServers} alt="Illustration of a Cloudflare cloud with worker icons inside, a dotted arrow arcing to a home server rack topped with a glossy orange fruit" />
+
+## Why run Workers off Cloudflare at all
+
+Two reasons, and they are the same two reasons everything gets self-hosted: limits and money.
+
+**The limits.** On Workers Paid, every Worker and Durable Object gets 128 MB of memory and 30 seconds of CPU per request (5 minutes if you raise the cap). Cron, queue, and alarm handlers get 15 minutes of wall time. A request can hold 6 open connections. A Durable Object tops out at 10 GB of storage, and your bundle can't exceed 64 MiB. Under OpenOrange, every one of those becomes "whatever your machine allows", plus real Node.js instead of the `nodejs_compat` subset.
+
+| Limit | Cloudflare Workers Paid | OpenOrange |
+|---|---|---|
+| Memory per Worker / Durable Object | 128 MB | Your machine's RAM (~4 GB Node heap default, configurable) |
+| CPU time per request | 30 s default, 5 min max | No cap |
+| Cron, queue, alarm handlers | 15 min wall time | No cap |
+| Open connections per request | 6 | OS limits |
+| Storage per Durable Object | 10 GB | No cap |
+| Worker bundle | 64 MiB | No cap |
+| Node.js | `nodejs_compat` subset | Stock Node.js |
+
+If you have read our [list of self-hosted apps that run on Cloudflare Workers](/self-hosted-apps-cloudflare-workers/) or followed [the EmDash deploy guide](/deploy-emdash-cloudflare-workers/), you know how quickly those numbers start to matter.
+
+**The bill.** Cloudflare meters Durable Object compute, storage, and SQLite writes separately, and the metering is where the money goes at scale. Rivet's own cost model, priced against raw AWS Graviton with 40% headroom plus S3 in your account:
+
+| | Cloudflare | OpenOrange | |
+|---|---|---|---|
+| Durable Object compute | $0.045 per GB-hour | $0.0094 per GB-hour | 4.8× cheaper |
+| Durable Object storage | $0.20 per GB-month | $0.023 per GB-month | 8.7× cheaper |
+| SQLite writes | $1.00 per million rows | ~$0.18 per million | 5.7× cheaper |
+
+The third reason is quieter but worth naming: exit cost. Durable Objects trap state per-object inside Cloudflare. If you ever want to leave, you are writing a bespoke export. OpenOrange comes with `orange migrate`, which moves those objects while your app keeps serving. More on that below.
+
+## Try it locally (what I ran)
+
+You need Node.js 22 or later, pnpm, and a Worker project with a `wrangler.jsonc`, `wrangler.json`, or `wrangler.toml`. Docker only enters the picture when you deploy.
+
+Install the CLI globally:
+
+```sh
+pnpm add -g open-orange
+```
+
+Then, inside your Worker project, replace `wrangler dev` with:
+
+```sh
+orange dev
+```
+
+I used the repo's `hello-durable-object` example, a tiny counter Worker where each name gets its own `Greeter` Durable Object with a SQLite `visits` table. The output on my machine:
+
+```sh
+🍊 open-orange v1.0.1  ·  by rivet.dev
+
+  Worker        hello-durable-object
+  Config        wrangler.jsonc
+  Compat date   2026-09-03
+
+  Binding       Resource         Runs on
+  env.GREETER   Durable Object   Rivet Actor · Greeter
+
+● Ready in 3.0s
+  Local         http://127.0.0.1:8787
+  Agent         Run orange mcp to connect your coding agent to the Rivet MCP
+```
+
+Two requests later, the proof that state actually persists:
+
+```sh
+$ curl http://localhost:8787/Devin
+{"greeting":"Hello, Devin!","visits":1}
+$ curl http://localhost:8787/Devin
+{"greeting":"Hello, Devin!","visits":2}
+```
+
+The counter incremented. That is the interesting part, not the greeting. The `Greeter` Durable Object ran as a Rivet Actor, its SQLite file landed in a local `.open-orange/` directory, and the same name routed to the same object on the second request, exactly like Cloudflare's `getByName` semantics.
+
+A few other commands worth knowing before you start:
+
+<ListCheck>
+<ul>
+<li>`orange doctor` scans the project, checks compatibility, and lists every binding with what it runs on under OpenOrange.</li>
+<li>`orange types` generates `worker-configuration.d.ts` for your bindings.</li>
+<li>`orange d1 execute` and `orange d1 migrations apply|list` handle D1 databases directly.</li>
+<li>`orange mcp` connects a coding agent (Claude Code, Codex, Cursor) to the Rivet MCP so it can run the quickstart for you.</li>
+<li>Wrangler commands Orange doesn't implement, like `delete` or `secret`, print "is not implemented". Run them with real `wrangler`.</li>
+</ul>
+</ListCheck>
+
+## Deploy it somewhere
+
+Three targets, depending on how much you want to operate:
+
+- **Rivet Cloud** — a dedicated, fully managed cluster on AWS or Google Cloud in your chosen region. `orange login`, `orange link --cluster <name>`, `orange deploy`, done. You get a URL.
+- **BYOC** — your AWS, GCP, or Azure account, operated by Rivet over an outbound connection.
+- **Self-hosted** — Apache-2.0, runs anywhere Docker runs: Hetzner, on-prem, an air-gapped rack, your homelab.
+
+I ran the self-hosted path as far as it goes without a live cluster. `orange deploy --dry-run` builds nothing and calls no API; it writes a Dockerfile and build context you can inspect:
+
+```sh
+$ orange deploy --dry-run --outdir out
+
+Dry run. Nothing was built or sent to Rivet Cloud.
+
+Dockerfile  /tmp/hello-durable-object/out/Dockerfile
+Context     /tmp/hello-durable-object/out/context
+Image       hello-durable-object:20261114-071535
+
+Self-host
+  docker build --platform linux/amd64 -f out/Dockerfile -t hello-durable-object:20261114-071535 out/context
+  docker run --rm -p 8080:8080 -e 'RIVET_ENDPOINT=https://<namespace>:<token>@<engine-host>' hello-durable-object:20261114-071535
+```
+
+The generated Dockerfile is refreshingly boring: `node:24-slim`, a `pnpm install --prod`, your Worker code copied in, and `orange serve` as the entrypoint on port 8080. No magic. Any container host can run it.
+
+One thing the dry run makes clear: your containers don't get inbound connections from a dashboard somewhere. Each node runs `orange serve` and connects *out* to a Rivet Engine endpoint (`RIVET_ENDPOINT`), which is the control plane that places Durable Objects on containers and routes requests to them. You run that control plane yourself too. Rivet publishes per-platform guides for it: Kubernetes, AWS ECS, Docker Compose, Hetzner, Railway, Render, or a plain VM.
+
+<figure>
+<Picture formats={["webp"]} fallbackFormat="png" src={imagSelfHost} alt="Self-host topology: requests hit your Worker running orange serve, which connects out to the Rivet Engine via RIVET_ENDPOINT" />
+<figcaption class="mt-2 text-center text-sm text-gray-500 dark:text-gray-400">Self-hosting in one picture: your Worker container makes an outbound connection to the Rivet Engine. Diagram from the OpenOrange docs.</figcaption>
+</figure>
+
+So a realistic minimal self-host rig is two pieces: one machine (or compose project) running the Rivet Engine control plane, and one or more containers running your built image. For the box itself, a cheap VPS is plenty. We compared the usual suspects in [DigitalOcean vs Vultr vs Hetzner](/digitalocean-vs-vultr-vs-hetzner/), and my own pick is [Hetzner](/hetzner-cloud-review/) at roughly €4-5/month.
+
+<Button text="Try Hetzner Cloud" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+
+## How it works under the hood
+
+The architecture is simpler than the pitch suggests:
+
+<figure>
+<Picture formats={["webp"]} fallbackFormat="png" src={imagArchitecture} alt="OpenOrange architecture: Docker containers running Workers and Durable Objects on Node.js connect out to the Rivet control plane, which places each actor and routes requests, backed by S3 storage" />
+<figcaption class="mt-2 text-center text-sm text-gray-500 dark:text-gray-400">Your containers run the code, Rivet places each Durable Object on a container and routes to it, S3 holds the data. Diagram from the OpenOrange docs.</figcaption>
+</figure>
+
+Three moving parts:
+
+1. **Your containers** run your Workers and Durable Objects on stock Node.js, anywhere you like.
+2. **The Rivet control plane** (self-hosted, Rivet Cloud, or BYOC) assigns each Durable Object to a container and routes requests to it.
+3. **S3** stores every object's SQLite data, behind Rivet's WarpDrive layer with SSD in front. Scaling out means adding machines, and an S3-compatible store (MinIO, or even R2 itself — we use it for [Dokploy backups](/dokploy-backups-cloudflare-r2/)) works as the backing store.
+
+Because state lives in S3 rather than on the container's disk, objects can move between machines without losing anything. That property is what makes the next part possible.
+
+## Moving your data off Cloudflare
+
+This is the feature that elevates OpenOrange from "interesting" to "worth paying attention to". `orange migrate` moves live Durable Objects and D1 databases out of Cloudflare with no downtime. The sequence, per object:
+
+<figure>
+<Picture formats={["webp"]} fallbackFormat="png" src={imagMigrate} alt="Zero-downtime Durable Object migration: the Cloudflare object keeps serving while it sends its data in pages, marks itself moved, then answers migrator.moved while the OpenOrange copy serves every request" />
+<figcaption class="mt-2 text-center text-sm text-gray-500 dark:text-gray-400">Each Durable Object copies itself while the original keeps serving, then hands off. Diagram from the OpenOrange docs.</figcaption>
+</figure>
+
+The Cloudflare-side object keeps answering requests while it ships its SQLite data over in pages. If no write arrives mid-copy, it marks itself moved and starts answering `migrator.moved`, which routes requests to the OpenOrange copy. Rollback is pointing DNS back and setting `MIGRATOR_DISABLED=true`. It is a clever design, and it sidesteps the thing that usually makes Workers lock-in permanent.
+
+## What works and what doesn't
+
+Not every binding survives the trip. The docs rate each one honestly:
+
+| Cloudflare binding | Status | Runs on |
+|---|---|---|
+| Durable Objects | Partial | One Rivet Actor per object, own SQLite db |
+| KV, D1, Rate Limiting | Drop-in | Rivet Actors |
+| Queues, Cron Triggers | Drop-in | Rivet Actors |
+| Cache | Partial | One Rivet Actor per cache name |
+| Workflows | Partial | Cloudflare's own engine, one Actor per instance |
+| Tail Workers | Partial | Rivet Durable Streams |
+| R2 | Pluggable | Rivet Actor, or S3 / GCS / R2 / MinIO |
+| Workers AI | Pluggable | OpenRouter, OpenAI, any compatible endpoint |
+| Send Email | Pluggable | Amazon SES or any SMTP |
+| Browser Rendering | Pluggable | Browserbase or any CDP endpoint |
+| Hyperdrive | Drop-in | Your Postgres/MySQL, direct connection |
+| Sandbox | Pluggable | E2B, Daytona, Freestyle, agentOS, or local dir |
+| Analytics Engine | Not supported | `writeDataPoint()` silently drops data |
+| Vectorize, Images, Stream, Pipelines, AI Search, mTLS, VPC | Not supported | Calls throw |
+
+"Pluggable" means you configure a provider, which is quietly one of the best parts: Workers AI becomes any OpenAI-compatible endpoint, email becomes any SMTP server, R2 becomes any S3. The Cloudflare-specific service turns into a generic equivalent you already know how to run.
+
+<Notice type="warning" title="Watch the silent failure">
+Most unsupported bindings throw an error when called, so you find out immediately. Analytics Engine is different: <code>writeDataPoint()</code> accepts your data and drops it. If you rely on Analytics Engine for metrics, audit that before migrating, not after.
+</Notice>
+
+## The honest caveats
+
+The project is two days old, so expect rough edges. The docs are at least honest about them. A few things to keep in mind:
+
+- Durable Objects are rated "partial", not "drop-in". The known differences are documented per-binding. For a counter demo, everything worked; for a production object doing exotic `ctx.storage` calls, read the differences page first.
+- You lose the edge network. Cloudflare runs your Worker in 300+ cities, OpenOrange runs it where you put it. If your users are global and latency-sensitive, that trade is real.
+- You are operating servers again. Someone has to run the Rivet Engine, an S3 store, and the containers. That is the entire point of self-hosting, but it is still work, and a [self-hosted PaaS](/coolify-vs-dokploy-vs-kamal-2/) or a plain box plus systemd will not manage itself.
+- Dev and production share the runtime, which is a genuine strength, but the control plane adds a moving part local dev doesn't have. Test against a real `RIVET_ENDPOINT` before you bet a migration on it.
+
+## Should you use it
+
+If you have a Workers project that is starting to bruise against Cloudflare's limits, or a Durable Object workload where the meter is running faster than the revenue, OpenOrange is worth an afternoon. `orange dev` on an existing project takes about ten minutes to evaluate, and it does not touch your code.
+
+If your Workers run fine on the free tier, stay. Cloudflare's free tier is legitimately hard to beat, and this site's own [Plausible-through-Workers proxy](/astro-plausible-cloudflare-workers/) has run on it for years without complaint. The case for OpenOrange appears at the moment you need more than 128 MB, more than 30 seconds, stock Node.js, or a way out.
+
+What I find most promising is the direction. Rivet built a credible self-hosted runtime for the Workers ecosystem, much like [self-hosted Convex](/convex-self-host/) pulled off for real-time backends. Same bet, different platform: keep the DX, lose the landlord.
+
+## FAQ
+
+<Accordion label="Does OpenOrange require changes to my Worker code?" group="faq" expanded="true">
+No. It reads your existing `wrangler.jsonc`/`wrangler.toml` and runs the same code. Bindings map to Rivet equivalents automatically. The exceptions are bindings in the "not supported" rows of the table above, which throw or drop data and need attention before a real migration.
+</Accordion>
+
+<Accordion label="Is it just workerd self-hosted?" group="faq">
+No. OpenOrange implements the Workers API on stock Node.js (and can use Bun) and maps Cloudflare services onto Rivet's actor system. It uses Wrangler only to read your config. That is why the runtime limits go away: there is no `workerd` sandbox underneath.
+</Accordion>
+
+<Accordion label="Is OpenOrange free?" group="faq">
+The runtime is Apache-2.0 and self-hosting costs you only the machines it runs on. Rivet Cloud and BYOC are the paid, operated options if you don't want to run the control plane yourself.
+</Accordion>
+
+<Accordion label="Can it fully replace Cloudflare Workers?" group="faq">
+For Workers + Durable Objects + KV/D1/Queues/Cron workloads, mostly yes, with "partial" caveats documented per binding. For anything touching Vectorize, Images, Stream, AI Search, or Analytics Engine, no, not yet. Check the bindings table against your `wrangler` config before planning a move.
+</Accordion>
+
+<Accordion label="What about Cloudflare's global edge network?" group="faq">
+You give it up. OpenOrange runs in the regions you deploy to. Fronting your self-hosted cluster with a CDN restores some of the reach, but sub-50ms-everywhere is a Cloudflare property, not a runtime property.
+</Accordion>
+
+## Closing
+
+OpenOrange does the one thing Cloudflare can't offer: a way out that doesn't require rewriting the app. The CLI is real, the dev loop works today, `orange migrate` solves the genuinely hard part of leaving, and the whole thing is Apache-2.0. It is also brand new, so treat "partial" as "verify before you trust".
+
+Ten minutes with `orange dev` on your own project will tell you more than this article can.
+
+<Button text="OpenOrange on GitHub" link="https://github.com/rivet-dev/open-orange" variant="solid" color="blue" size="md" icon="arrow-right" external={true} />
+<Button text="OpenOrange docs" link="https://openorange.dev/docs/" variant="outline" color="gray" size="md" external={true} />
