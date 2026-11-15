@@ -229,6 +229,12 @@ export const translations = {
     previousLabel: "Previous",
     nextPageAria: "Go to next page",
     nextLabel: "Next",
+    seriesPartOf: "Part {part} of {total}",
+    seriesPrevious: "Previous",
+    seriesNext: "Next",
+    affiliateLinkNote: "*Affiliate link",
+    playVideoAria: "Play video: {label}",
+    youtubeUnavailable: "YouTube video unavailable",
   },
   es: {
     // Header / nav
@@ -456,6 +462,12 @@ export const translations = {
     previousLabel: "Anterior",
     nextPageAria: "Ir a la página siguiente",
     nextLabel: "Siguiente",
+    seriesPartOf: "Parte {part} de {total}",
+    seriesPrevious: "Anterior",
+    seriesNext: "Siguiente",
+    affiliateLinkNote: "*Enlace de afiliado",
+    playVideoAria: "Reproducir video: {label}",
+    youtubeUnavailable: "Video de YouTube no disponible",
   },
   de: {
     // Header / nav
@@ -464,7 +476,7 @@ export const translations = {
     openMenu: "Hauptmenü öffnen",
     closeMenu: "Hauptmenü schließen",
     switchLang: "English",
-    switchToLang: "Zu English wechseln",
+    switchToLang: "Zu Englisch wechseln",
     switchToLanguage: "Zu {lang} wechseln",
     noTranslation: "Keine {lang}-Version — zur {lang}-Startseite",
     mainNav: "Hauptnavigation",
@@ -535,7 +547,7 @@ export const translations = {
 
     // AmazonProduct widget
     amazonCheckPrice: "Preis auf Amazon prüfen",
-    amazonPriceNote: "Preis & Verfügbarkeit bei Amazon.de",
+    amazonPriceNote: "Preis & Verfügbarkeit bei Amazon.com",
     howITest: "Wie ich teste",
     amazonKeyFeatures: "Hauptmerkmale",
     amazonWhatWeLike: "Was uns gefällt",
@@ -683,6 +695,12 @@ export const translations = {
     previousLabel: "Zurück",
     nextPageAria: "Zur nächsten Seite",
     nextLabel: "Weiter",
+    seriesPartOf: "Teil {part} von {total}",
+    seriesPrevious: "Vorheriger",
+    seriesNext: "Nächster",
+    affiliateLinkNote: "*Affiliate-Link",
+    playVideoAria: "Video abspielen: {label}",
+    youtubeUnavailable: "YouTube-Video nicht verfügbar",
   },
 } as const;
 
