@@ -1,5 +1,6 @@
 ---
 date: 2026-02-26T00:00:00Z
+lastmod: 2026-11-14T00:00:00Z
 translationKey: "send-emails-in-wordpress-zoho-smtp-fluentsmtp"
 title: "Cómo enviar correos en WordPress usando Zoho SMTP con FluentSMTP"
 meta_title: "Cómo enviar correos en WordPress usando Zoho SMTP"
@@ -13,74 +14,346 @@ canonical: "https://www.bitdoze.com/es/enviar-emails-wordpress-zoho-smtp-fluents
 
 import { Picture } from "astro:assets";
 import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
 import imgFluentSmtp from "@assets/images/wordpress/fluentsmtp_settings-1024x730.webp";
 
 *Divulgación: esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.*
 
-De forma predeterminada, WordPress envía los correos a través de la función `mail()` de PHP, que la mayoría de los proveedores de hosting bloquean o limitan. El resultado: correos de restablecimiento de contraseña que nunca llegan, confirmaciones de pedido que se evaporan y envíos de formularios de contacto que desaparecen.
+Restablecimientos de contraseña que nunca llegan. Confirmaciones de pedido que se evaporan. Envíos de formularios de contacto que desaparecen sin dejar un error en ninguna parte. Si tu sitio WordPress tiene este problema, la causa casi siempre es la misma: la función `mail()` de PHP, que la mayoría de los hostings bloquean o limitan hasta dejarla inservible. Esta guía de Zoho SMTP en WordPress explica la solución: enrutar `wp_mail()` a través de un servidor SMTP real con FluentSMTP, el plugin gratuito que registra cada mensaje y te avisa cuando una entrega falla.
 
-Conectar WordPress a una cuenta SMTP real soluciona esto. Yo uso [Zoho Mail](https://www.zoho.com/mail/) para varios dominios porque es barato y admite dominios personalizados. El plugin que uso es [FluentSMTP](https://wordpress.org/plugins/fluent-smtp/) (actualmente v2.2.95), que es gratuito y registra cada correo enviado para que puedas ver qué salió realmente. Admite integraciones nativas por API con más de 10 proveedores y puede enviar alertas de fallos a Telegram, Slack o Discord.
+Yo uso [Zoho Mail](https://www.zoho.com/mail/) para varios dominios porque es barato y admite dominios personalizados en el plan gratuito. El plugin es [FluentSMTP](https://wordpress.org/plugins/fluent-smtp/), 100% gratis y sin versión pro (v2.4.5 a fecha de noviembre de 2026). Admite más de 15 proveedores por API además de SMTP genérico, registra las cabeceras completas y las respuestas del servidor en cada envío, y puede mandar alertas de fallo a Telegram, Slack, Discord o Pushover.
 
 <YouTubeEmbed
   url="https://www.youtube.com/embed/uBxwRFabMc4"
   label="Cómo enviar correos en WordPress usando Zoho SMTP con FluentSMTP"
 />
 
-## Pasos de configuración
+## Por qué falla el correo de WordPress (y por qué SMTP lo arregla)
+
+WordPress envía todo el correo a través de `wp_mail()`, que de forma predeterminada llama a la función `mail()` de PHP. En la mayoría de hostings compartidos y en muchos VPS, `mail()` está directamente deshabilitada o limitada en silencio. El mensaje parece enviarse (WordPress no lanza ningún error), pero al destinatario no le llega nada. Ni rebote, ni línea en el registro, nada.
+
+Enrutar por SMTP arregla la cadena. Esto es lo que ocurre cuando FluentSMTP está en su sitio:
+
+```
+WordPress wp_mail()
+    → FluentSMTP (registros, reintentos, alertas de fallo)
+        → Zoho SMTP (remitente autenticado y con reputación)
+            → Bandeja de entrada del destinatario
+
+  Notas al margen:
+  ├── Los registros DNS SPF + DKIM deciden entre bandeja de entrada o spam
+  └── La autenticación usa una contraseña de aplicación de Zoho, no tu contraseña principal
+```
+
+La misma cuenta SMTP de Zoho también arregla el correo del servidor que no es de WordPress. Si usas [alertas de correo en Linux para monitorizar la CPU](/es/monitorizar-cpu-alertas-email-linux/) o informes de cron, sufren el mismo problema de `mail()`. Apuntarlos al mismo relay SMTP resuelve ambas cosas.
+
+<Notice type="info" title="SMTP vs API de proveedor">
+FluentSMTP también admite proveedores por API (SES, Gmail OAuth, SendGrid, etc.), pero Zoho no tiene proveedor por API dedicado en FluentSMTP, así que va por la vía SMTP genérica. El enfoque de esta guía es el único que funciona con Zoho Mail.
+</Notice>
+
+## Requisitos previos
+
+Antes de tocar ningún ajuste, esto es lo que tiene que existir:
+
+<ListCheck>
+<ul>
+<li>WordPress 6.5 o superior y PHP 7.4+ (requisito de FluentSMTP 2.4.x, subido desde WP 5.5 en el rediseño 2.4.0)</li>
+<li>Una cuenta de Zoho Mail, gratuita o de pago (el host SMTP cambia; se explica más abajo)</li>
+<li>Una dirección de correo con dominio personalizado en Zoho (o una dirección personal de Zoho)</li>
+<li>Acceso a la zona DNS de tu dominio de envío (para los registros SPF y DKIM)</li>
+<li>Una copia de seguridad del sitio hecha antes de cambiar los ajustes de correo</li>
+<li>Acceso SSH + WP-CLI si quieres la verificación por línea de comandos (opcional)</li>
+</ul>
+</ListCheck>
+
+Si estás montando un sitio nuevo, aquí tienes dos buenos caminos:
+
+<Tabs>
+<Tab name="Ubuntu VPS + CloudPanel">
+La forma más rápida de tener WordPress funcionando en un VPS con un panel gestionado. Sigue la guía para [instalar WordPress en Ubuntu ARM con CloudPanel](/es/instalar-wordpress-ubuntu-arm/). Funciona en cualquier VPS Ubuntu, ARM o x86. Si prefieres no gestionar un VPS en absoluto, el [hosting WordPress gestionado de Cloudways](https://go.bitdoze.com/cloudways) empieza en unos $11/mes.
+</Tab>
+<Tab name="Docker Compose">
+¿Prefieres contenedores? Puedes [instalar WordPress con Docker Compose](/es/instalar-wordpress-docker/) como un stack autocontenido con Nginx, MariaDB y PHP. Buena opción si ya usas Docker en la máquina.
+</Tab>
+</Tabs>
+
+**¿Necesitas un VPS?** Estos son los proveedores que miraría primero:
 
 <Button link="https://go.bitdoze.com/hetzner" text="Hetzner VPS" />
 <Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
 <Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 gratis" />
 <Button link="https://go.bitdoze.com/vultr" text="Vultr $100 gratis" />
 
-_Los precios de los VPS subieron en todos los proveedores en 2026 — si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+_Los precios de los VPS subieron en todos los proveedores en 2026. Si te estás replanteando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/). Un VPS económico cuesta €4-10/mes, que es todo lo que necesita esta configuración._
 
+Haz también una copia de seguridad antes de cambiar los ajustes de correo. Los [plugins gratuitos de backup para WordPress](/es/mejores-plugins-gratuitos-backup-wordpress/) como UpdraftPlus hacen una instantánea completa en minutos. Los cambios en la configuración de correo son de bajo riesgo, pero una copia no cuesta nada y te salva del "he roto los restablecimientos de contraseña de todos los usuarios".
 
-**1. Instala FluentSMTP**
+## Configura SPF y DKIM para tu dominio de envío
 
-En tu panel de WordPress, ve a **Plugins → Añadir nuevo**, busca "FluentSMTP", instálalo y actívalo.
+Este es el paso que la mayoría de tutoriales se saltan, y es la razón por la que los correos de prueba caen en spam incluso con la configuración SMTP perfecta. SPF y DKIM le dicen a los servidores de correo receptores que Zoho está autorizado a enviar en nombre de tu dominio. Sin ellos, Gmail y Outlook mandarán tu correo de WordPress a la papelera sin avisar.
 
-**2. Crea una contraseña de aplicación en Zoho**
+Hazlo **antes** del primer envío de prueba. Los registros DNS necesitan tiempo para propagarse (normalmente minutos, a veces horas), y la entregabilidad se decide a nivel DNS, no en FluentSMTP.
 
-Inicia sesión en tu cuenta de Zoho y ve a [Seguridad de la cuenta → Contraseñas de aplicación](https://accounts.zoho.com/home#security/app_password). Genera una contraseña para WordPress. La necesitas porque Zoho no acepta tu contraseña principal de la cuenta para la autenticación SMTP.
+<Notice type="info" title="No depures DNS dentro del plugin">
+SPF, DKIM y DMARC viven en la consola de administración de Zoho y en tu proveedor de DNS. FluentSMTP no tiene nada que ver con ellos. Si el correo se envía pero cae en spam, el plugin no es el problema.
+</Notice>
 
-**3. Configura FluentSMTP**
+### Registro SPF para Zoho
 
-Ve a **FluentSMTP → Settings** y elige "Other SMTP". Rellena:
+Publica un registro TXT en tu dominio raíz:
 
-- **From Email**: la dirección de correo de Zoho o el alias desde el que quieres enviar
-- **From Name**: el nombre de tu sitio o tu nombre
-
-Para los datos del SMTP, usa estos ajustes según tu tipo de cuenta:
-
-**Cuentas personales de Zoho** (`tunombre@zoho.com`):
-- Servidor: `smtp.zoho.com`
-- Puerto: `465` (SSL) o `587` (TLS)
-
-**Cuentas de empresa/dominio** (`tu@tudominio.com`):
-- Servidor: `smtppro.zoho.com`
-- Puerto: `465` (SSL) o `587` (TLS)
-
-Ambas requieren autenticación. Usa tu dirección de correo de Zoho como nombre de usuario SMTP y la contraseña de aplicación que creaste en el paso 2 como contraseña SMTP.
-
-<Picture formats={["webp"]} fallbackFormat="webp" src={imgFluentSmtp} alt="Configuración de FluentSMTP con Zoho SMTP" />
-
-**4. Envía un correo de prueba**
-
-Después de guardar, haz clic en **Send Test Email** en FluentSMTP para verificar la entrega. Revisa los registros de correo en FluentSMTP para confirmar que aparece como enviado. Si la prueba no llega, vuelve a comprobar la contraseña de aplicación y la combinación de servidor/puerto.
-
-El plan gratuito de Zoho envía un número limitado de correos al día (el límite varía según el plan). Para un blog personal o un sitio pequeño, es más que suficiente.
-
-## Conexiones de respaldo
-
-FluentSMTP admite múltiples conexiones SMTP con respaldo automático. Si Zoho está caído o rechaza un envío, puede reintentarlo a través de un segundo proveedor (como Gmail o Amazon SES). Configúralo en FluentSMTP → Settings → Add Another Connection. Para la mayoría de los sitios pequeños no es necesario, pero si gestionas una tienda WooCommerce donde los correos de pedidos son críticos, vale la pena configurarlo.
-
-## Consejo: guarda las credenciales en wp-config.php
-
-En lugar de guardar tu contraseña SMTP en la base de datos de WordPress, puedes definirla en `wp-config.php` para mayor seguridad:
-
-```php
-define('FLUENTMAIL_SMTP_PASSWORD', 'your-app-password-here');
+```text
+v=spf1 include:zohomail.com ~all
 ```
 
-FluentSMTP la detecta automáticamente. Así mantienes las credenciales fuera de la base de datos y lejos de plugins que podrían exponerlas.
+Si ya tienes un registro SPF (por ejemplo, de Google Workspace u otro remitente), **fusiona** el `include:zohomail.com` dentro del existente. No publiques un segundo registro `v=spf1`.
+
+<Notice type="warning" title="Nunca publiques dos registros SPF">
+Una cadena `v=spf1` por dominio, sin excepciones. Apilar dos registros TXT SPF invalida ambos y todo el correo de tu dominio irá a spam. Fusiona los includes en un único registro.
+</Notice>
+
+Verifica:
+
+```bash
+dig TXT tudominio.com +short
+```
+
+La salida esperada debería mostrar tu registro fusionado conteniendo `include:zohomail.com`. Si ves dos cadenas `v=spf1` separadas, arregla eso primero.
+
+### Activa DKIM en la consola de administración de Zoho
+
+1. Inicia sesión en la [consola de administración de Zoho Mail](https://mailadmin.zoho.com/).
+2. Ve a **Email Configuration → DKIM**.
+3. Selecciona tu dominio y haz clic en **Generate**. Zoho te da un selector (como `zoho`) y un valor de registro TXT.
+4. Publica el registro TXT en tu proveedor de DNS en: `<selector>._domainkey.tudominio.com`.
+5. De vuelta en la consola de Zoho, haz clic en **Enable** cuando el registro sea visible.
+
+Verifica:
+
+```bash
+dig TXT zoho._domainkey.tudominio.com +short
+```
+
+Deberías recibir de vuelta la clave pública que generó Zoho. Si el comando no devuelve nada, el registro aún no se ha propagado. Espera y vuelve a comprobar.
+
+## Crea una contraseña de aplicación de Zoho
+
+Zoho exige una contraseña específica de aplicación para SMTP **si tienes activada la autenticación en dos pasos** (o si tu organización la obliga). Aunque TFA esté desactivado, usa una contraseña de aplicación igualmente. Está limitada a una app y se puede revocar sin rotar la contraseña principal de tu cuenta.
+
+1. Ve a [Account Security → App Passwords](https://accounts.zoho.com/home#security/app_password).
+2. Haz clic en **Generate New Password**.
+3. Ponle una etiqueta clara como "WordPress SMTP".
+4. Copia la contraseña inmediatamente. Zoho solo la muestra una vez.
+
+<Notice type="info" title="TFA cambia las reglas">
+Si TFA está desactivado y tu organización no lo obliga, la contraseña principal puede funcionar técnicamente por SMTP. Usa una contraseña de aplicación de todos modos. Es el patrón que Zoho documenta para clientes SMTP, y limita el daño si la credencial se filtra. Si estás configurando 2FA en el propio WordPress, mira la [autenticación en dos factores para WordPress](/es/securizar-wordpress-2fa/).
+</Notice>
+
+Puedes revocar o regenerar contraseñas de aplicación en cualquier momento desde la misma página. Revocar una contraseña rompe la autenticación SMTP al instante. Que es exactamente lo que quieres cuando una credencial se filtra.
+
+## Elige el servidor y el puerto SMTP de Zoho correctos
+
+Aquí es donde se rompen muchas configuraciones. Zoho divide los hosts SMTP por **plan**, no por si usas dominio personalizado. Equivocarse aquí produce errores de "Relaying disallowed" o timeouts de conexión.
+
+```
+                    ¿Tu organización está en un plan de PAGO de Zoho?
+                    (Mail Lite, Mail Premium, Workplace)
+                           /                \
+                         SÍ                 NO
+                          |                   |
+                  smtppro.zoho.com      smtp.zoho.com
+                          |        (personal + org gratuita)
+                          |                   |
+                          +--------+----------+
+                                   |
+                          Puerto 465 (SSL) o 587 (TLS)
+                                   |
+                    ¿No lo tienes claro? Mira "Server Configurations
+                    Details" dentro de tu cuenta de Zoho.
+```
+
+### Cuentas personales y organizaciones gratuitas: smtp.zoho.com
+
+Si tienes una dirección personal (`@zohomail.com` o la antigua `@zoho.com`) **o una organización en plan gratuito con dominio personalizado**, usa:
+
+- **Servidor**: `smtp.zoho.com`
+- **Puerto**: `465` (SSL) o `587` (TLS)
+- **Usuario**: tu dirección completa de correo de Zoho o un alias
+- **Contraseña**: la contraseña de aplicación del paso anterior
+
+Una advertencia sobre el plan gratuito: excluye IMAP/POP/ActiveSync y solo está disponible en ciertos centros de datos. SMTP está documentado y disponible para usuarios de organizaciones gratuitas, pero si te encuentras problemas raros de registro o conexión, tu región puede ser la causa. Más sobre esto en la tabla de planes de abajo.
+
+### Cuentas de organización de pago: smtppro.zoho.com
+
+Si estás en **Zoho Mail Lite, Mail Premium o Workplace** (de pago) con una dirección basada en dominio (`tu@tudominio.com`), usa:
+
+- **Servidor**: `smtppro.zoho.com`
+- **Puerto**: `465` (SSL) o `587` (TLS)
+- **Usuario**: tu dirección completa de correo de Zoho o un alias
+- **Contraseña**: la contraseña de aplicación
+
+<Notice type="warning" title="Aquí es donde se rompen las configuraciones">
+Usar `smtppro.zoho.com` en una cuenta de organización gratuita es el error de configuración más común con diferencia. Produce errores de "Relaying disallowed" o fallos de autenticación. Si no estás seguro de en qué plan estás, abre tu cuenta de Zoho y mira **Server Configurations Details**. Zoho muestra ahí mismo el host exacto para tu cuenta y centro de datos. Copia lo que dice.
+</Notice>
+
+## Configura FluentSMTP para Zoho SMTP
+
+Instala FluentSMTP desde **Plugins → Añadir nuevo**, busca "FluentSMTP", instálalo y actívalo. La versión estable actual es 2.4.5 (noviembre de 2026). Para esta configuración de Zoho SMTP en WordPress, FluentSMTP se encarga de toda la interceptación de `wp_mail()` y del registro. Tú solo tienes que apuntarlo al host SMTP de Zoho correcto.
+
+Tras el rediseño del admin en 2.4.0 (Vue 3, septiembre de 2026), la navegación del plugin es: **Dashboard, Settings, Email Logs, Alerts, About**. La captura de ajustes de abajo es anterior al rediseño. El diseño ha cambiado, pero los campos son los mismos:
+
+<Picture formats={["webp"]} fallbackFormat="webp" src={imgFluentSmtp} alt="Ajustes del servidor SMTP de FluentSMTP configurados con las credenciales SMTP de Zoho Mail" />
+
+Ve a **Settings** y añade una nueva conexión. Elige **SMTP Server**. Este es el proveedor SMTP genérico en FluentSMTP 2.4.x (la etiqueta era "Other SMTP" en versiones antiguas). Zoho no tiene proveedor por API dedicado en FluentSMTP, así que la vía SMTP es la correcta.
+
+<Notice type="info" title="Etiqueta del proveedor">
+En el código de FluentSMTP el proveedor se titula "SMTP Server" (clave `smtp`). La UI de 2.4.x puede agruparlo o etiquetarlo de forma ligeramente distinta, así que busca la opción SMTP genérica, no una específica de Zoho.
+</Notice>
+
+Rellena:
+
+- **From Email**: la dirección de Zoho o alias desde la que quieres enviar (debe coincidir con la cuenta de Zoho o ser un alias suyo)
+- **From Name**: el nombre de tu sitio o tu nombre
+- **SMTP Host**: `smtp.zoho.com` o `smtppro.zoho.com` según la sección anterior
+- **SMTP Port**: `465` (SSL) o `587` (TLS)
+- **Username**: tu dirección completa de correo de Zoho
+- **Password**: la contraseña de aplicación
+
+Guarda la conexión. FluentSMTP registra cada correo con las cabeceras completas, el cuerpo y la respuesta del servidor SMTP. Esto es lo que hace que todo lo de abajo se pueda depurar.
+
+### Guarda las credenciales en wp-config.php
+
+En lugar de guardar la contraseña SMTP en la base de datos de WordPress, defínela en `wp-config.php` (encima de la línea "That's all, stop editing!"):
+
+```php
+define('FLUENTMAIL_SMTP_USERNAME', 'you@yourdomain.com');
+define('FLUENTMAIL_SMTP_PASSWORD', 'your-app-password-here');
+// Opcional: si se definen, deben coincidir con los ajustes guardados de la conexión:
+define('FLUENTMAIL_SMTP_HOST', 'smtp.zoho.com');
+define('FLUENTMAIL_SMTP_PORT', '465');
+```
+
+FluentSMTP las recoge automáticamente y las usa en lugar de los valores guardados en la base de datos. Las credenciales en la base de datos van cifradas (lo hace el plugin), pero `wp-config.php` las mantiene lejos de cualquier plugin que pudiera volcar tablas de opciones.
+
+<Notice type="info" title="Las constantes deben coincidir con la UI">
+Si defines `FLUENTMAIL_SMTP_HOST` o `FLUENTMAIL_SMTP_PORT`, los valores deben coincidir exactamente con lo guardado en los ajustes de conexión de FluentSMTP. Las discrepancias provocan errores de validación y la conexión no funcionará. Define solo `FLUENTMAIL_SMTP_PASSWORD` y `FLUENTMAIL_SMTP_USERNAME` si quieres la configuración segura más simple.
+</Notice>
+
+## Verifica: envía un correo de prueba y revisa los registros
+
+No des por hecho que funciona. Verifícalo de tres maneras:
+
+**1. Correo de prueba desde la UI.** En FluentSMTP, haz clic en **Send Test Email**, introduce una dirección que controles y envía. Luego revisa la pestaña **Email Logs**. Deberías ver el mensaje con sus cabeceras completas, el cuerpo y el código de respuesta del servidor SMTP. Un envío sano muestra una respuesta tipo `250 OK`.
+
+**2. Comprobación cruzada en Zoho.** Abre la carpeta **Sent** de tu cuenta de Zoho. Zoho guarda una copia en el servidor de cada envío SMTP. Si FluentSMTP dice "enviado" pero la carpeta Sent de Zoho está vacía, algo va mal. (Si ves duplicados en Sent, puedes desactivar "Save copy of sent emails" en Zoho Settings → Mail Accounts → SMTP.)
+
+**3. Monitorización pasiva.** FluentSMTP 2.3.0 añadió un **Daily Connection Health Check** que verifica la conexión SMTP de forma programada y saca los problemas al dashboard. Combinado con las alertas de fallo a Telegram, Slack, Discord o Pushover (configuradas en **Alerts**), sabrás cuándo se rompe la entrega en lugar de enterarte por un cliente.
+
+<Notice type="success" title="Has terminado cuando…">
+El correo de prueba llega a la bandeja de entrada de destino, Email Logs muestra una respuesta del servidor `250`/OK y la carpeta Sent de Zoho tiene una copia. Si alguna de las tres falla, salta a la sección de solución de problemas de abajo.
+</Notice>
+
+### Verifica desde la línea de comandos con WP-CLI
+
+FluentSMTP 2.3.0 (agosto de 2026) añadió comandos WP-CLI, útiles cuando lo que está roto es wp-admin, o cuando simplemente prefieres SSH:
+
+```bash
+wp fluent-smtp test        # envía un correo de prueba
+wp fluent-smtp health      # comprobación de salud de la conexión
+wp fluent-smtp stats       # estadísticas de envío
+wp fluent-smtp prune-logs  # limpia registros de correo antiguos
+```
+
+Ejecuta estos comandos desde el directorio raíz de tu WordPress. `wp fluent-smtp health` es la comprobación más rápida: informa de si la conexión está viva y autenticando. `wp fluent-smtp test` envía un correo real usando tu conexión configurada. Usa `wp fluent-smtp prune-logs --days=30` (o similar) para que la tabla de registros no crezca para siempre en sitios con mucho tráfico.
+
+## Límites de envío, costes y planes de Zoho
+
+Zoho aplica los límites de envío en una **ventana móvil de 1 hora**, no con reinicio diario. Esto es lo que dice la página de tarifas y límites (última actualización 2 de noviembre de 2026):
+
+- **Saliente externo**: 50-500 correos/hora (dinámico, según la reputación del remitente, el engagement de los destinatarios y la calidad de los contactos)
+- **Saliente interno**: 1.000/hora
+- **Destinatarios por mensaje** (externo): 150 (de pago) / 100 (gratuito), to+cc+bcc combinados
+- **Al superar el límite**: los nuevos envíos se bloquean hasta 1 hora (la recepción sigue funcionando)
+- **Envío masivo o en ráfagas**: no admitido por la política de uso empresarial de Zoho
+
+La implicación práctica: un remitente nuevo de Zoho con un dominio recién estrenado empieza cerca del suelo (50/hora). Una oferta flash de WooCommerce que dispare 80 correos de confirmación de pedido en 20 minutos puede chocar con ese techo. El bloqueo de envío se resuelve solo en una hora, pero los correos de los clientes se retrasan.
+
+<Notice type="warning" title="No lances newsletters por Zoho Mail">
+El envío masivo y en ráfagas viola la política de uso de Zoho y conseguirá que limiten a tu remitente. Para correo de marketing y newsletters, usa una herramienta dedicada como [Sender (gratis hasta 15.000 correos/mes)](https://go.bitdoze.com/sender). Reserva Zoho SMTP para correo transaccional: restablecimientos de contraseña, confirmaciones de pedido, notificaciones de formularios de contacto.
+</Notice>
+
+### ¿Qué plan de Zoho necesitas?
+
+Precios a fecha de noviembre de 2026 (de la página de precios de Zoho):
+
+| Plan | Precio | Usuarios | Almacenamiento | SMTP | IMAP/POP | Ideal para |
+|---|---|---|---|---|---|---|
+| Forever Free | $0 | 5 | 5 GB/usuario | Sí | No | Sitios personales, blogs pequeños |
+| Mail Lite (5 GB) | $1/usuario/mes (anual) · €0,90 UE | Ilimitados | 5 GB/usuario | Sí | Sí | Pequeño negocio, dominio personalizado |
+| Mail Lite (10 GB) | $1,25/usuario/mes (anual) · €1,13 UE | Ilimitados | 10 GB/usuario | Sí | Sí | Equipos en crecimiento |
+| Mail Premium | $4/usuario/mes (anual) | Ilimitados | 50 GB/usuario | Sí | Sí | Organizaciones grandes, necesidades de eDiscovery |
+
+Notas sobre el plan gratuito: 1 dominio personalizado, hasta 5 usuarios, 5 GB por usuario. Sin IMAP/POP/ActiveSync, pero SMTP **sí** está disponible para usuarios de organizaciones gratuitas, que es todo lo que necesita WordPress. Disponible solo en ciertos centros de datos, así que puedes encontrarte restricciones regionales al registrarte.
+
+Una nota de operaciones: el rango de envío de 50-500/hora está **basado en la reputación, no es una cuota de plan**. La página de límites de Zoho presenta un único rango dinámico para todos los usuarios. Pagar Mail Premium no sube de forma demostrable tu tope por hora. Tu reputación como remitente (edad del dominio, alineación SPF/DKIM/DMARC, engagement, tasa de quejas) determina dónde caes dentro de ese rango.
+
+## Solución de errores comunes de Zoho SMTP
+
+Estos son los fallos con los que de verdad te vas a encontrar, con la solución de cada uno:
+
+| Síntoma | Causa probable | Solución |
+|---|---|---|
+| Error "Relaying disallowed" | El usuario SMTP no es el correo propio de la cuenta ni un alias | Usa la dirección completa de Zoho como usuario SMTP |
+| Autenticación rechazada | TFA activado pero se está usando la contraseña principal | Genera una contraseña de aplicación en `accounts.zoho.com/home#security/app_password` |
+| Conexión rechazada o timeout | Host equivocado para tu plan, o puerto/cifrado incorrecto | `smtp.zoho.com` (personal + org gratuita) vs `smtppro.zoho.com` (org de pago); puerto 465 = SSL, 587 = TLS |
+| El correo de prueba se envía pero no llega | El dominio no tiene SPF/DKIM → cae en spam | Mira la sección SPF/DKIM de arriba |
+| "You have reached your email sending limit" | Has chocado con el límite móvil de 50-500/hora | Espera hasta 1 hora (se resuelve solo); reduce las ráfagas de envío; no uses Zoho Mail para masivos/marketing |
+| Comportamientos raros en el plan gratuito | El plan gratuito solo existe en ciertos centros de datos | Copia el servidor mostrado en **Server Configurations Details** dentro de tu cuenta de Zoho |
+
+**Rollback / deshacer.** Si necesitas volver atrás: desactiva FluentSMTP (WordPress vuelve a `mail()` de PHP), borra la conexión SMTP en los ajustes de FluentSMTP y revoca la contraseña de aplicación de Zoho. Si fusionaste un registro SPF, restaura el registro único anterior. Nunca dejes dos cadenas `v=spf1` atrás.
+
+Para operadores de VPS que quieren el correo funcionando a nivel de servidor (no solo WordPress), [Postfix con un servidor SMTP externo](/es/postfix-smtp-externo/) se encarga del correo del sistema a través del mismo relay.
+
+## Conexiones de respaldo para tiendas WooCommerce
+
+FluentSMTP admite múltiples conexiones SMTP con respaldo automático. Si la conexión primaria (Zoho) está caída o rechaza un envío, reintenta a través de un segundo proveedor. Se configura en **Settings → Add Another Connection**.
+
+Para la mayoría de blogs es excesivo. Pero si gestionas una tienda WooCommerce donde los correos de pedidos son críticos para los ingresos, una conexión de respaldo es un seguro barato. Dos opciones a considerar como relay de respaldo:
+
+- [Mail.Baby, servicio SMTP barato](/es/resena-mail-baby/): SMTP transaccional muy económico, bueno como respaldo silencioso
+- [Configuración de relay SMTP de ZeptoMail en un VPS](/es/configurar-relay-smtp-zeptomail/): correo transaccional de pago por uso
+
+Una advertencia operativa: FluentSMTP enruta por **dirección From** entre conexiones. Un respaldo solo ayuda si la segunda conexión está autorizada a enviar como la misma dirección From o alias; si no, el proveedor receptor también rechaza el reintento. Asegúrate de que ambas conexiones usan una dirección From que ambos proveedores reconocen, o configura el respaldo para que use su propio dominio alineado.
+
+Si gestionas un catálogo de productos grande encima de todo esto, un [dashboard de administración de productos WooCommerce](/es/dashboard-admin-woocommerce/) mantiene cuerda la parte operativa.
+
+## FAQ
+
+<Accordion label="¿Funciona Zoho SMTP en el plan gratuito?" group="faq" expanded="true">
+Sí. Las organizaciones en plan gratuito pueden enviar a través de `smtp.zoho.com` en el puerto 465/587. El plan gratuito excluye IMAP/POP/ActiveSync, pero SMTP está documentado y disponible. La limitación es el tope de envío (empieza cerca de 50 correos externos/hora para remitentes nuevos) y que el plan solo está disponible en ciertos centros de datos. Para un blog personal o un sitio pequeño, es de sobra.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre smtp.zoho.com y smtppro.zoho.com?" group="faq">
+La división es por plan, no por dominio. `smtp.zoho.com` atiende direcciones personales y organizaciones en plan gratuito (incluidas organizaciones gratuitas con dominios personalizados). `smtppro.zoho.com` es para cuentas de organización de pago (Mail Lite, Mail Premium, Workplace). Si eliges el equivocado, obtienes "Relaying disallowed" o fallos de autenticación. En caso de duda, mira **Server Configurations Details** dentro de tu cuenta de Zoho: muestra el host exacto para tu cuenta.
+</Accordion>
+
+<Accordion label="¿Necesito siempre una contraseña de aplicación?" group="faq">
+Zoho exige una contraseña de aplicación cuando la autenticación en dos pasos está activada (o la obliga tu organización). Con TFA desactivado, la contraseña principal puede funcionar por SMTP, pero usa una contraseña de aplicación igualmente. Está limitada a una app, es revocable de forma independiente y es el patrón que Zoho documenta para clientes SMTP. Genera una en `accounts.zoho.com/home#security/app_password`.
+</Accordion>
+
+<Accordion label="¿Por qué mi correo de prueba cae en spam?" group="faq">
+Casi siempre es DNS. Tu dominio necesita un registro SPF válido (`v=spf1 include:zohomail.com ~all`, fusionado con cualquier SPF existente) y DKIM activado desde la consola de administración de Zoho. Sin esos, los servidores receptores no pueden verificar que el correo es legítimo. Comprueba ambos con `dig TXT` antes de culpar al plugin. DMARC añade otra capa de confianza pero no es estrictamente necesario para la entrega.
+</Accordion>
+
+<Accordion label="¿Puedo enviar newsletters o correo de marketing por Zoho Mail?" group="faq">
+No. La política de uso empresarial de Zoho prohíbe explícitamente el envío masivo y en ráfagas a través de Zoho Mail. Superar el límite móvil por hora bloquea todos los envíos nuevos hasta una hora, y las violaciones repetidas hacen que limiten aún más a tu remitente. Usa una plataforma dedicada de email marketing como [Sender](https://go.bitdoze.com/sender) o el propio producto Campaigns de Zoho para newsletters. Mantén Zoho SMTP solo para correo transaccional.
+</Accordion>
+
+---
+
+Hacer que la entrega de Zoho SMTP en WordPress funcione se reduce a cuatro cosas: elegir el host correcto para tu plan (`smtp` vs `smtppro`), autenticarte con una contraseña de aplicación, publicar SPF/DKIM antes del primer envío y verificar con los registros de FluentSMTP o WP-CLI. Si tu sitio depende de los ingresos, la conexión de respaldo merece los diez minutos extra.
