@@ -1,0 +1,43 @@
+import rss from "@astrojs/rss";
+import type { APIContext } from "astro";
+import { siteConfig } from "@config/site";
+import { getEntryHref } from "@utils/content";
+import { isPostIdInLocale } from "@utils/i18n";
+import { getAllPublishedPosts } from "@utils/postsCache";
+
+// Raw MDX bodies render as garbage in feed readers — trimmed latest-30 feed.
+const MAX_ITEMS = 30;
+
+export async function GET(context: APIContext) {
+  const posts = (await getAllPublishedPosts()).filter((post) => isPostIdInLocale(post.id, "de"));
+
+  const sortedPosts = posts.sort((a, b) => {
+    const dateA = a.data.date instanceof Date ? a.data.date.getTime() : 0;
+    const dateB = b.data.date instanceof Date ? b.data.date.getTime() : 0;
+    return dateB - dateA;
+  });
+
+  return rss({
+    title: `${siteConfig.name} (Deutsch)`,
+    description: "Artikel auf Deutsch von Bitdoze",
+    // Channel link should point at the German section, not the EN root
+    site: new URL("/de/", context.site || siteConfig.url).toString(),
+    items: sortedPosts.slice(0, MAX_ITEMS).map((post) => {
+      const categories = [...(post.data.categories || []), ...(post.data.tags || [])];
+      return {
+        title: post.data.title,
+        pubDate: post.data.date,
+        description: post.data.description,
+        link: getEntryHref(post),
+        categories,
+      };
+    }),
+    xmlns: { atom: "http://www.w3.org/2005/Atom" },
+    customData: [
+      "<language>de</language>",
+      `<lastBuildDate>${new Date().toUTCString()}</lastBuildDate>`,
+      `<atom:link href="${context.site || siteConfig.url}/de/rss.xml" rel="self" type="application/rss+xml" />`,
+    ].join(""),
+    stylesheet: "/rss/styles.xsl",
+  });
+}

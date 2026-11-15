@@ -1,5 +1,11 @@
 import { getEntrySlug } from "@utils/content";
-import { getPostLocale, getPostTranslationKey, type SupportedLocale } from "@utils/i18n";
+import {
+  getLocaleBasePath,
+  getPostLocale,
+  getPostTranslationKey,
+  SUPPORTED_LOCALES,
+  type SupportedLocale,
+} from "@utils/i18n";
 import { getAllPublishedPosts } from "@utils/postsCache";
 import { localizeInternalPath, normalizePath } from "@utils/localeRoutes";
 import { toTaxonomySlug } from "@utils/slugs";
@@ -47,7 +53,9 @@ export function getTranslationMaps() {
   return mapPromise;
 }
 
-// Static pages that exist in BOTH locales (path relative to locale root).
+// Static pages that exist in every locale (path relative to locale root).
+// Services stay out of this list: German has no /de/services/ pages yet, so
+// they are appended per-locale below instead.
 const SHARED_STATIC_PAGES = [
   "about",
   "advertise",
@@ -59,7 +67,6 @@ const SHARED_STATIC_PAGES = [
   "resources",
   "search",
   "series",
-  "services",
   "tags",
   "terms",
 ];
@@ -75,22 +82,23 @@ async function buildLocalePaths() {
   const posts = await getAllPublishedPosts();
   const perPage = siteConfig.postsPerPage || 10;
 
-  const paths: Record<SupportedLocale, Set<string>> = {
-    en: new Set(["/"]),
-    es: new Set(["/es/"]),
-  };
-  const counts: Record<SupportedLocale, Map<string, number>> = {
-    en: new Map(),
-    es: new Map(),
-  };
+  const paths: Record<SupportedLocale, Set<string>> = Object.fromEntries(
+    SUPPORTED_LOCALES.map((locale) => [locale, new Set([getLocaleBasePath(locale)])])
+  ) as Record<SupportedLocale, Set<string>>;
+  const counts: Record<SupportedLocale, Map<string, number>> = Object.fromEntries(
+    SUPPORTED_LOCALES.map((locale) => [locale, new Map<string, number>()])
+  ) as Record<SupportedLocale, Map<string, number>>;
 
-  for (const locale of ["en", "es"] as const) {
-    const prefix = locale === "es" ? "/es" : "";
+  for (const locale of SUPPORTED_LOCALES) {
+    const prefix = locale === "en" ? "" : `/${locale}`;
     for (const page of SHARED_STATIC_PAGES) {
       paths[locale].add(`${prefix}/${page}/`);
     }
-    for (const service of services) {
-      paths[locale].add(`${prefix}/services/${service.slug[locale]}/`);
+    // Service pages exist for EN/ES only (services.ts has no `de` strings).
+    if (locale === "en" || locale === "es") {
+      for (const service of services) {
+        paths[locale].add(`${prefix}/services/${service.slug[locale]}/`);
+      }
     }
     counts[locale].set(`${prefix}/blog/`, 0);
   }
@@ -102,7 +110,7 @@ async function buildLocalePaths() {
 
   for (const post of posts) {
     const locale = getPostLocale(post);
-    const prefix = locale === "es" ? "/es" : "";
+    const prefix = locale === "en" ? "" : `/${locale}`;
     bump(locale, `${prefix}/blog/`);
     for (const category of post.data.categories ?? []) {
       bump(locale, `${prefix}/categories/${toTaxonomySlug(category)}/`);
@@ -115,7 +123,7 @@ async function buildLocalePaths() {
     }
   }
 
-  for (const locale of ["en", "es"] as const) {
+  for (const locale of SUPPORTED_LOCALES) {
     for (const [path, count] of counts[locale]) {
       paths[locale].add(path);
       const pages = Math.ceil(count / perPage);
@@ -168,7 +176,7 @@ export async function resolveLanguageSwitchPath(
     }
     // Post exists but no translation
     return {
-      path: targetLocale === "es" ? "/es/" : "/",
+      path: getLocaleBasePath(targetLocale),
       hasTranslation: false,
     };
   }
@@ -182,7 +190,7 @@ export async function resolveLanguageSwitchPath(
     return { path: candidate, hasTranslation: true };
   }
   return {
-    path: targetLocale === "es" ? "/es/" : "/",
+    path: getLocaleBasePath(targetLocale),
     hasTranslation: false,
   };
 }

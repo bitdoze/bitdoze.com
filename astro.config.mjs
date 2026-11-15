@@ -15,7 +15,7 @@ import {
 } from "./src/utils/markdown-plugins.mjs";
 import { redirects } from "./src/config/redirects.mjs";
 import { siteConfig } from "./src/config/site.ts";
-// Sitemap handled by custom sitemap-en.xml.ts and sitemap-es.xml.ts
+// Sitemap handled by custom sitemap-en.xml.ts, sitemap-es.xml.ts and sitemap-de.xml.ts
 import path from "path";
 
 // EventEmitter.defaultMaxListeners is raised in scripts/node-bootstrap.mjs,

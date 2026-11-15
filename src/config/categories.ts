@@ -8,6 +8,7 @@ export interface CategoryMeta {
 export interface CategoryEntry {
   en: CategoryMeta;
   es: CategoryMeta;
+  de: CategoryMeta;
   /** Hand-picked pillar guides (EN slugs — ES twins resolved via translationKey)
    * shown as "Start here" picks on category archive page 1. */
   startHere?: string[];
@@ -30,6 +31,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       intro:
         "Guías prácticas para ejecutar herramientas de IA por tu cuenta: agentes, LLMs, servidores MCP, asistentes de código y voz con IA — probadas en hardware y VPS reales.",
     },
+    de: {
+      label: "KI",
+      intro:
+        "Praxisanleitungen für selbst betriebene KI-Tools: Agenten, LLMs, MCP-Server, Coding-Assistenten und Voice-KI — getestet auf echter Hardware und VPS.",
+    },
     startHere: ["ai-programming-beginners-guide", "opencode-setup-guide", "agno-get-start"],
   },
   "self-hosting": {
@@ -42,6 +48,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       label: "Self-Hosting",
       intro:
         "Aplicaciones en Docker, paneles como Dokploy y Coolify, proxies inversos, monitorización y home labs — cada guía muestra un despliegue que funciona.",
+    },
+    de: {
+      label: "Self-Hosting",
+      intro:
+        "Docker-Apps, Control Panels wie Dokploy und Coolify, Reverse Proxies, Monitoring und Homelab-Setups — jede Anleitung führt zu einem laufenden Deployment.",
     },
     startHere: ["dokploy-install", "coolify-install-heroku-alternative", "install-uptime-kuma"],
   },
@@ -56,6 +67,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       intro:
         "Herramientas de línea de comandos, configuración de shell, SSH y tareas de administración — comandos listos para copiar con cada opción explicada.",
     },
+    de: {
+      label: "Linux",
+      intro:
+        "CLI-Tools, Shell-Konfiguration, SSH und Sysadmin-Workflows — Copy-Paste-Befehle mit erklärten Flags.",
+    },
     startHere: ["best-fish-shell-plugins", "crowdsec-secure-server", "add-new-drive-lvm"],
   },
   "web-development": {
@@ -69,6 +85,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       intro:
         "Astro, frameworks, sitios estáticos y constructores de sitios — guías prácticas y comparaciones para lanzar proyectos web rápidos y baratos.",
     },
+    de: {
+      label: "Webentwicklung",
+      intro:
+        "Astro, Frameworks, statische Seiten und Site-Builder — praktische Anleitungen und Vergleiche für schnelle, günstige Webprojekte.",
+    },
     startHere: ["astro-i18n-localization", "astro-7-faster-builds", "add-contact-form-astro"],
   },
   wordpress: {
@@ -81,6 +102,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       label: "WordPress",
       intro:
         "Instalación, optimización y herramientas de WordPress y WooCommerce — desde el hosting hasta la configuración práctica.",
+    },
+    de: {
+      label: "WordPress",
+      intro:
+        "WordPress- und WooCommerce-Setup, Optimierung und Tooling — von der Hosting-Wahl bis zur praktischen Konfiguration.",
     },
     startHere: [
       "install-wordpress-docker",
@@ -99,6 +125,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       intro:
         "Proveedores VPS, CDNs y paneles de hosting analizados y medidos — precios y rendimiento reales, sin exageraciones.",
     },
+    de: {
+      label: "Hosting",
+      intro:
+        "VPS-Anbieter, CDNs und Hosting-Panels im Review und Benchmark — echte Preise, echte Performance, kein Affiliate-Hype.",
+    },
     startHere: ["hetzner-cloud-review", "digitalocean-vs-vultr-vs-hetzner", "dockge-install"],
   },
   tools: {
@@ -112,6 +143,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       intro:
         "Apps de productividad, utilidades SEO y gestores de paquetes — reseñas directas y guías de configuración de herramientas reales.",
     },
+    de: {
+      label: "Tools",
+      intro:
+        "Mac- und Produktivitäts-Apps, SEO-Tools und Paketmanager — fokussierte Reviews und Setup-Anleitungen für Tools, die Entwickler wirklich nutzen.",
+    },
     startHere: ["git-commands", "bun-package-manager", "block-ads-malware-dns-protection"],
   },
   gadgets: {
@@ -124,6 +160,11 @@ export const categoryMeta: Record<string, CategoryEntry> = {
       label: "Gadgets",
       intro:
         "Monitores, docks, audio y hardware de escritorio — especificaciones relevantes, pruebas reales y recomendaciones honestas.",
+    },
+    de: {
+      label: "Gadgets",
+      intro:
+        "Monitore, Docks, Audio und Desk-Hardware — die Specs, die zählen, Praxistests und ehrliche Empfehlungen.",
     },
     startHere: [
       "best-thunderbolt-5-docks-guide",

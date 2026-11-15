@@ -1,6 +1,8 @@
 import type { SupportedLocale } from "@utils/i18n";
 
-export type ServiceLocale = SupportedLocale;
+// Service pages exist for EN/ES only — no German service content yet, so DE
+// routes fall back to the EN paths in localeRoutes.
+export type ServiceLocale = Extract<SupportedLocale, "en" | "es">;
 
 type LocalizedText = {
   en: string;

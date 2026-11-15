@@ -23,6 +23,10 @@ export const GET: APIRoute = async () => {
     .filter((p) => isPostIdInLocale(p.id, "es"))
     .sort(sortFn)
     .slice(0, RECENT_LIMIT);
+  const dePosts = posts
+    .filter((p) => isPostIdInLocale(p.id, "de"))
+    .sort(sortFn)
+    .slice(0, RECENT_LIMIT);
 
   const siteUrl = siteConfig.url;
 
@@ -47,11 +51,16 @@ export const GET: APIRoute = async () => {
     ``,
     ...esPosts.map(formatPost),
     ``,
+    `## Aktuelle Artikel (German)`,
+    ``,
+    ...dePosts.map(formatPost),
+    ``,
     `## Browse all content`,
     ``,
     `- [Full English catalog (markdown)](${siteUrl}/md/home.md)`,
     `- [Blog index](${siteUrl}/blog/)`,
     `- [Spanish blog](${siteUrl}/es/blog/)`,
+    `- [German blog](${siteUrl}/de/blog/)`,
     `- [Categories](${siteUrl}/categories/)`,
     `- [Series](${siteUrl}/series/)`,
     ``,
@@ -59,6 +68,7 @@ export const GET: APIRoute = async () => {
     ``,
     `- [RSS Feed](${siteUrl}/rss.xml): Latest 30 English posts`,
     `- [RSS Feed (Spanish)](${siteUrl}/es/rss.xml): Latest 30 Spanish posts`,
+    `- [RSS Feed (German)](${siteUrl}/de/rss.xml): Latest 30 German posts`,
     `- [Sitemap](${siteUrl}/sitemap.xml): Sitemap index`,
     `- [API Catalog](${siteUrl}/.well-known/api-catalog): Machine-readable API discovery`,
     `- [Search](${siteUrl}/search/)`,

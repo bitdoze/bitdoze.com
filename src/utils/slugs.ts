@@ -1,4 +1,4 @@
-import type { SupportedLocale } from "@utils/i18n";
+import { SUPPORTED_LOCALES, type SupportedLocale } from "@utils/i18n";
 
 const DIACRITICS_REGEX = /[\u0300-\u036f]/g;
 const NON_WORD_REGEX = /[^a-z0-9]+/g;
@@ -38,7 +38,7 @@ export function buildArchivePath(
   slug: string,
   locale: SupportedLocale
 ): string {
-  const localePrefix = locale === "es" ? "/es" : "";
+  const localePrefix = locale === "en" ? "" : `/${locale}`;
   return `${localePrefix}/${type}/${slug}/`;
 }
 
@@ -48,7 +48,7 @@ export function buildArchivePagePath(
   page: number | string,
   slug?: string
 ): string {
-  const localePrefix = locale === "es" ? "/es" : "";
+  const localePrefix = locale === "en" ? "" : `/${locale}`;
   const pageSegment = `page/${page}/`;
 
   if (type === "blog") {
@@ -76,4 +76,22 @@ export function serializeJsonLd(data: unknown): string {
  */
 export function toTransitionName(prefix: string, slug: string): string {
   return `${prefix}-${slug.replace(/\//g, "-")}`;
+}
+
+/**
+ * Standard hreflang set for static pages that exist in every supported
+ * locale (/about/, /blog/, /contact/, …): one entry per locale plus
+ * x-default → the EN URL.
+ */
+export function localeSharedHreflangs(
+  enPath: string,
+  site: string | URL | undefined
+): { lang: string; href: string }[] {
+  return [
+    ...SUPPORTED_LOCALES.map((locale) => ({
+      lang: locale,
+      href: absoluteUrl(locale === "en" ? enPath : `/${locale}${enPath === "/" ? "/" : enPath}`, site),
+    })),
+    { lang: "x-default", href: absoluteUrl(enPath, site) },
+  ];
 }

@@ -3,6 +3,7 @@ import type { SupportedLocale } from "@utils/i18n";
 const DATE_LOCALE_MAP: Record<SupportedLocale, string> = {
   en: "en-US",
   es: "es-ES",
+  de: "de-DE",
 };
 
 export function formatDate(date: Date, locale: SupportedLocale = "en"): string {

@@ -1,4 +1,4 @@
-import { isPostIdInLocale, type SupportedLocale } from "@utils/i18n";
+import { isPostIdInLocale, SUPPORTED_LOCALES, type SupportedLocale } from "@utils/i18n";
 import { getAllPublishedPosts, type Post } from "@utils/postsCache";
 
 /** Locale → posts newest-first (full list, non-draft). */
@@ -12,10 +12,12 @@ async function buildRecentByLocale(): Promise<Record<SupportedLocale, Post[]>> {
   // Shares the same cached getCollection as translationMap / other helpers
   const posts = await getAllPublishedPosts();
 
-  const en = posts.filter((p) => isPostIdInLocale(p.id, "en")).sort(sortByDateDesc);
-  const es = posts.filter((p) => isPostIdInLocale(p.id, "es")).sort(sortByDateDesc);
-
-  return { en, es };
+  return Object.fromEntries(
+    SUPPORTED_LOCALES.map((locale) => [
+      locale,
+      posts.filter((p) => isPostIdInLocale(p.id, locale)).sort(sortByDateDesc),
+    ])
+  ) as Record<SupportedLocale, Post[]>;
 }
 
 /**

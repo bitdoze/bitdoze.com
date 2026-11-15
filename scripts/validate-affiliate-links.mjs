@@ -61,8 +61,10 @@ if (process.argv.includes("--dist")) await inspect(path.join(root, "dist"));
 // first affiliate link in every article. Scans the MDX source (outside code
 // fences) and fails when a /go/ or go.bitdoze.com link precedes the first
 // disclosure block/line — or when none exists at all.
-const DISC_TITLE = /(affiliate disclosure|divulgaci[oó]n de afiliados|aviso de afiliados?)/i;
-const DISC_LINE = /^(\*\*?)?\*?(Disclosure|Divulgación|Divulgacion|Aviso de afiliados?):/i;
+const DISC_TITLE =
+  /(affiliate disclosure|affiliate[- ]hinweis|divulgaci[oó]n de afiliados|aviso de afiliados?)/i;
+const DISC_LINE =
+  /^(\*\*?)?\*?((Disclosure|Divulgación|Divulgacion|Aviso de afiliados?):|(Hinweis):.*(affiliate|referral|empfehlung|provision|werbelink))/i;
 const GO_LINK = /["'(]\/go\//;
 const GBC_LINK = /go\.bitdoze\.com\//;
 

@@ -5,27 +5,24 @@ import { buildArchivePagePath, buildArchivePath } from "@utils/slugs";
 type ArchiveType = "blog" | "tags" | "categories" | "authors";
 type TaxonomyArchiveType = Exclude<ArchiveType, "blog">;
 
-const EN_TO_ES_EXACT: Record<string, string> = {
-  "/": "/es/",
-  "/about/": "/es/about/",
-  "/resources/": "/es/resources/",
-  "/contact/": "/es/contact/",
-  "/search/": "/es/search/",
-  "/blog/": "/es/blog/",
-  "/series/": "/es/series/",
-  "/services/": "/es/services/",
-  "/authors/": "/es/authors/",
-  "/categories/": "/es/categories/",
-  "/tags/": "/es/tags/",
-  "/advertise/": "/es/advertise/",
-  "/privacy/": "/es/privacy/",
-  "/terms/": "/es/terms/",
-  "/rss.xml": "/es/rss.xml",
-};
-
-const ES_TO_EN_EXACT = Object.fromEntries(
-  Object.entries(EN_TO_ES_EXACT).map(([enPath, esPath]) => [esPath, enPath])
-) as Record<string, string>;
+/** EN paths that have a real localized counterpart (whitelist — unknown paths stay EN). */
+const EXACT_EN_PATHS = new Set([
+  "/",
+  "/about/",
+  "/resources/",
+  "/contact/",
+  "/search/",
+  "/blog/",
+  "/series/",
+  "/services/",
+  "/authors/",
+  "/categories/",
+  "/tags/",
+  "/advertise/",
+  "/privacy/",
+  "/terms/",
+  "/rss.xml",
+]);
 
 export function isExternalUrl(url: string): boolean {
   return /^https?:\/\//i.test(url);
@@ -45,11 +42,20 @@ export function normalizePath(path: string): string {
   return pathname.endsWith("/") ? pathname : `${pathname}/`;
 }
 
+/** Strip a leading /es or /de prefix, returning the equivalent EN path. */
+function stripLocalePrefix(path: string): string {
+  const match = path.match(/^\/(es|de)(?=\/|$)/);
+  if (!match) {
+    return path;
+  }
+  return path.slice(match[0].length) || "/";
+}
+
 function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string | null {
   const normalized = normalizePath(path);
 
   const paginatedMatch = normalized.match(
-    /^\/(?:(es)\/)?(blog|tags|categories|authors)(?:\/([^/]+))?\/page\/(\d+)\/$/
+    /^\/(?:(es|de)\/)?(blog|tags|categories|authors)(?:\/([^/]+))?\/page\/(\d+)\/$/
   );
 
   if (!paginatedMatch) {
@@ -63,7 +69,7 @@ function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string |
     string | undefined,
     string,
   ];
-  const currentLocale: SupportedLocale = localePrefix === "es" ? "es" : "en";
+  const currentLocale: SupportedLocale = (localePrefix as SupportedLocale) || "en";
 
   if (currentLocale === targetLocale) {
     return normalized;
@@ -82,7 +88,7 @@ function mapPaginatedPath(path: string, targetLocale: SupportedLocale): string |
 
 function mapArchivePath(path: string, targetLocale: SupportedLocale): string | null {
   const normalized = normalizePath(path);
-  const archiveMatch = normalized.match(/^\/(?:(es)\/)?(tags|categories|authors)\/([^/]+)\/$/);
+  const archiveMatch = normalized.match(/^\/(?:(es|de)\/)?(tags|categories|authors)\/([^/]+)\/$/);
 
   if (!archiveMatch) {
     return null;
@@ -94,7 +100,7 @@ function mapArchivePath(path: string, targetLocale: SupportedLocale): string | n
     TaxonomyArchiveType,
     string,
   ];
-  const currentLocale: SupportedLocale = localePrefix === "es" ? "es" : "en";
+  const currentLocale: SupportedLocale = (localePrefix as SupportedLocale) || "en";
 
   if (currentLocale === targetLocale) {
     return normalized;
@@ -122,24 +128,27 @@ export function localizeInternalPath(path: string, targetLocale: SupportedLocale
     return archivePath;
   }
 
-  if (targetLocale === "es") {
-    return EN_TO_ES_EXACT[normalized] || normalized;
+  const enPath = stripLocalePrefix(normalized);
+  if (!EXACT_EN_PATHS.has(enPath)) {
+    return normalized;
   }
 
-  return ES_TO_EN_EXACT[normalized] || normalized;
+  return targetLocale === "en" ? enPath : `/${targetLocale}${enPath === "/" ? "/" : enPath}`;
 }
 
 function mapServicePath(path: string, targetLocale: SupportedLocale): string | null {
-  if (path === "/services/" || path === "/es/services/") {
+  // Services pages exist for EN and ES only — DE falls back to the EN path.
+  const base = stripLocalePrefix(path);
+
+  if (base === "/services/") {
     return targetLocale === "es" ? "/es/services/" : "/services/";
   }
 
   for (const service of services) {
-    const enPath = `/services/${service.slug.en}/`;
-    const esPath = `/es/services/${service.slug.es}/`;
-
-    if (path === enPath || path === esPath) {
-      return targetLocale === "es" ? esPath : enPath;
+    if (base === `/services/${service.slug.en}/` || base === `/services/${service.slug.es}/`) {
+      return targetLocale === "es"
+        ? `/es/services/${service.slug.es}/`
+        : `/services/${service.slug.en}/`;
     }
   }
 

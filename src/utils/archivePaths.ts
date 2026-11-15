@@ -2,7 +2,7 @@ import { siteConfig } from "@config/site";
 import { getCategoryMeta } from "@config/categories";
 import { tf } from "@i18n/ui";
 import { getEntryHref } from "@utils/content";
-import type { SupportedLocale } from "@utils/i18n";
+import { getLocaleBasePath, SUPPORTED_LOCALES, type SupportedLocale } from "@utils/i18n";
 import { getAllAuthors, getPostsByLocale, type Post } from "@utils/postsCache";
 import {
   absoluteUrl,
@@ -94,8 +94,9 @@ export async function getTaxonomyPagePaths(field: TaxonomyField, locale: Support
 }
 
 /**
- * Reciprocal EN/ES/x-default hreflang for a taxonomy index page
- * (/tags/<t>/, /authors/<a>/) — emitted only when the counterpart page exists.
+ * hreflang set for a taxonomy index page (/tags/<t>/, /authors/<a>/) —
+ * one entry per locale whose archive page actually gets built, plus
+ * x-default → EN. Empty when only one locale has the archive.
  */
 export async function taxonomyIndexHreflangs(
   locale: SupportedLocale,
@@ -103,21 +104,18 @@ export async function taxonomyIndexHreflangs(
   slug: string,
   site: string | URL | undefined
 ) {
-  const enPath = buildArchivePath(field, slug, "en");
-  const esPath = buildArchivePath(field, slug, "es");
-  const enHref = absoluteUrl(enPath, site);
-  const esHref = absoluteUrl(esPath, site);
-  const hasOther = await localePathExists(
-    locale === "es" ? enPath : esPath,
-    locale === "es" ? "en" : "es"
-  );
-  return hasOther
-    ? [
-        { lang: "en", href: enHref },
-        { lang: "es", href: esHref },
-        { lang: "x-default", href: enHref },
-      ]
-    : [];
+  const entries: { lang: string; href: string }[] = [];
+  for (const l of SUPPORTED_LOCALES) {
+    const path = buildArchivePath(field, slug, l);
+    if (await localePathExists(path, l)) {
+      entries.push({ lang: l, href: absoluteUrl(path, site) });
+    }
+  }
+  if (entries.length < 2) {
+    return [];
+  }
+  entries.push({ lang: "x-default", href: absoluteUrl(buildArchivePath(field, slug, "en"), site) });
+  return entries;
 }
 
 /** Localized title/schema/hreflang data shared by the EN and ES category index routes */
@@ -131,23 +129,21 @@ export async function categoryIndexSeo(
   const meta = getCategoryMeta(categorySlug, locale);
 
   const enPath = `/categories/${categorySlug}/`;
-  const esPath = `/es/categories/${categorySlug}/`;
-  const enHref = absoluteUrl(enPath, site);
-  const esHref = absoluteUrl(esPath, site);
-  const selfHref = locale === "es" ? esHref : enHref;
+  const selfPath = buildArchivePath("categories", categorySlug, locale);
+  const selfHref = absoluteUrl(selfPath, site);
 
-  // Pair the locale hubs only when the counterpart page actually gets built
-  const hasOther = await localePathExists(
-    locale === "es" ? enPath : esPath,
-    locale === "es" ? "en" : "es"
-  );
-  const hreflangs = hasOther
-    ? [
-        { lang: "en", href: enHref },
-        { lang: "es", href: esHref },
-        { lang: "x-default", href: enHref },
-      ]
-    : [];
+  // Pair the locale hubs only where the counterpart page actually gets built
+  const entries: { lang: string; href: string }[] = [];
+  for (const l of SUPPORTED_LOCALES) {
+    const path = buildArchivePath("categories", categorySlug, l);
+    if (await localePathExists(path, l)) {
+      entries.push({ lang: l, href: absoluteUrl(path, site) });
+    }
+  }
+  const hreflangs =
+    entries.length < 2
+      ? []
+      : [...entries, { lang: "x-default", href: absoluteUrl(enPath, site) }];
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -169,4 +165,31 @@ export async function categoryIndexSeo(
   };
 
   return { meta, hreflangs, jsonLd };
+}
+
+/**
+ * hreflang set for a paginated /blog/page/N/ page — one entry per locale
+ * whose blog archive actually has a page N, plus x-default → EN.
+ */
+export async function blogPaginationHreflangs(
+  locale: SupportedLocale,
+  currentPage: number,
+  site: string | URL | undefined
+): Promise<{ lang: string; href: string }[]> {
+  const perPage = siteConfig.postsPerPage;
+  const entries: { lang: string; href: string }[] = [];
+  for (const l of SUPPORTED_LOCALES) {
+    const totalPages = Math.max(1, Math.ceil((await getPostsByLocale(l)).length / perPage));
+    if (l === locale || currentPage <= totalPages) {
+      entries.push({
+        lang: l,
+        href: absoluteUrl(`${getLocaleBasePath(l)}blog/page/${currentPage}/`, site),
+      });
+    }
+  }
+  entries.push({
+    lang: "x-default",
+    href: absoluteUrl(`/blog/page/${currentPage}/`, site),
+  });
+  return entries;
 }
