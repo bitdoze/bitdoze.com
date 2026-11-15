@@ -220,6 +220,7 @@ export const translations = {
       "Practical DevOps, programming, and self-hosting guides for developers and operators.",
     affiliateDisclaimer:
       "Some links are affiliate links. If you buy through them, we may earn a commission at no extra cost to you.",
+    noTrackingCookies: "No tracking cookies — privacy-friendly analytics by Plausible.",
     quickResult: "Quick result",
     needHelpCta: "Need help with Astro, VPS, or a self-hosted app? ",
     viewServices: "View services →",
@@ -453,6 +454,7 @@ export const translations = {
       "Guías prácticas de DevOps, programación y self-hosting para desarrolladores y operadores.",
     affiliateDisclaimer:
       "Algunos enlaces son de afiliados. Si compras a través de ellos, podemos recibir una comisión sin coste adicional para ti.",
+    noTrackingCookies: "Sin cookies de seguimiento — analíticas respetuosas con la privacidad de Plausible.",
     quickResult: "Resultado rápido",
     needHelpCta: "¿Necesitas ayuda con Astro, VPS o una app self-hosted? ",
     viewServices: "Ver servicios →",
@@ -686,6 +688,7 @@ export const translations = {
       "Praxisnahe DevOps-, Programmier- und Self-Hosting-Anleitungen für Entwickler und Betreiber.",
     affiliateDisclaimer:
       "Einige Links sind Affiliate-Links. Wenn du darüber kaufst, erhalten wir möglicherweise eine Provision – ohne zusätzliche Kosten für dich.",
+    noTrackingCookies: "Keine Tracking-Cookies – datenschutzfreundliche Analysen mit Plausible.",
     quickResult: "Schnelles Ergebnis",
     needHelpCta: "Brauchst du Hilfe bei Astro, VPS oder einer Self-hosted-App? ",
     viewServices: "Services ansehen →",

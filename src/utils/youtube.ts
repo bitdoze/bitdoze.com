@@ -5,7 +5,10 @@
 import youtubeMetaJson from "../data/youtube-meta.json";
 
 const PLACEHOLDER_THUMBNAIL = "/images/youtube-placeholder.jpg";
-const YOUTUBE_EMBED_BASE = "https://www.youtube.com/embed/";
+// Privacy-enhanced mode: the player loads only after a user click anyway (see
+// the facade in YouTubeEmbed.astro), and youtube-nocookie additionally avoids
+// setting tracking cookies when the embed loads.
+const YOUTUBE_EMBED_BASE = "https://www.youtube-nocookie.com/embed/";
 const VALID_ID_PATTERN = /^[\w-]{11}$/;
 const VALID_LIST_PATTERN = /^[\w-]{10,}$/;
 const KNOWN_PREFIXES = ["www.", "m.", "music.", "gaming."];
