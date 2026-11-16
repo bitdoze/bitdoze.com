@@ -1,0 +1,857 @@
+---
+date: 2026-03-05
+lastmod: 2026-11-16T00:00:00Z
+translationKey: "memoh-ai-agent-deploy"
+title: "Memoh: KI-Agenten-Plattform mit Docker Compose deployen"
+meta_title: "Memoh mit Docker Compose deployen: Self-hosted KI-Agenten"
+description: "Deploye Memoh mit Docker Compose oder Dokploy und hoste die Multi-Agenten-KI-Plattform selbst. Behandelt das Memoh-1.0-Setup, pgvector-Memory, Channels und Security-Hardening."
+image: "@assets/images/26/03/memoh-ai-agent-deploy.webp"
+imageAlt: "Dashboard der Memoh-KI-Agenten-Plattform auf einem self-hosted Server mit Docker Compose"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["memoh", "ai-agents", "docker-compose"]
+canonical: "https://www.bitdoze.com/de/memoh-ai-agent-deploy/"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+*Disclosure: Dieser Guide enthält Referral-Links. Wenn du über sie kaufst, erhalte ich möglicherweise eine Provision – ohne zusätzliche Kosten für dich.*
+
+**Aktualisiert für Memoh 1.0 (November 2026).** Service-Layout, Config-Schema und Images haben sich seit der Erstveröffentlichung dieses Guides im März stark geändert. Wenn du damals deployt hast, ist dein Stack veraltet. Alles Folgende wurde gegen v1.0.2 neu aufgebaut.
+
+Memoh ist eine self-hosted Multi-Agenten-KI-Plattform: mehrere KI-Agenten in einem Docker-Compose-Stack, jeder in einem eigenen containerd-Workspace, mit persistentem Memory, MCP-Tool-Zugriff und Messaging-Channels wie Telegram, Slack und Discord. Ich zeige drei Wege, Memoh zu deployen (One-Click-Installer, Dokploy, klassisches Docker Compose), verifiziere danach das Deployment, lege Backups an und riegle das Ganze ab. Das Projekt steht bei 2,8k Stars auf GitHub unter AGPL-3.0 – du kannst also jede Zeile lesen, die auf deiner Box läuft.
+
+## Was ist Memoh?
+
+[Memoh](https://github.com/felinics/Memoh) ist eine Open-Source-Multi-Agenten-Plattform, gebaut mit Go und Vue 3. Du erstellst Agenten (die UI nennt sie Bots), von denen jeder in einem eigenen isolierten containerd-Workspace mit separatem Dateisystem, Netzwerk und Prozessbaum läuft. Agenten behalten persistentes Memory über Sessions hinweg, erreichen externe Tools über MCP (Model Context Protocol) und erkennen einzelne Nutzer in Gruppenchats – inklusive Kontextverfolgung pro Person. Sie können über Telegram, Slack, Discord, Feishu (Lark), DingTalk, WeCom, WeChat, QQ und LINE kommunizieren, plus die eingebaute Web-UI und eine Desktop-App, die sich remote mit deinem Server verbinden kann. Wenn du den Stack lieber gar nicht selbst betreibst, ist [Memoh Cloud](https://app.memoh.net) die gehostete Option.
+
+<Notice type="info" title="Privilegierter Container">
+Der Memoh-Server-Container läuft mit `privileged: true` und `pid: host`, weil er containerd einbettet, um Agent-Workspaces zu verwalten. Deploye das nur auf Servern, denen du vertraust und die du kontrollierst, und betreibe es nicht zusammen mit sensiblen Workloads auf derselben Box. Ein kompromittierter Agent-Workspace ist ein Incident auf Host-Ebene.
+</Notice>
+
+### Was sich in Memoh 1.0 geändert hat
+
+Wenn du den ursprünglichen März-Guide gelesen hast: Der Stack, den du gebaut hast, ist nicht mehr der aktuelle. Die Kurzversion dessen, was sich zwischen v0.3 und v1.0.2 (veröffentlicht 2026-11-08) bewegt hat:
+
+- **pgvector ersetzt Qdrant.** Memory-Embeddings liegen jetzt in einem zweiten Postgres-Container (`pgvector/pgvector:pg18`, Datenbank `memoh_vector`). Der `qdrant`-Service ist weg.
+- **Der Agent läuft in-process.** Der eigenständige `memohai/agent`-Service ist weg; die AI-Agent-Loop läuft innerhalb des `server`-Containers. Die alten `memohai/agent`- und `memohai/mcp`-Images sind auf dem Stand von März 2026 eingefroren.
+- **Ein neuer `channel`-Service** besitzt die Telegram-/Discord-/Webhook-Verbindungen und spricht über internes RPC mit dem Server, abgesichert durch ein verpflichtendes `MEMOH_INTERNAL_RPC_SHARED_SECRET`. Ohne es verweigert Compose den Start.
+- **Channels wurden verschoben.** Der eingebaute E-Mail-Support wurde in v0.21.0 entfernt. Slack, DingTalk, WeCom, WeChat, QQ und LINE gesellten sich zu Telegram, Discord und Feishu.
+- **Es gibt einen One-Click-Installer** (`curl -fsSL https://memoh.sh | sh`) – der von Upstream empfohlene Weg. Das Repo ist nach [felinics/Memoh](https://github.com/felinics/Memoh) umgezogen.
+- **ACP-Support** erlaubt es dir, echte Coding-Agenten (Claude Code, Codex, OpenCode) in Agent-Workspaces zu hosten.
+
+<Notice type="warning" title="Upgrade vom alten Stack?">
+Stand November 2026 gibt es keine dokumentierte In-Place-Migration vom alten Qdrant-basierten Layout zu pgvector. Exportiere alles, was du behalten willst (Chat-Verläufe, Configs), und installiere frisch. Richte v1.0.2-Images nicht auf Volumes aus März und hoffe auf das Beste.
+</Notice>
+
+### Kernfeatures
+
+| Feature | Was es macht |
+| --- | --- |
+| Workspaces pro Agent | Jeder Agent bekommt seine eigene containerd-Sandbox mit separatem Dateisystem, Netzwerk und Prozessbaum |
+| Persistentes Memory | Hybride Abfrage: pgvector-Embeddings für Semantik, Postgres für Struktur und Keyword-Suche |
+| Neun Messaging-Channels | Telegram, Slack, Discord, Feishu (Lark), DingTalk, WeCom, WeChat, QQ, LINE |
+| MCP-Tool-Anbindungen | HTTP-, SSE- und Stdio-Server: Browser, Websuche, Dateisysteme, App-APIs |
+| ACP-Coding-Agenten | Claude Code, Codex, OpenCode oder Hermes in einem Agent-Workspace ausführen |
+| Plugin-Marketplace | Supermarket-Apps, Skills, Hooks, geplante Tasks mit Per-Run-Sessions |
+| Web-UI und Desktop-App | Vue-3-Dashboard mit Streaming, Dateimanager und visueller Config; nativer Desktop-Client |
+
+<ListCheck>
+- Mehrere KI-Agenten aus einem einzigen Dashboard erstellen und verwalten
+- Isolation auf Container-Ebene pro Agent via containerd
+- Hybrides Memory: pgvector-Embeddings plus Postgres-Struktur und Keyword-Retrieval
+- MCP-Support zum Anbinden externer Tools (HTTP, SSE, Stdio)
+- Echte Coding-Agenten über ACP hosten (Claude Code, Codex, OpenCode)
+- Geplante Tasks und Heartbeat-basierte autonome Aktionen
+- Funktioniert mit jedem OpenAI-kompatiblen, Anthropic- oder Google-AI-Provider
+- Rollenbasierte Zugriffskontrolle mit Ownership-Transfer
+- Plattformübergreifendes Identity-Binding über alle Channels
+</ListCheck>
+
+MCP ist die Tool-Schicht. Verbinde eine Such-API, einen Browser oder ein App-Gateway, und jeder Agent auf der Box kann es nutzen. Für App-Integrationen mag ich [Composio MCP, das Agenten mit über 1.500 Apps verbindet](/composio-mcp-guide/). Für rohen Web-Zugriff erspart dir eine API wie [TinyFish](https://go.bitdoze.com/tinyfish) (Websuche, Fetch- und Browser-Endpunkte unter einem Key) das Schreiben eines eigenen Scrapers.
+
+## Memoh-Architektur im Überblick
+
+![Memoh-Docker-Compose-Service-Topologie mit postgres-, pgvector-, migrate-, server-, channel- und web-Containern sowie deren Volumes und Ports](@assets/images/26/03/memoh-service-topology.svg)
+
+Memoh fährt sechs Kernservices unter Docker Compose, plus zwei optionale, die du über Compose-Profiles aktivieren kannst:
+
+| Service | Image | Rolle |
+| --- | --- | --- |
+| `postgres` | `postgres:18-alpine` | System of Record: Nutzer, Agenten, Channels, Konfiguration |
+| `pgvector` | `pgvector/pgvector:pg18` | Memory-Embeddings (Datenbank `memoh_vector`) |
+| `migrate` | `memohai/server:1.0.2` | One-Shot: führt `memoh-server migrate up` aus und beendet sich |
+| `server` | `memohai/server:1.0.2` | Go-API, in-process AI-Agent, eingebettetes containerd (privileged) |
+| `channel` | `memohai/server:1.0.2` | Channel-Worker: `memoh-channel serve`, Webhooks und IM-Connectoren |
+| `web` | `memohai/web:1.0.2` | Vue-3-UI hinter Nginx, mit zwei Upstreams (server und channel) |
+| `webhook-tunnel` (optional) | `cloudflare/cloudflared:latest` | Quick Tunnel für Channel-Webhooks (`--profile webhook-tunnel`) |
+| `connect-it` (optional) | `ghcr.io/felinics/connect-it:0.3.1` | OAuth-Connector-Gateway für GitHub, Notion und Co. (`--profile connectors`) |
+
+Die Startreihenfolge wird über Health Checks erzwungen, nicht über Glück. PostgreSQL und pgvector bestehen zuerst ihre `pg_isready`-Checks. Der `migrate`-Service spielt dann die Datenbank-Migrationen ein und beendet sich mit Exit 0 – das ist das Gate für den Server-Start (`condition: service_completed_successfully`). Sobald der Server seinen eigenen Health Check besteht, startet `channel`, und `web` kommt zuletzt hoch, wartend auf `server` und `channel`. Dieses `migrate`-Gate ist der Grund, warum Schema-Updates beim Pull neuer Images automatisch anlaufen. Es bedeutet auch: Eine fehlerhafte Migration stoppt den Stack am Gate – `server` startet nie bei einem Non-Zero-Migrate-Exit, und das ist genau das, was du willst. Wenn das passiert, ist `docker compose logs migrate` das einzige Log, das zählt.
+
+Der `channel`-Split verdient einen eigenen Absatz, weil er die größte strukturelle Änderung in 1.0 ist. Der Server besitzt State, die API und die Agent-Runtime. Der Channel-Worker besitzt die langlebigen Webhook- und IM-Verbindungen und ruft über internes RPC auf den Ports 9090/9091 zurück in den Server. Dieses RPC wird mit `MEMOH_INTERNAL_RPC_SHARED_SECRET` authentifiziert, den beide Prozesse teilen müssen. Kein Secret oder unterschiedliche Secrets bedeuten: Der Channel-Worker registriert sich nie, und dein Telegram-Bot bleibt stumm.
+
+### Warum zwei Postgres-Container?
+
+Eine Datenbank hält das System of Record (Nutzer, Agenten, Config). Die andere ist ein Standard-Postgres-Image mit der pgvector-Erweiterung (Datenbank `memoh_vector`), das Embedding-Vektoren speichert. Sie getrennt zu halten bedeutet: Vector-Index-Churn bläht nicht deine Hauptdatenbank auf, und du kannst beide unabhängig voneinander sichern, wiederherstellen oder skalieren. Das Volume ist `pgvector_data`, und der Health Check ist ein schlichtes `pg_isready -U memoh -d memoh_vector` (der fragile Qdrant-TCP-Hack aus dem alten Stack ist Geschichte). Wenn du direkt an pgvector herumspielen willst, [deploye pgvector und pgAdmin auf Docker](/deploy-pgvector-pgadmin-docker/) und zeige mit pgAdmin auf den Container.
+
+## Voraussetzungen
+
+Prüfe zuerst das Tooling:
+
+```bash
+docker --version          # 24+ is fine
+docker compose version    # must be Compose v2 (the docker compose plugin)
+```
+
+Wenn `docker compose version` fehlschlägt, hast du entweder das alte `docker-compose`-Python-Binary oder gar kein Compose-Plugin. Installiere das Compose-Plugin der Docker Engine aus dem Paket deiner Distro (`docker-compose-plugin` auf Debian/Ubuntu), bevor du weitermachst. Alles in diesem Guide setzt Compose-v2-Semantik voraus: `depends_on` mit `condition:`, `:?`-Interpolations-Guards und Compose-Profiles.
+
+<ListCheck>
+- Ein Linux-VPS oder Dedicated Server mit installiertem Docker und Docker Compose v2
+- Realistisch 8 GB RAM (Upstream setzt `mem_limit: 8g` und `GOMEMLIMIT: 7GiB` auf dem Server-Container)
+- Root- oder Sudo-Zugriff (für den privilegierten Container-Modus erforderlich)
+- Ein API-Key eines OpenAI-kompatiblen, Anthropic- oder Google-AI-Providers
+- Ein Domainname, wenn du HTTPS über einen Reverse Proxy willst
+</ListCheck>
+
+Du kannst den Stack in 4 GB quetschen, indem du `MEMOH_SERVER_MEMORY_LIMIT` senkst und `GOMEMLIMIT` auf grob 85 % davon setzt – aber das ist ein Lab-Setup, keine komfortable Untergrenze. Jeder Agent-Workspace legt Overhead auf den Basis-Stack obendrauf, und ich würde keine Idle-RSS-Zahl nennen, ohne sie vorher auf deiner eigenen Box gemessen zu haben.
+
+Diese 8-GB-Realität schiebt dich von einer Hetzner-Box der CX32-Klasse auf eine Maschine der CX42- oder CPX31-Klasse, in der Größenordnung von 8 bis 15 EUR/Monat. Nicht schlecht für eine Flotte von Always-on-Agenten mit echten Workspaces.
+
+<Button text="Hetzner Cloud jetzt testen" link="https://go.bitdoze.com/hetzner" variant="solid" color="blue" size="lg" external={true} icon="rocket-launch" />
+<Button text="Hostinger VPS testen" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
+
+_VPS-Preise sind 2026 überall gestiegen. Wenn du eine gemietete Box gerade überdenkst, schau dir an, [was sich geändert hat und wann ein Mini-PC gewinnt](/vps-price-increases/)._
+
+## Option 1: Memoh mit dem One-Click-Installer installieren
+
+Das ist der schnellste Weg und der von Upstream empfohlene. Auf einer sauberen Box mit installiertem Docker:
+
+```bash
+curl -fsSL https://memoh.sh | sh
+```
+
+Der Installer übernimmt Config-Generierung, `.env`-Secrets (inklusive RPC-Secret), Connect-It-Provisioning sowie Upgrade-/Reinstall-Modi. Er pinnt die Image-Tags außerdem auf das Release, das er installiert – anders als die `:latest`-Tags in selbst zusammengestellten Compose-Dateien. In der Praxis schreibt er `config.toml` und eine `.env` mit den generierten Secrets und fährt dann den Compose-Stack unter Docker hoch. Wenn er fertig ist, bekommst du einen Login-Prompt im Terminal und einen Stack, den du wie jeden anderen mit `docker compose ps` inspizieren kannst.
+
+Nützliche Varianten:
+
+```bash
+# Silent install (no prompts)
+curl -fsSL https://memoh.sh | sh -s -- -y
+
+# Pin a specific version
+curl -fsSL https://memoh.sh | sh -s -- --version v1.0.2
+
+# Slow network or China mirror
+curl -fsSL https://memoh.sh | USE_CN_MIRROR=true sh
+```
+
+<Notice type="warning" title="Defaults im Silent-Modus">
+Der Silent-Modus (`-y`) kommt mit dem Admin-Login `admin`/`admin123` und dem PostgreSQL-Passwort `memoh123`. Ändere beides, bevor die Box irgendwo erreichbar ist. Der interaktive Modus zwingt dich immerhin dazu, sie dir anzusehen.
+</Notice>
+
+<Notice type="info" title="CN-Mirror auch für manuelle Installationen">
+Falls Image-Pulls in Timeouts laufen, ist das Installer-Flag oben der einfache Fix. Für manuelle Compose-Läufe setze `registry = "memoh.cn"` unter `[container]` in `config.toml` und füge das `docker/docker-compose.cn.yml`-Overlay aus dem Repo hinzu. Generell profitieren langsame Netzwerke davon.
+</Notice>
+
+Egal welchen Weg du wählst: Führe die Smoke-Tests in [Dein Memoh-Deployment verifizieren](#dein-memoh-deployment-verifizieren) aus, bevor du es als erledigt abhakst.
+
+## Option 2: Memoh mit Dokploy deployen
+
+Dokploy kümmert sich für dich um Domains und SSL und ist das, was ich nutze, wenn der Stack hinter einer echten Domain sitzt. Falls du es noch nicht eingerichtet hast, folge zuerst dem [Dokploy-Installations-Guide](/dokploy-install/).
+
+### Schritt 1: Die Config-Datei erstellen
+
+SSH auf deinen Server und hol dir das Config-Template aus dem Repo:
+
+```bash
+mkdir -p /opt/memoh && cd /opt/memoh
+git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/felinics/Memoh.git upstream
+cp upstream/conf/app.docker.toml config.toml
+mkdir -p conf/providers
+cp -r upstream/conf/providers/. conf/providers/
+```
+
+Kopiere das Template, statt eine Config-Datei von Hand zu bauen. Das Schema hat sich in 1.0 komplett geändert (neue `[channel]`-, `[internal_rpc]`-, `[container]`- und `[pgvector]`-Sektionen; die alten `[mcp]`-, `[qdrant]`- und `[agent_gateway]`-Blöcke existieren nicht mehr), und das Template ist das Einzige, das garantiert zu den Images passt. Zwei Fallstricke beim Klonen: Ein schlichtes `git clone` verpasst die Submodules, und die von GitHub automatisch generierten Source-Archive sind nicht buildbar. Wenn du nur das Config-Template willst, sind die Submodules weniger kritisch – aber behalt die Gewohnheit bei.
+
+Generiere jetzt echte Secrets und bearbeite `config.toml`:
+
+```bash
+openssl rand -base64 32   # -> [auth] jwt_secret
+openssl rand -base64 16   # -> [postgres] password
+```
+
+Drei Dinge müssen vor dem ersten Boot geändert werden:
+
+1. `[admin]`: Username, `password` und E-Mail. Das Default-Passwort ist `admin123`.
+2. `[auth]`: `jwt_secret`. Füge die Ausgabe von `openssl rand -base64 32` ein.
+3. `[postgres]`: `password`. Füge die Ausgabe von `openssl rand -base64 16` ein. Sie muss mit `POSTGRES_PASSWORD` in den nächsten Schritten übereinstimmen.
+
+Wissenswert, solange du in der Datei bist: `[container]` hat einen `registry`-Schalter (`"memoh.cn"` für den CN-Mirror) und das Workspace-Image (`memohai/workspace:debian-latest`); `[internal_rpc]` und `[webhook_tunnel]` konfigurieren den Channel-Worker und den optionalen Cloudflare-Tunnel; `[pgvector]` ist nur relevant, wenn du die Vector-Datenbank mit einem separaten Passwort betreibst. Patterns, um diese Secrets aus der Versionskontrolle zu halten, findest du unter [Secrets in Docker Compose handhaben](/docker-compose-secrets/).
+
+### Schritt 2: Den Dokploy-Service anlegen
+
+1. Öffne dein Dokploy-Projekt
+2. Klick **Add Service** und wähle **Compose**
+3. Benenne ihn `memoh`
+
+### Schritt 3: Compose-Datei einfügen und Environment setzen
+
+Füge das in den Dokploy-Compose-Editor ein. Es ist das Upstream-1.0.2-Service-Layout, angepasst für Dokploy: keine publizierten Ports (der Proxy übernimmt das Routing) und ein externes `dokploy-network`:
+
+```yaml
+name: "memoh"
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: memoh
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  pgvector:
+    image: pgvector/pgvector:pg18
+    container_name: memoh-pgvector
+    environment:
+      POSTGRES_DB: memoh_vector
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgvector_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh -d memoh_vector"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  migrate:
+    image: memohai/server:1.0.2
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - /opt/memoh/config.toml:/app/config.toml:ro
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgvector:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - dokploy-network
+
+  server:
+    image: memohai/server:1.0.2
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    mem_limit: 8g
+    environment:
+      MEMOH_INTERNAL_RPC_SHARED_SECRET: ${MEMOH_INTERNAL_RPC_SHARED_SECRET:?MEMOH_INTERNAL_RPC_SHARED_SECRET is required}
+      GOMEMLIMIT: 7GiB
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /opt/memoh/config.toml:/app/config.toml:ro
+      - /opt/memoh/conf/providers:/app/conf/providers:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8080"
+      - "1455"
+      - "9090"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgvector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 45s
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  channel:
+    image: memohai/server:1.0.2
+    container_name: memoh-channel
+    entrypoint: ["/app/memoh-channel", "serve"]
+    environment:
+      MEMOH_INTERNAL_RPC_SHARED_SECRET: ${MEMOH_INTERNAL_RPC_SHARED_SECRET:?MEMOH_INTERNAL_RPC_SHARED_SECRET is required}
+    volumes:
+      - /opt/memoh/config.toml:/app/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8081"
+      - "9091"
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8081/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+  web:
+    image: memohai/web:1.0.2
+    container_name: memoh-web
+    environment:
+      MEMOH_SERVER_UPSTREAM: memoh-server:8080
+      MEMOH_CHANNEL_UPSTREAM: memoh-channel:8081
+    expose:
+      - "8082"
+    depends_on:
+      server:
+        condition: service_healthy
+      channel:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  postgres_data:
+  pgvector_data:
+  containerd_data:
+  memoh_data:
+  server_cni_state:
+```
+
+Generiere dann das Shared Secret und setze die Environment-Werte im Environment-Tab des Dokploy-Services (Dokploy schreibt sie in eine `.env` neben der Compose-Datei, gegen die sich die `${...}`-Platzhalter auflösen):
+
+```bash
+openssl rand -hex 32   # -> MEMOH_INTERNAL_RPC_SHARED_SECRET
+openssl rand -base64 16   # -> POSTGRES_PASSWORD (same value as [postgres] password in config.toml)
+```
+
+| Variable | Wert |
+| --- | --- |
+| `MEMOH_INTERNAL_RPC_SHARED_SECRET` | Ausgabe von `openssl rand -hex 32` |
+| `POSTGRES_PASSWORD` | wie `[postgres] password` in `config.toml` |
+
+<Notice type="error" title="Pflicht: RPC-Secret">
+Die Compose-Datei verweigert ohne `MEMOH_INTERNAL_RPC_SHARED_SECRET` den Start. Sowohl `server` als auch `channel` nutzen den `:?`-Guard, eine fehlende Variable bricht also mit `MEMOH_INTERNAL_RPC_SHARED_SECRET is required` ab, statt einen halb gepairten Stack zu booten. Das ist der häufigste Deploy-Fehler seit 1.0 überhaupt. Persistiere das Secret und verwende es über Recreates hinweg wieder: Es authentifiziert das Server-Channel-RPC, und eine Rotation bricht das Pairing.
+</Notice>
+
+**Hinweise zum Dokploy-Setup**
+
+- Alle Services nutzen `expose` statt `ports`; Dokploys Proxy übernimmt das externe Routing. Schau dir [wie man eine Docker-Compose-App in Dokploy deployt](/dokploy-docker-compose-app/) an, falls der Workflow neu für dich ist.
+- `config.toml` wird von `/opt/memoh/config.toml` auf dem Host gemountet. Das Datenbankpasswort muss sowohl in der Config-Datei als auch in `POSTGRES_PASSWORD` übereinstimmen. Wenn du ein separates `PGVECTOR_PASSWORD` setzt, lass auch die `[pgvector]`-Sektion dazu passen.
+- Der Server-Container braucht `privileged: true` und `pid: host`, damit containerd Agent-Workspaces verwalten kann.
+- `mem_limit: 8g` und `GOMEMLIMIT: 7GiB` sind die Upstream-Defaults. Wenn du das Limit senkst, halte `GOMEMLIMIT` bei grob 85 % davon.
+
+### Schritt 4: Domain und Port
+
+Erstelle eine Domain in Dokploy und mappe sie auf den `web`-Service auf Port **8082**. Öffne nach dem Deploy `https://your-domain.com` und logge dich ein.
+
+Exponiere die anderen Ports nicht. Die komplette Default-Portliste, damit du weißt, was geschlossen bleiben muss: `8082` (Web, der Einzige, den du veröffentlichst), `8080` und `1455` (Server-API und Display), `30000/udp` (WebRTC-Remote-Display), `8421` (Connect-It-Admin, nur falls aktiviert) und `9090`/`9091` (internes RPC, niemals veröffentlichen). Zum Firewall-Verhalten bei publizierten Ports: [Docker umgeht deine Firewall](/docker-bypasses-firewall/) standardmäßig, also steuere die Exposition auf Compose-Ebene.
+
+<Notice type="warning" title="Sicherheit">
+Ändere alle Default-Passwörter vor dem Deploy. Der Admin-Default ist `admin`/`admin123`, und der Silent-Modus des One-Click-Installers setzt das Postgres-Passwort `memoh123` obendrauf. Rotiere das JWT-Secret und schütze `.env`. Falls du einen anderen Reverse Proxy als Dokploy brauchst, funktioniert [Traefik in Docker](/traefik-proxy-docker/) gut.
+</Notice>
+
+<Notice type="info" title="SSE und HTTP/2">
+Memoh streamt massig Server-Sent Events. Wenn dein Reverse Proxy auf HTTP/1.1 downgraded, können die grob sechs Verbindungen pro Origin des Browsers durch SSE-Long-Pins erschöpft werden, und die UI fängt an zu hängen (Upstream-Issue #822). Der Web-Container bringt genau dafür einen auskommentierten HTTPS/HTTP2-Listener auf 8443 mit. Entweder liefere HTTP/2 vom Proxy aus oder aktiviere diesen Listener – und schalte Proxy-Buffering für SSE-Routen ab.
+</Notice>
+
+## Option 3: Memoh mit Docker Compose deployen (Standalone)
+
+Das ist der Weg, bei dem du jede Zeile besitzt. Er funktioniert auf jeder Linux-Box mit Docker.
+
+### Schritt 1: Projektverzeichnis und Config
+
+```bash
+mkdir -p /opt/memoh && cd /opt/memoh
+git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/felinics/Memoh.git upstream
+cp upstream/conf/app.docker.toml config.toml
+mkdir -p conf/providers
+cp -r upstream/conf/providers/. conf/providers/
+```
+
+Bearbeite `config.toml` und ändere dieselben drei Keys wie im Dokploy-Pfad: `[admin]`-Credentials, `[auth] jwt_secret` und `[postgres] password`.
+
+### Schritt 2: Secrets und die .env-Datei generieren
+
+Du brauchst drei Secrets:
+
+```bash
+openssl rand -base64 32   # jwt_secret -> config.toml [auth]
+openssl rand -hex 32      # MEMOH_INTERNAL_RPC_SHARED_SECRET -> .env
+openssl rand -base64 16   # postgres password -> config.toml [postgres] + .env
+```
+
+Schreibe die `.env` neben deine Compose-Datei:
+
+```bash
+cat > .env << 'EOF'
+POSTGRES_PASSWORD=YOUR_DB_PASSWORD
+MEMOH_INTERNAL_RPC_SHARED_SECRET=YOUR_RPC_SECRET
+EOF
+```
+
+`POSTGRES_PASSWORD` muss mit `[postgres] password` in `config.toml` übereinstimmen. Das RPC-Secret authentifiziert das Server-Channel-Paar: Persistiere es und verwende es über Recreates hinweg wieder. Es mitten im Betrieb zu rotieren bricht das Pairing, bis beide Services mit dem neuen Wert neustarten.
+
+<Notice type="info" title="Secrets auf der Platte">
+`.env` und `config.toml` enthalten produktive Credentials. Halte beide aus der Versionskontrolle und schränke die Berechtigungen ein (`chmod 600 .env config.toml`). Für das große Ganze rund um Compose-Secrets siehe [Docker-Compose-Secrets: Was funktioniert und sichere Alternativen](/docker-compose-secrets/).
+</Notice>
+
+### Schritt 3: Die Compose-Datei erstellen
+
+```yaml
+name: "memoh"
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: memoh
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  pgvector:
+    image: pgvector/pgvector:pg18
+    container_name: memoh-pgvector
+    environment:
+      POSTGRES_DB: memoh_vector
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgvector_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh -d memoh_vector"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  migrate:
+    image: memohai/server:1.0.2
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgvector:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - memoh-network
+
+  server:
+    image: memohai/server:1.0.2
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    mem_limit: ${MEMOH_SERVER_MEMORY_LIMIT:-8g}
+    environment:
+      MEMOH_INTERNAL_RPC_SHARED_SECRET: ${MEMOH_INTERNAL_RPC_SHARED_SECRET:?MEMOH_INTERNAL_RPC_SHARED_SECRET is required}
+      GOMEMLIMIT: ${MEMOH_GOMEMLIMIT:-7GiB}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./conf/providers:/app/conf/providers:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "8080:8080"
+      - "1455:8080"
+      - "30000:30000/udp"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgvector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 45s
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  channel:
+    image: memohai/server:1.0.2
+    container_name: memoh-channel
+    entrypoint: ["/app/memoh-channel", "serve"]
+    environment:
+      MEMOH_INTERNAL_RPC_SHARED_SECRET: ${MEMOH_INTERNAL_RPC_SHARED_SECRET:?MEMOH_INTERNAL_RPC_SHARED_SECRET is required}
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8081"
+      - "9091"
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8081/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  web:
+    image: memohai/web:1.0.2
+    container_name: memoh-web
+    environment:
+      MEMOH_SERVER_UPSTREAM: memoh-server:8080
+      MEMOH_CHANNEL_UPSTREAM: memoh-channel:8081
+    ports:
+      - "8082:8082"
+    depends_on:
+      server:
+        condition: service_healthy
+      channel:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+volumes:
+  postgres_data:
+  pgvector_data:
+  containerd_data:
+  memoh_data:
+  server_cni_state:
+
+networks:
+  memoh-network:
+    driver: bridge
+```
+
+Ein paar Operator-Notizen, die in diese Datei eingebaut sind: `stop_grace_period: 45s` auf dem Server gibt Workspaces Zeit zum Checkpointen, und v0.21+ nimmt unterbrochene Sessions nach einem Graceful Shutdown wieder auf. `mem_limit` ist über `MEMOH_SERVER_MEMORY_LIMIT` tunbar, mit `GOMEMLIMIT` bei grob 85 % davon (halt das Verhältnis, wenn du einen der Werte änderst). Die GPU-CDI-Mounts (`/etc/cdi`, `/var/run/cdi`) sind Upstream auskommentiert; füge sie hinzu, wenn du eine GPU in Workspaces durchreichst. Wenn du nur die Web-UI hinter einem Proxy brauchst, lösch den `ports`-Block des Servers komplett und veröffentliche nichts außer `8082`.
+
+### Schritt 4: Den Stack starten
+
+```bash
+sudo docker compose up -d
+```
+
+Der erste Start dauert ein paar Minuten, während die Images pullen (das Server-Image ist das große). Beobachte ihn:
+
+```bash
+sudo docker compose logs -f
+```
+
+Ein gesunder erster Boot in den Logs, der Reihe nach: Postgres und pgvector ready, `migrate` spielt das Schema ein und beendet sich, `server` startet seine API, `channel` registriert sich über RPC, und `web` serviert. Jede Abweichung von dieser Reihenfolge ist dein erster Hinweis.
+
+Sobald die Logs sich beruhigt haben, öffne `http://your-server-ip:8082` und logge dich mit den Admin-Credentials aus `config.toml` ein. Der `migrate`-Service läuft bei jedem Start, Schema-Updates werden also automatisch eingespielt, wenn du neue Images pullst. Führe danach die [Smoke-Tests](#dein-memoh-deployment-verifizieren) aus, bevor du etwas Echtes anbindest.
+
+## Dein Memoh-Deployment verifizieren
+
+Verlass dich nicht allein auf `up -d`. Führe die Smoke-Tests der Reihe nach aus:
+
+<ListCheck>
+- `docker compose ps` zeigt alle sechs Kernservices als laufend, mit `memoh-migrate` bei `Exited (0)`
+- `docker compose logs migrate --tail 50` zeigt applizierte Migrationen und keine Fehler
+- `docker compose logs channel | tail` zeigt den registrierten Channel-Worker
+- Health-Endpunkte antworten (siehe die Curl-Kommandos unten)
+- Du kannst dich als Admin in der Web-UI einloggen
+- Eine Testnachricht bekommt eine Antwort in der Web-UI
+- Ein externer Channel (zum Beispiel Telegram) liefert eine Nachricht Ende-zu-Ende
+</ListCheck>
+
+```bash
+sudo docker compose ps
+sudo docker compose logs migrate --tail 50
+sudo docker compose logs channel | tail
+
+curl -s http://localhost:8080/health
+curl -s http://localhost:8081/health
+```
+
+Ein gesundes `docker compose ps` zeigt `memoh-postgres` und `memoh-pgvector` als `healthy`, `memoh-migrate` als `Exited (0)` und `memoh-server`, `memoh-channel`, `memoh-web` als `running` (Server und Channel mit einem `(healthy)`-Marker, sobald ihre Checks durch sind). Das Migrate-Log sollte sich wie applizierte Schema-Versionen lesen, nicht wie ein Stacktrace. Das Channel-Log sollte zeigen, dass er sich am Server registriert hat, nicht Retry-Loops.
+
+Die Compose-Health-Checks rufen `/health` auf 8080 und 8081 auf – diese Pfade sind also die Arbeitsannahme. Falls ein Curl einen 404 zurückgibt, keine Panik: Schau stattdessen in `docker compose logs server` und `channel`, da sich exakte Endpunkt-Pfade zwischen Releases verschieben können.
+
+Wie "kaputt" aussieht: Ein `memoh-migrate`, das im Restart hängt, bedeutet meist ein Datenbank-Passwort-Mismatch. Ein `memoh-channel`, der läuft, aber stumm bleibt, bedeutet meist ein falsches RPC-Secret. Keine Antwort von einem neuen Agenten bedeutet meist, dass noch kein Provider konfiguriert ist. Lösungen findest du unter [Troubleshooting bei Memoh-Deployment-Problemen](#troubleshooting-bei-memoh-deployment-problemen).
+
+## Nach dem Deployment
+
+### Einen KI-Provider hinzufügen
+
+Gehe nach dem Login zu **Settings > Providers** und füge deinen API-Key für OpenAI, Anthropic, Google oder einen kompatiblen Endpunkt hinzu. Ohne Provider machen Agenten nichts Nützliches. Ein OpenAI-kompatibles Setup braucht drei Dinge: eine Base-URL, einen API-Key und mindestens einen Modelnamen (zum Beispiel `gpt-4o-mini` oder was auch immer dein Endpunkt anbietet). Das ist gleichzeitig der Fluchtweg für lokale Modelle hinter einem OpenAI-kompatiblen Gateway wie LiteLLM oder Ollamas OpenAI-Shim. Für nicht-standardisierte Endpunkte leben Custom-Provider-Definitionen im `./conf/providers`-Verzeichnis, das read-only in den Server gemountet ist.
+
+### Deinen ersten Agenten erstellen
+
+1. Klick in der Sidebar auf **Bots**
+2. Klick auf **Create Bot**
+3. Gib ihm einen Namen und wähle ein Modell deines konfigurierten Providers
+4. Der Agent bekommt automatisch seinen eigenen containerd-Workspace (Image `memohai/workspace:debian-latest`)
+
+Der Workspace ist der wichtige Teil: ein echter Container mit eigenem Dateisystem und Netzwerk, kein Prompt-Fenster. Dateien, die der Agent schreibt, persistieren dort; MCP-Server, die er fährt, bleiben sandboxed; und ein Agent, der abraucht, reißt die anderen nicht mit. Du kannst sofort aus der Web-UI mit ihm chatten. Externe Channels anzubinden ist der nächste Schritt, wenn er auf Telegram oder Discord antworten soll.
+
+### Messaging-Channels verbinden
+
+Memoh 1.0 unterstützt neun externe Channels. Konfiguriere sie unter **Settings > Channels**:
+
+| Channel | Was du brauchst |
+| --- | --- |
+| Telegram | Ein Bot-Token von @BotFather |
+| Slack | Bot-Token und App-Token aus der Slack-API |
+| Discord | Ein Bot-Application-Token aus dem Discord Developer Portal |
+| Feishu (Lark) | App ID und App Secret |
+| DingTalk | App-Credentials aus der DingTalk-Konsole |
+| WeCom | Corp ID und App Secret |
+| WeChat | Service-Account-Credentials |
+| QQ | Bot-Credentials von der QQ-Open-Platform |
+| LINE | Channel-Token und Channel-Secret |
+
+Jeder Channel hat seinen eigenen Walkthrough unter [docs.memoh.ai/integrations/channels](https://docs.memoh.ai/integrations/channels.md). Der eingebaute E-Mail-Support wurde in v0.21.0 entfernt – such also nicht nach einer SMTP-Zeile. Verkabel einen Channel nach dem anderen und schick eine Testnachricht, bevor du zum nächsten übergehst: Channel-Credentials und Webhook-URLs schlagen auf leise Weise fehl, und die [Verify-Checkliste](#dein-memoh-deployment-verifizieren) oben fängt sie schneller als ein Nutzer, der sich drei Tage später beschwert.
+
+<Notice type="info" title="Keine öffentliche IP? Nutze den Webhook-Tunnel">
+Das optionale `webhook-tunnel`-Profil (`--profile webhook-tunnel`) fährt einen cloudflared Quick Tunnel, damit Telegram und Co. deinen Channel-Worker ohne Port-Forwarding oder öffentliche IP erreichen. Perfekt für eine Home-Box oder einen NAT-ed VPS.
+</Notice>
+
+### Coding-Agenten in Memoh fahren (ACP)
+
+Das ist das Feature, das Memoh 1.0 über Chatbots hinaus interessant macht. Über ACP (Agent Client Protocol) kannst du echte Coding-Agenten in einem Agent-Workspace fahren: Claude Code, Codex, OpenCode oder Hermes. Der Workspace ist ein richtiger Container mit eigenem Dateisystem – Repo-Arbeit bleibt also in der Sandbox statt auf deinem Host.
+
+Wofür es gut ist:
+
+- Repo-Arbeit: klonen, editieren, Tests fahren und Diffs aus dem Workspace heraus reporten
+- Geplante Tasks mit Per-Run-Sessions, damit jeder Run sauber startet statt einen langen Chat zu erben
+- Ein Approvals-/Trust-Modell für alles Destruktive, bevor es ausgeführt wird
+- Mit einem Coding-Agenten über Telegram reden, während er in einem Container auf deinem Server arbeitet
+
+Wenn du die zugrunde liegenden Tools vergleichst, schau dir die [besten AI-Coding-Tools und -Agenten 2026](/ai-coding-tools/) an und wie man [die Codex-App mit jedem Modell nutzt](/codex-app-any-model/). Wenn du zwischen Modellen routest, vereinheitlicht [Agent Router](https://go.bitdoze.com/agentrouter) den Zugriff auf Claude Code, Codex und Gemini CLI unter einem Key, und [OpenCode](https://go.bitdoze.com/opencode-go) ist ein Open-Source-Coding-Agent, den du im Workspace hosten kannst. Die ACP-Flows sind auf [docs.memoh.ai/guides/acp](https://docs.memoh.ai/guides/acp.md) dokumentiert, und die Desktop-App kann sich seit v0.16 remote mit dem Server verbinden.
+
+<Notice type="info" title="Ressourcen-Hinweis">
+Coding-Agenten verbrennen RAM und CPU pro Workspace – obendrauf auf den 8-GB-Basis-Stack. Wenn du vorhast, mehrere parallel zu fahren, dimensioniere die Box größer und setze Per-Workspace-Ressourcenlimits in Memohs Einstellungen.
+</Notice>
+
+### Wie Agent-Memory funktioniert
+
+Memoh paart pgvector für Embeddings mit Postgres als Source of Truth für strukturierte Daten und nutzt hybride Vektor- und Keyword-Abfrage, um Kontext zurückzuholen. Seit März hat die Engine semantische Memory-Compaction (v0.13), getypte Conversation-History und Compaction (v0.17 und v0.18) und ein konfigurierbares Memory-Modell mit Usage-Tracking (v0.21) bekommen – was behalten und was kompaktiert wird, ist jetzt tunbar statt fix. Compaction ist das Stück, das langlebige Agenten davor bewahrt, in ihrer eigenen Historie zu ertrinken: Alte Turns werden zu Fakten zusammengefasst, und das rohe Transkript rollt aus dem Hot Path. Du kannst Memory-Compaction und Rebuild aus den Agent-Settings triggern, und das Usage-Tracking sagt dir, wie viel des Kontext-Budgets jeder Agent verbrennt. Wenn du für andere Projekte ein anderes Memory-Backend willst, ist [Cognee für Agent-Memory self-hosten](/cognee-self-host/) einen Blick wert.
+
+## Daten, Updates und Backups verwalten
+
+Alle persistenten Daten liegen in Docker Named Volumes:
+
+| Volume | Inhalt |
+| --- | --- |
+| `postgres_data` | PostgreSQL-Datenbankdateien (Nutzer, Agenten, Config) |
+| `pgvector_data` | pgvector-Embeddings (Memory) |
+| `containerd_data` | Agent-Workspace-Images und Snapshots |
+| `memoh_data` | Agent-Workspace-Daten |
+| `server_cni_state` | CNI-Netzwerk-State für Workspace-Networking |
+
+Diese Volumes überleben `docker compose down`. Sichere beide Datenbanken plus die zwei Secret-Dateien (`config.toml` und `.env`):
+
+```bash
+sudo docker compose exec postgres pg_dump -U memoh memoh > memoh-$(date +%F).sql
+sudo docker compose exec pgvector pg_dump -U memoh memoh_vector > memoh_vector-$(date +%F).sql
+cp config.toml .env /some/backup/location/
+```
+
+Der Restore ist der umgekehrte Weg, in einen laufenden Stack:
+
+```bash
+cat memoh-2026-11-16.sql | sudo docker compose exec -T postgres psql -U memoh memoh
+cat memoh_vector-2026-11-16.sql | sudo docker compose exec -T pgvector psql -U memoh memoh_vector
+```
+
+Zieh beide Dumps nach Plan (nächtlicher Cron reicht für eine persönliche Flotte) und halte die Secret-Dateien daneben. Ein Backup ohne `config.toml` und `.env` ist ein halbes Backup: Du hast die Daten und keine Möglichkeit, den wiederhergestellten Stack zu authentifizieren. Für den Dokploy-Pfad: [Sichere Dokploy-Deployments auf Cloudflare R2](/dokploy-backups-cloudflare-r2/) und häng diese Dumps in dieselbe Pipeline.
+
+<Notice type="error" title="down -v löscht alles">
+`docker compose down -v` löscht die Named Volumes: beide Datenbanken, alle Workspace-Images, alle Agent-Daten. Es gibt kein Undo. Gewöhn es dir gar nicht erst an.
+</Notice>
+
+Um Memoh zu aktualisieren, wähle deinen Weg:
+
+<Tabs>
+<Tab name="One-Click-Installer">
+
+Führe den Installer erneut aus; er erkennt eine bestehende Installation und bietet Upgrade- oder Reinstall-Modi an, und er pinnt die Image-Tags auf das Release, das er installiert:
+
+```bash
+curl -fsSL https://memoh.sh | sh
+```
+
+</Tab>
+<Tab name="Docker Compose">
+
+Pull die neuesten Images und recreate. Der `migrate`-Service läuft beim Start automatisch, um Schema-Änderungen einzuspielen:
+
+```bash
+sudo docker compose pull && sudo docker compose up -d
+```
+
+</Tab>
+</Tabs>
+
+In Produktion pinne die Image-Tags in deiner Compose-Datei (`memohai/server:1.0.2` und Freunde, wie in den Dateien oben) und bumpe sie bewusst. `:latest` floatet, und ein routinemäßiges `up -d` kann eine Major-Version ziehen, über die du nichts gelesen hast.
+
+Nützliche Day-2-Kommandos:
+
+```bash
+# Check service status
+sudo docker compose ps
+
+# View logs for a specific service
+sudo docker compose logs -f server
+
+# Restart the stack
+sudo docker compose restart
+
+# See where the disk went (workspace images add up)
+sudo docker system df
+```
+
+Disk ist die Ressource, die sich anschleicht. Jeder Agent-Workspace ist eine `memohai/workspace:debian-latest`-Instanz plus containerd-Snapshots, jede Conversation legt Rows in beiden Datenbanken ab, und `containerd_data` hortet alte Image-Layer bis zum Prune. Wirf monatlich einen Blick auf `docker system df`. Prune ungenutzte Workspace-Images, nachdem du Agenten löschst. Wenn der Box die Platte ausgeht, ist Postgres das Erste, was umkippt – und eine volle Platte macht aus einem Routine-Restart einen Recovery-Job.
+
+## Production-Checkliste und Sicherheit
+
+<ListCheck>
+- Ersetze alle Default-Passwörter (`admin123`, das `memoh123` des Installers, plus PostgreSQL und das JWT-Secret)
+- Generiere `MEMOH_INTERNAL_RPC_SHARED_SECRET` mit `openssl rand -hex 32`, lagere es in `.env` und committe es nie
+- Richte HTTPS über einen Reverse Proxy ein (Dokploy übernimmt das, oder Caddy/Traefik/Nginx) und halte HTTP/2 im Pfad für SSE
+- Firewall die Box zu: veröffentliche nur `8082`; `8080`/`1455` und `30000/udp` nur, wenn du das Remote-Display nutzt; `8421` nur, wenn Connect-It aktiviert ist; niemals `9090`/`9091`
+- Denk dran, dass Docker Ports standardmäßig an deinen Firewall-Regeln vorbei veröffentlicht
+- Setze Memory- und CPU-Limits (`MEMOH_SERVER_MEMORY_LIMIT`, `GOMEMLIMIT` bei ~85 %, Per-Workspace-Limits)
+- Sichere beide Postgres-Instanzen plus `config.toml` und `.env`
+- Monitor die Disk-Nutzung; Workspace-Images, containerd-Snapshots und Vector-Daten wachsen über die Zeit
+- Pinne Image-Tags (`1.0.2`) statt `:latest`
+</ListCheck>
+
+<Notice type="warning" title="Privileged-Modus">
+Der Server-Container läuft mit `privileged: true` und `pid: host`. Das gibt ihm weitreichenden Zugriff auf Host-Kernel und Dateisysteme. Behandle einen kompromittierten Agent-Workspace wie einen kompromittierten Host: Halte Memoh auf einer eigenen Box, weg von Kundendaten und anderen Produktivservices, und [härte SSH auf dem Host](/secure-ssh-server-linux/). Fürs Monitoring decken [Beszel und Uptime Kuma](/beszel-uptime-kuma/) die üblichen Basen ab.
+</Notice>
+
+Was 24/7 läuft, sind die sechs Kernservices. Die Per-Agent-Kosten sind der Workspace-Container plus sein Image – eine Handvoll größtenteils idler Agenten ist also billig, eine Flotte Coding-Agenten nicht. Budgetier Disk entsprechend.
+
+Zu Updates: Pinne die Tags, lies die Release-Notes der Version, auf die du springst (v0.21.0 hat E-Mail gebrochen, 1.0 das ganze Service-Layout), und zieh vor jedem Upgrade einen Datenbank-Dump. Memoh bewegt sich schnell für ein so junges Projekt, und "pull and pray" funktioniert genau bis zu dem Tag, an dem es das nicht mehr tut. Wenn ein Upgrade schiefgeht, ist die Rollback-Story die gepinnten alten Images plus deine Dumps: `docker compose down`, Tags zurückeditieren, beide Datenbanken restaurieren, `docker compose up -d`.
+
+<Notice type="info" title="Lizenz">
+Memoh ist AGPL-3.0. Okay für persönliche und interne Nutzung; lies die Lizenz, bevor du es als Teil eines kommerziellen Services anbietest.
+</Notice>
+
+## Troubleshooting bei Memoh-Deployment-Problemen
+
+<Notice type="error" title="Häufigster Fehler">
+Fehlendes `MEMOH_INTERNAL_RPC_SHARED_SECRET`. Compose bricht mit `MEMOH_INTERNAL_RPC_SHARED_SECRET is required` ab (der `:?`-Guard), oder der Channel-Worker startet und pairt nie. Generiere es mit `openssl rand -hex 32`, leg es in `.env` oder im Dokploy-Environment-Tab ab und starte neu.
+</Notice>
+
+| Symptom | Fix |
+| --- | --- |
+| Compose bricht ab: `MEMOH_INTERNAL_RPC_SHARED_SECRET is required` | Mit `openssl rand -hex 32` generieren, in `.env` / Dokploy-Environment eintragen, neu deployen |
+| Container schlagen beim Start sofort mit einem Mount-Fehler fehl | `config.toml` fehlt oder ist am Mount-Pfad falsch benannt; ohne sie zu starten schlägt laut Doku fehl |
+| `memoh-migrate` exitet non-zero oder loopt | `POSTGRES_PASSWORD` stimmt nicht mit `[postgres] password` in `config.toml` überein. Wenn du `PGVECTOR_PASSWORD` gesetzt hast, lass auch `[pgvector]` dazu passen |
+| `memoh-channel` läuft, aber Bots antworten nie auf Telegram/Discord | Meist ein RPC-Secret-Mismatch (prüfe, ob beide Services dasselbe `MEMOH_INTERNAL_RPC_SHARED_SECRET` bekommen haben) oder die Channel-Config unter **Settings > Channels** ist unvollständig. Check `docker compose logs channel` auf Registrierungsfehler |
+| Agent-Erstellung schlägt fehl oder der Workspace wird nie ready | Das Workspace-Image (`memohai/workspace:debian-latest`) konnte nicht pullen, oder dem Server fehlt Platz für containerd-Snapshots. Check `docker compose logs server` und `docker system df` |
+| Image-Pull-Timeouts oder langsame Downloads | Nutze den CN-Mirror: `USE_CN_MIRROR=true` beim Installer oder `[container] registry = "memoh.cn"` plus das `docker/docker-compose.cn.yml`-Overlay |
+| Web-UI hängt, Chat hört hinter einem Proxy auf zu streamen | SSE über HTTP/1.1 erschöpft die Browser-Verbindungen. Liefere HTTP/2 aus (oder den h2-Listener des Containers auf 8443) und deaktiviere Proxy-Buffering für SSE-Routen |
+| `port is already allocated` auf 8080/8082/1455/30000/8421 | Ein anderer Prozess besitzt den Port. Remappe die linke Seite der `ports`-Einträge oder stoppe den konkurrierenden Service |
+| Platte füllt sich über ein paar Wochen | Workspace-Images (`memohai/workspace:debian-latest` pro Agent) und containerd-Snapshots summieren sich. Check `docker system df`, prune alte Workspace-Images und behalte `pgvector_data` im Auge |
+| Upgrade vom März-Stack (Qdrant) | Stand November 2026 gibt es keine dokumentierte In-Place-Migration von Qdrant zu pgvector. Exportiere, was du brauchst, und installiere frisch |
+
+## FAQ
+
+<Accordion label="Warum braucht der Server-Container den Privileged-Modus?" group="faq" expanded="true">
+Memoh bettet containerd in den Server-Container ein, um jedem Agenten seine eigene Sandbox zu geben. Containerd braucht Zugriff auf Linux-Kernel-Features (Namespaces, Cgroups), die erhöhte Privilegien erfordern. Es gibt keinen Weg daran vorbei, wenn du Isolation auf Container-Ebene pro Agent willst. Das ist auch der Grund, warum dieser Stack auf eine Box gehört, die du vollständig kontrollierst.
+</Accordion>
+
+<Accordion label="Kann ich Memoh ohne API-Key eines KI-Providers nutzen?" group="faq">
+Du kannst es deployen und durch die UI klicken, aber Agenten generieren keine Antworten, bis du mindestens einen Provider hinzufügst. Jeder OpenAI-kompatible, Anthropic- oder Google-Endpunkt funktioniert.
+</Accordion>
+
+<Accordion label="Wie viel RAM braucht Memoh?" group="faq">
+Plane 8 GB ein. Upstream setzt `mem_limit: 8g` und `GOMEMLIMIT: 7GiB` als Defaults auf dem Server-Container. Wenn du auf einer kleineren Box fahren musst, senke `MEMOH_SERVER_MEMORY_LIMIT` und setze `GOMEMLIMIT` auf grob 85 % des neuen Limits. Jeder Agent-Workspace legt Overhead obendrauf, und Coding-Agenten nochmal deutlich mehr. Ich würde keine Idle-Zahl nennen, ohne deine eigene Installation gemessen zu haben.
+</Accordion>
+
+<Accordion label="Kann ich nur die Web-UI exponieren und die API intern halten?" group="faq">
+Ja, und das solltest du. Seit 1.0 spricht die Web-UI mit zwei Upstreams (Server und Channel), also halte beide intern: veröffentliche nichts außer `8082` (oder route durch einen Reverse Proxy und veröffentliche gar nichts). Exponiere niemals die RPC-Ports `9090`/`9091`, und lass `1455` und `30000/udp` geschlossen, es sei denn, du nutzt das Remote-Display-Feature. Entferne im Standalone-Compose-File die `ports`-Blöcke für `server` und `channel`.
+</Accordion>
+
+<Accordion label="Was ist der Channel-Service und das RPC-Secret?" group="faq">
+Der `channel`-Container ist ein Worker, der die Webhook- und Messaging-Verbindungen besitzt (Telegram, Discord und so weiter). Er spricht über internes RPC auf den Ports 9090/9091 mit dem `server`. `MEMOH_INTERNAL_RPC_SHARED_SECRET` authentifiziert diese Verbindung: Beide Prozesse müssen denselben Wert haben, sonst registriert sich der Channel nie. Generiere es einmal, lagere es in `.env` und verwende es über Recreates hinweg wieder.
+</Accordion>
+
+<Accordion label="Warum gibt es zwei Postgres-Container?" group="faq">
+`postgres` ist das System of Record. `pgvector/pgvector:pg18` hält Memory-Embeddings in der `memoh_vector`-Datenbank. Die Trennung hält Vector-Index-Churn aus deiner Hauptdatenbank und lässt dich beide unabhängig sichern oder tunen. Beide brauchen Backups.
+</Accordion>
+
+<Accordion label="Wie fahre ich Claude Code innerhalb von Memoh?" group="faq">
+Nutze die ACP-Integration: Erstelle einen Agenten, binde Claude Code (oder Codex, OpenCode, Hermes) als seine ACP-Runtime an, und der Coding-Agent läuft im Workspace-Container des Agenten. Setup-Details stehen auf [docs.memoh.ai/guides/acp](https://docs.memoh.ai/guides/acp.md); siehe auch den ACP-Abschnitt oben.
+</Accordion>
+
+<Accordion label="Wie aktualisiere ich Memoh?" group="faq">
+Installer-Pfad: Führe `curl -fsSL https://memoh.sh | sh` erneut aus und wähle Upgrade. Compose-Pfad: `sudo docker compose pull && sudo docker compose up -d`. Der `migrate`-Service spielt Schema-Änderungen bei jedem Start ein. Pinne Image-Tags in Produktion, damit Updates dann passieren, wenn du es entscheidest. Die Update-Kommandos stehen auch in [Daten, Updates und Backups verwalten](#daten-updates-und-backups-verwalten).
+</Accordion>
+
+## Fazit
+
+Memoh 1.0 ist ein genuin anderer Stack als die März-Version: pgvector-Memory, in-process Agenten, ein dedizierter Channel-Worker und ACP-Hosting für echte Coding-Agenten. Es bleibt eine Compose-Datei oder ein Curl entfernt – auf Hardware, die du kontrollierst. Das Fazit für den Betrieb: 8 GB RAM, nur trusted Hosts (Privileged-Modus ist kein Theater), pinne deine Image-Tags und halte Backups beider Datenbanken plus deiner Secrets. Starte mit dem One-Click-Installer, wenn du es heute Abend einfach laufen willst; nimm den Dokploy-Pfad, wenn es eine echte Domain braucht; nimm den Standalone-Compose-Pfad, wenn du vorher jede Zeile kennen willst. In jedem Fall: Führe die Smoke-Tests aus, bevor du ihm etwas Echtes anvertraust.
+
+Wenn du statt einer Multi-Agenten-Flotte nur einen einzelnen Chat-Assistenten brauchst, ist ein leichteres Setup wie [OpenClaw](/clawdbot-setup-guide/) die bessere Wahl. Für andere Memory-Backends folgt der [Cognee-Self-host-Guide](/cognee-self-host/) demselben Deploy-Pattern.
+
+<Button text="Memoh auf GitHub ansehen" link="https://github.com/felinics/Memoh" variant="solid" color="blue" size="md" icon="arrow-right" />
