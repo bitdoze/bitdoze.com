@@ -21,6 +21,11 @@ export const redirects = {
   "/es/herramienta-uptime-kuma/": "/es/instalar-uptime-kuma/",
   "/astro-vs-nextjs-vs-tanstack-start-which-wins/":
     "/astro-vs-nextjs-vs-tanstack-start-which-wins-2026/",
+  "/best-gadgets-for-developers-2027/": "/gifts-for-programmers/",
+  "/es/mejores-gadgets-para-desarrolladores-2027/":
+    "/es/regalos-para-programadores/",
+  "/de/beste-gadgets-fuer-entwickler-2027/":
+    "/de/geschenke-fuer-programmierer/",
 
   // Retired category archives → new taxonomy
   "/categories/cms/": "/categories/web-development/",
