@@ -1,0 +1,161 @@
+---
+date: 2026-11-18T00:00:00Z
+lastmod: 2026-11-18T00:00:00Z
+translationKey: "migrate-synology-to-ugreen-nas"
+title: "Von Synology auf UGREEN NAS migrieren (ohne Datenverlust)"
+meta_title: "Synology auf UGREEN NAS migrieren (2026): Rsync, Docker & Apps"
+description: "Wechsel von Synology DSM zu UGREEN UGOS Pro: Warum du SHR-Laufwerke nicht einfach umstecken kannst, der richtige rsync-Befehl und wie Docker umzieht."
+image: "@assets/images/26/11/migrate-synology-ugreen.webp"
+imageAlt: "Synology 4-Bay NAS über einen 2,5GbE-Switch verbunden mit einem UGREEN NASync DXP4800 Plus auf einem Holzschreibtisch"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["nas", "synology", "ugreen"]
+canonical: "https://www.bitdoze.com/de/synology-auf-ugreen-nas-migrieren/"
+quickAnswer: "rsync -avhP --exclude='@eaDir' --exclude='#recycle' --exclude='#snapshot' /volume1/media/ admin@<ugreen-ip>:/volume1/media/ → kopiert Freigaben direkt NAS-zu-NAS über SSH ohne DSM-Thumbnail- oder Snapshot-Ballast (SHR-Platten lassen sich nicht direkt umstecken)."
+testedOn: ["Synology DSM 7.2", "UGREEN UGOS Pro"]
+timeToComplete: "1 Wochenende"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+
+Wenn du das hier liest, hast du dich wahrscheinlich schon entschieden. Vielleicht war es die Laufwerks-Whitelist der 2025er `x25+`-Modelle, vielleicht der Preis von über 700 $ für Gigabit-Ports und eine CPU ohne iGPU – oder du hast schlicht gesehen, was UGREEN beim [DXP4800 Plus](/de/bestes-nas-homelab-docker-proxmox/) für 619,99 $ liefert. Bei der reinen Hardware pro Dollar ist die Lücke zwischen einer Ryzen-V1500B-DiskStation und einer Intel-10GbE-Box von UGREEN nicht mehr zu übersehen.
+
+Der Punkt, der Umsteiger beim ersten Mal kalt erwischt: **Du kannst deine Festplatten nicht einfach aus der Synology ziehen und in das UGREEN NAS schieben.**
+
+Synologys SHR legt `mdadm` und LVM über drei Partitionen pro Platte (DSM-System, Swap und Datenpool). UGREENs UGOS Pro erwartet eine eigene Partitionstabelle samt `mdadm` + Btrfs-Layout. Schiebst du ein gesundes 4-Platten-SHR-Array in ein DXP4800 Plus, begrüßt dich UGOS mit der Meldung, alle vier Festplatten für einen neuen Speicherpool zu formatieren. Jedes Gigabyte muss über das Netzwerk (oder über eine Zwischenplatte) auf frisch formatierte Laufwerke wandern. Wenn du das einplanst, ist der Umzug ein ruhiges Wochenende. Wenn du es erst merkst, sobald die Platten auf dem Schreibtisch liegen, wird die Nacht lang.
+
+<Notice type="warning" title="Affiliate-Hinweis">
+Einige Links unten nutzen `/go/`-Affiliate-Weiterleitungen zu Amazon. Kaufst du darüber ein, erhalte ich eine kleine Provision ohne Mehrkosten für dich – das finanziert die getestete Hardware.
+</Notice>
+
+<Notice type="warning" title="Externes Backup vor dem Start prüfen">
+Eine Speichermigration ist der denkbar schlechteste Moment um festzustellen, dass dein Backup-Job vor zwei Monaten stillschweigend fehlgeschlagen ist. Bevor du auf der Synology irgendetwas anfasst, stell sicher, dass unersetzliche Ordner (Familienfotos, Steuerunterlagen, Passwort-Tresore, Container-Datenbanken) auf einer unabhängigen, von beiden NAS getrennten Platte liegen. Ein [4-Bay USB-C DAS](/de/beste-das-gehaeuse-homelab/) oder eine große externe USB-Platte ist dafür eine günstige Versicherung.
+</Notice>
+
+## Was wirklich umzieht (und was du neu aufsetzen musst)
+
+| Wandert sauber mit | Braucht manuelle Anpassung | Bleibt auf DSM zurück |
+| --- | --- | --- |
+| Freigabeordner, Medienbibliotheken, Originalfotos | Benutzerkonten, Gruppen-ACLs & SMB-Rechte | SHR-/DSM-Volumes (werden bei Wiederverwendung gelöscht) |
+| Docker-Container mit Bind-Mounts | LinuxServer `PUID`/`PGID`-Rechte (`1026` → `1000`) | Synology-Photos-Gesichtserkennung, virtuelle Alben & Freigabelinks |
+| Docker-Compose-Stacks (`docker-compose.yml`) | Benannte Docker-Volumes (`.tar.gz`-Export/Import) | Active Backup for Business Jobs & Agents |
+| Als `.ova` oder `.vmdk`/`.qcow2` exportierte VMs | Geplante Cron-Skripte & Webhook-Pfade | Versionierte `.hbk`-Tresore von Hyper Backup |
+| Home-Assistant-Backups (`.tar`-Wiederherstellung) | Plex-Wiedergabeverlauf (ohne Kopie der kompletten DB) | Surveillance-Station-Kameralizenzen & Zeitleiste |
+
+Die kurze Regel: **Dateien reisen mit, DSM-Pakete nicht.** Wenn dein Setup ohnehin in Docker Compose läuft, fühlt sich der Wechsel zu UGOS Pro wie der Umzug zwischen zwei Debian-Servern an. Hängst du stark an Synology-eigenen Diensten (Active Backup, Synology Drive, Synology Photos, Surveillance Station), wechselst du das Ökosystem, nicht nur das Blech.
+
+![Parallele Synology-zu-UGREEN-NAS-Migration über einen 2,5GbE-Switch mit Laptop zur rsync-Überwachung](@assets/images/26/11/synology-ugreen-rsync-setup.webp)
+
+## Schritt 0: Inventar ziehen und Laufwerksstrategie wählen
+
+Nimm dir 30 Minuten auf der Synology Zeit, bevor du das neue Gerät auspackst:
+
+1. **Echte Ordnergrößen (ohne Snapshots):** Führe `du -sh /volume1/*/ | sort -h` per SSH aus. Oft taucht ein vergessener `homes`-Papierkorb mit 1,5 TB oder ein altes Time-Machine-Sparsebundle auf, das nicht übers LAN muss.
+2. **Benutzer, UIDs und Freigaberechte:** Mach Screenshots von **Systemsteuerung → Freigegebener Ordner** und **Benutzer & Gruppe**.
+3. **Container-Mounts und Ports:** Prüfe mit `docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'` und sichere deine `docker-compose.yml`-Dateien. Kontrolliere, ob Container Daten in benannten Volumes (`/volume1/@docker/volumes/`) statt in Bind-Mounts (`/volume1/docker/...`) verstecken.
+4. **Reihenfolge festlegen:** Kopiere zuerst die im Alltag genutzten Freigaben (`docker`, `photos`, `homes`), und lass das 20-TB-`media`-Archiv über Nacht durchlaufen.
+
+Danach wählst du einen der beiden physischen Wege:
+
+- **Weg A: Das UGREEN mit neuen Festplatten bestücken (am schnellsten und sichersten).** Selbst bei den aktuellen [2026er NAS-Festplattenpreisen um ~38–44 $/TB](/de/beste-festplatten-fuer-nas/) erlaubt der Start mit zwei neuen Platten im RAID 1 (oder vier im RAID 5/6), beide NAS parallel am Switch zu betreiben. Du kopierst direkt NAS-zu-NAS mit voller Leitungsgeschwindigkeit, testest zwei Wochen lang und behältst die Synology währenddessen ausgeschaltet als Fallback im Regal.
+- **Weg B: Vorhandene Synology-Platten wiederverwenden (günstiger, langsamer, riskanter).** Da UGOS jede eingesetzte Platte löscht, brauchst du eine Zwischenplatte für den kompletten Datenbestand: Alles von der Synology auf USB-Platte oder PC kopieren, prüfen, Platten in das UGREEN umbauen und formatieren, und alles zurückkopieren.
+
+<Notice type="info" title="Kann man eine Platte aus einem 2-Bay-SHR-Spiegel ziehen, um das UGREEN zu starten?">
+Technisch ja, wenn du gerne ohne Sicherheitsgurt fährst. Du kannst Platte 2 aus einem gesunden 2-Bay-SHR-Spiegel ziehen (die Synology piepst dann degradiert auf Platte 1), Platte 2 im UGREEN als Basisvolume einrichten, alles übers Netz kopieren und später Platte 1 nachziehen. Mach das nur mit vollständigem Offline-Backup: Fällt Platte 1 beim Volllesebetrieb aus, sind die Daten weg.
+</Notice>
+
+## Schritt 1: UGOS Pro einrichten und Ordnernamen spiegeln
+
+Setze die Laufwerke ein, durchlaufe den UGOS-Pro-Einrichtungsassistenten und installiere alle anstehenden Firmware-Updates, bevor du Freigaben anlegst. UGOS mountet den Pool unter `/volume1/`, exakt wie Synology. Lege identisch geschriebene Freigabeordner an (`media`, `docker`, `photos`, `backups`), damit 90 % deiner Docker-Compose-Pfade unverändert bleiben.
+
+## Schritt 2: Daten kopieren (`rsync` über SSH vs. Remote-Mount)
+
+### Option A: `rsync` über SSH (beste Wahl für Rechte und Wiederaufnahme)
+
+Aktiviere SSH auf beiden Boxen (DSM: **Systemsteuerung → Terminal & SNMP**; UGOS Pro: **Systemsteuerung → Terminal**). Starte ein 10-Stunden-`rsync` niemals ungeschützt im Laptop-Terminal, sondern in `tmux`, `nohup` oder über den DSM-Aufgabenplaner:
+
+```bash
+# Erst mit --dry-run (-n) testen, danach -n für den echten Lauf entfernen
+rsync -avhP \
+  --exclude='@eaDir' \
+  --exclude='#recycle' \
+  --exclude='#snapshot' \
+  --exclude='.SynologyWorkingDirectory' \
+  --exclude='@SynoResource' \
+  /volume1/media/ admin@192.168.1.50:/volume1/media/
+```
+
+Warum diese fünf Ausschlüsse entscheidend sind:
+- `--exclude='@eaDir'`: Überspringt Synologys versteckte Thumbnail-Ordner (sonst bricht der Durchsatz bei 150.000 Kleinstdateien von 250 MB/s auf 8 MB/s ein).
+- `--exclude='#snapshot'`: Verhindert, dass sichtbare Btrfs-Snapshots als vollständige Zusatzkopien übertragen werden und den Zielpool sprengen.
+- `--exclude='#recycle'`, `.SynologyWorkingDirectory` und `@SynoResource`: Überspringen Papierkörbe und DSM-Arbeitsdateien.
+
+Über 1GbE erreichst du ~110–115 MB/s (~3 Stunden/TB), über 2,5GbE rund 220–275 MB/s (~1,2 Stunden/TB). Bricht ein Lauf ab, setzt derselbe Befehl exakt dort wieder auf.
+
+### Option B: Remote-Mount im UGOS-Dateimanager (GUI-Alternative)
+
+Öffne in UGOS Pro **Dateien → Netzwerk / Remote-Mount**, binde die SMB-Freigabe der Synology direkt ein und starte den Kopiervorgang dort. Die Übertragung läuft dann direkt zwischen beiden NAS ohne offenen Laptop.
+
+## Schritt 3: UID/GID-Unterschied beheben (`1026` vs. `1000`)
+
+Auf **Synology DSM** bekommt der erste Admin die UID `1026` (Gruppe `users` = `100`). Auf **UGREEN UGOS Pro** startet der erste Admin bei UID `1000` (Gruppe `10` oder `1000`). Prüfe per `id` auf dem UGREEN deine genaue ID und passe die Rechte bei Bedarf an:
+
+```bash
+sudo chown -R 1000:10 /volume1/media /volume1/photos /volume1/docker
+```
+
+## Schritt 4: Docker-Container und benannte Volumes umziehen
+
+UGOS Pro bringt in der **Docker**-App einen nativen **Projekt**-Tab für `docker-compose.yml`-Dateien mit. Passe in LinuxServer.io-Containern `PUID`/`PGID` an deinen UGOS-Benutzer an und reiche `/dev/dri:/dev/dri` an Plex, Jellyfin oder Frigate durch, um Intel QuickSync zu nutzen.
+
+Benannte Docker-Volumes exportierst du vor dem Abschalten der Synology:
+
+```bash
+docker run --rm \
+  -v mein_volume:/source:ro \
+  -v /volume1/docker:/backup \
+  alpine tar czf /backup/mein_volume.tar.gz -C /source .
+```
+
+Entpacke das Archiv auf dem UGREEN direkt in einen Bind-Mount-Ordner (`/volume1/docker/<app>/data`).
+
+## Schritt 5: DSM-exklusive Apps ersetzen
+
+- **Synology Photos → Immich:** Rohfotos und Videos wandern mit, Gesichtserkennung und virtuelle Alben aus der DSM-Datenbank nicht. [Immich im Docker-Setup](/immich-docker-compose-self-hosted-google-photos/) indiziert auf einer Intel-UGREEN-CPU 100.000 Fotos in wenigen Stunden neu.
+- **Hyper Backup → Kopia, Duplicati oder Restic:** Für verschlüsselte Backups auf Backblaze B2, Wasabi oder USB-Platten laufen **Kopia** oder **Restic** (mit **Backrest**-Web-UI) sauber in Docker – und die alte Synology taugt perfekt als SFTP-/rsync-Offsite-Ziel.
+- **Active Backup for Business → UrBackup / Proxmox Backup Server**
+- **Synology Drive → Nextcloud oder Syncthing**
+- **Surveillance Station → Frigate NVR** mit [Home Assistant](/de/beste-home-assistant-hardware/).
+
+## Schritt 6: Finaler Delta-Sync, IP-Tausch und die 14-Tage-Regel
+
+1. Stoppe alle Docker-Container und SMB/NFS-Schreibzugriffe auf der Synology.
+2. Führe das exakt gleiche `rsync` noch einmal als schnellen Delta-Lauf aus.
+3. Gib dem UGREEN die alte IP-Adresse der Synology (oder aktualisiere dein lokales DNS).
+4. **Lass die Synology zwei Wochen lang ausgeschaltet mit ihren Platten im Regal stehen.** Erst wenn 14 Tage lang nichts gefehlt hat, löschst du die alten Platten.
+
+## Häufige Fragen (FAQ)
+
+<Accordion label="Kann ich meine Synology-Festplatten direkt in ein UGREEN NAS einbauen?" group="faq" expanded="true">
+Nein. Synology formatiert jedes Laufwerk mit DSM-Systempartitionen und einem `mdadm` + LVM (SHR)- oder Btrfs-Pool, den UGOS Pro nicht importiert. UGREEN erkennt die Platten als fremd und bietet nur das Formatieren an. Du musst die Daten zuerst übers Netzwerk oder über ein Zwischenlaufwerk kopieren.
+</Accordion>
+
+<Accordion label="Wie lange dauert die Migration von Synology zu UGREEN?" group="faq">
+Die Kopierzeit bestimmt das Tempo: Bei 1GbE (~112 MB/s) dauern 10 TB rund 25 Stunden, bei 2,5GbE (~260 MB/s) rund 11 Stunden. Plane zusätzlich einen Abend für Benutzer, Freigaben und Docker Compose sowie einen weiteren Abend für die Foto-Indexierung in Immich ein.
+</Accordion>
+
+<Accordion label="Verliere ich meinen Plex-Verlauf oder Synology-Photos-Alben?" group="faq">
+Dein Plex-Wiedergabeverlauf und Sammlungen bleiben erhalten, wenn du den kompletten `Plex Media Server`-Appdata-Ordner (inklusive `Plug-in Support/Databases/com.plexapp.plugins.library.db`) mitkopierst. Virtuelle Alben und Gesichtstags von Synology Photos stecken dagegen in einer proprietären DSM-Datenbank – die Bilddateien bleiben intakt, aber Alben müssen in Immich neu angelegt werden.
+</Accordion>
+
+<Accordion label="Kann ich auf dem UGREEN statt UGOS auch TrueNAS SCALE oder Unraid installieren?" group="faq">
+Ja. Die x86-Modelle (DXP2800, DXP4800 Plus, DXP6800 Pro) bieten HDMI, ein entsperrtes BIOS (`Strg+F12` beim Boot) und erlauben offiziell TrueNAS SCALE, Unraid oder Proxmox VE ohne Garantieverlust. Falls du noch zwischen Fertiggerät und Eigenbau schwankst, schau dir unseren [DIY-NAS-Bau unter 500 $](/de/nas-build-unter-500/) an.
+</Accordion>
+
+## Fazit
+
+Der Wechsel von Synology zu UGREEN ist ein Datei- und Container-Umzug, kein Plattentausch. Bestücke das UGREEN zuerst, kopiere per `rsync` über SSH ohne `@eaDir` und `#snapshot`, passe die UID-Rechte (`1026` → `1000`) an und lass die Synology 14 Tage lang unangetastet als Backup im Regal.
+
+Für die Hardware-Wahl: Der 2-Bay [UGREEN DXP2800](/go/ugreen-dxp2800/) (379,98 $) deckt Einsteiger-Setups ab, der 4-Bay [UGREEN DXP4800 Plus](/go/ugreen-dxp4800-plus/) (619,99 $) ist der 10GbE-Sweet-Spot mit Intel QuickSync und der 6-Bay [UGREEN DXP6800 Pro](/go/ugreen-dxp6800-pro/) (1.099,99 $) ersetzt einen ganzen kleinen Homeserver.
