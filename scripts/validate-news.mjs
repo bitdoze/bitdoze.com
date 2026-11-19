@@ -45,6 +45,16 @@ if (files.length > NEWS_DIGEST_LIMIT) {
 for (const file of files) {
   const raw = await readFile(new URL(file, NEWS_DIR), "utf8");
   const body = stripCodeFences(raw);
+
+  // Soft quality gates — warn only, never block the build.
+  const words = body.split(/\s+/).filter(Boolean).length;
+  if (words > 1800) {
+    console.warn(`warn news/${file}: ${words} words exceeds the 1,800-word digest target`);
+  }
+  if (!/why it matters/i.test(body)) {
+    console.warn(`warn news/${file}: contains no "Why it matters" line`);
+  }
+
   for (const { re, msg } of RULES) {
     if (re.test(body)) {
       console.error(`news/${file}: forbidden content — ${msg}`);

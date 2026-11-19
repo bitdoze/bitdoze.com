@@ -238,12 +238,14 @@ Flat by default, lift on intent. Surfaces rest nearly flat — at most a small a
 
 ### Article Body (the signature surface)
 
-- **Prose:** `@tailwindcss/typography` at prose-lg with bold headings, wash-style links, images rounded at 8px.
-- **Tables:** scroll horizontally with a subtle edge shadow hinting more content; header row on Paper Subtle, zebra striping on Paper Muted.
+- **Prose:** `@tailwindcss/typography` at prose-lg with bold headings, wash-style links, images rounded at 8px. Body reading ink is #374151 (softer than pure ink for long reads). Widgets inside articles (`not-prose`) always use the sans stack.
+- **Tables:** sans at 15px; scroll horizontally with a subtle edge shadow hinting more content; header row on Paper Subtle, zebra striping on Paper Muted.
 - **Code:** mono stack in blocks with generous padding; the most visually protected element on the page. Every highlighted block gets a header bar (language label + always-visible Copy button) from the `codeBlockHeader` Shiki transformer in `src/utils/markdown-plugins.mjs`.
 - **Images:** an image alone in a paragraph shows its alt text as a centered muted caption (`imageCaptions` plugin) and opens in a native `<dialog>` lightbox on click or Enter.
 - **Sections:** each H2 after the first gets a hairline divider above it; H2/H3 show a `#` copy-link in the left gutter on hover (desktop only).
-- **Ending:** tags, then the author box with sharing inside it, then services promo, then related posts. No standalone share block.
+- **Ending:** next step, feedback (Did this work?), promo when relevant, tags, related posts, follow box, author box, services line — all inside `data-pagefind-ignore` so boilerplate never hits the search index.
+- **Notices:** Notice widget body text uses the reading ink (#374151), not the title ink; the tint border/icon keep the semantic hue.
+- **Cards:** hairline border and small shadow at rest, 2px lift on hover — no scale transforms on cards.
 
 ## 6. Do's and Don'ts
 

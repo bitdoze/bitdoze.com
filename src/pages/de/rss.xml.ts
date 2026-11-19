@@ -36,7 +36,7 @@ export async function GET(context: APIContext) {
     customData: [
       "<language>de</language>",
       `<lastBuildDate>${new Date().toUTCString()}</lastBuildDate>`,
-      `<atom:link href="${context.site || siteConfig.url}/de/rss.xml" rel="self" type="application/rss+xml" />`,
+      `<atom:link href="${new URL("/de/rss.xml", context.site || siteConfig.url)}" rel="self" type="application/rss+xml" />`,
     ].join(""),
     stylesheet: "/rss/styles.xsl",
   });

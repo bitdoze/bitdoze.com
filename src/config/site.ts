@@ -37,6 +37,13 @@ export const siteConfig = {
         ? config.params.contact_form_action
         : `https://formsubmit.co/${config.contactinfo?.email ?? "dragos@bitdoze.com"}`,
   },
+
+  // Newsletter signup — off until a real form endpoint is configured.
+  newsletter: {
+    action: (config.newsletter?.action ?? "").trim(),
+    emailField: config.newsletter?.email_field ?? "email",
+    hiddenFields: (config.newsletter?.hidden_fields ?? {}) as Record<string, string>,
+  },
 };
 
 /** Non-empty social profile URLs for schema sameAs, footer, etc. */

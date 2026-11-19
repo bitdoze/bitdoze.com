@@ -10,7 +10,7 @@ web
 
 ## Users
 
-Developers and DevOps engineers. They arrive from search with a concrete problem — a Docker container to fix, a VPS to configure, a tool to self-host — mid-task and short on patience. Their job: get a working setup fast, with configs and commands they can copy-paste and trust. The site publishes in English and Spanish, so guides must read cleanly for a bilingual technical readership.
+Developers and DevOps engineers. They arrive from search with a concrete problem — a Docker container to fix, a VPS to configure, a tool to self-host — mid-task and short on patience. Their job: get a working setup fast, with configs and commands they can copy-paste and trust. The site publishes in English, Spanish and German, so guides must read cleanly for a multilingual technical readership.
 
 ## Product Purpose
 
@@ -25,7 +25,7 @@ Guides that actually work. Every article is tested, copy-paste-ready, and curren
 - Primary CTA: click the affiliate recommendations inside articles. Fallback: browse related guides and stay on-site.
 - The line a visitor remembers after 10 seconds: "DevOps guides that actually work."
 - Belief ladder: (1) this guide actually solved my problem — the article delivers value first; (2) the author tests what they recommend — trust transfers from the guide to the picks; (3) this product is worth paying for — the affiliate click feels safe.
-- Proof on hand: 10+ years of IT experience with 4+ years focused on DevOps; an archive of 800+ published guides (409 English, 407 Spanish); the @webdoze YouTube channel and social audience; real client work from the services business.
+- Proof on hand: 10+ years of IT experience with 4+ years focused on DevOps; an archive of 900+ published guides (419 English, 419 Spanish, 93 German); the @webdoze YouTube channel and social audience; real client work from the services business.
 
 ## Brand Personality
 

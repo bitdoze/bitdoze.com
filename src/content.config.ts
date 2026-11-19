@@ -72,6 +72,10 @@ const postsCollection = defineCollection({
       testedOn: z.array(z.string()).max(4).optional(),
       /** Hand-filled real-world time the guide takes (e.g. "15 min") — replaces reading time in the meta line when set. */
       timeToComplete: z.string().optional(),
+      /** Editorial related-post picks (getEntrySlug values, same locale) — pinned to the top of Related Posts in this order. */
+      related: z.array(z.string()).max(3).optional(),
+      /** Editorial next-step target (getEntrySlug value, same locale) — overrides the series/journey heuristic. */
+      next: z.string().optional(),
     }),
 });
 

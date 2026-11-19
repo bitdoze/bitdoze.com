@@ -8,6 +8,7 @@ export const translations = {
     // Header / nav
     search: "Search",
     searchAria: "Search",
+    searchPlaceholder: "Search guides…",
     openMenu: "Open main menu",
     closeMenu: "Close main menu",
     switchLang: "Español",
@@ -27,6 +28,7 @@ export const translations = {
     // Common labels
     home: "Home",
     blog: "Blog",
+    guides: "Guides",
     news: "News",
     categories: "Categories",
     tags: "Tags",
@@ -113,13 +115,20 @@ export const translations = {
 
     // PopularTopics
     popularTopics: "Popular Topics",
-    popularTopicsSub: "The stacks readers come here for",
+    popularTopicsSub: "The topics with the most guides",
     viewAllTagPosts: "View all {tag} posts",
 
     // Author box / misc
     moreGuidesFrom: "More guides from {name}",
+    authorBio:
+      "DevOps engineer with 10+ years in IT. I write these guides while doing the installs in my Proxmox home lab and on real VPSes.",
     enlargedImage: "Enlarged image",
     close: "Close",
+
+    // Next step + search
+    nextStep: "Next step",
+    journeyStage: "Self-Hosted Journey · Stage {n} of {total}",
+    browseCategories: "Browse by category",
 
     // Services
     svcBackToServices: "Back to services",
@@ -241,6 +250,7 @@ export const translations = {
     // Header / nav
     search: "Buscar",
     searchAria: "Buscar",
+    searchPlaceholder: "Buscar guías…",
     openMenu: "Abrir menú principal",
     closeMenu: "Cerrar menú principal",
     switchLang: "English",
@@ -260,6 +270,7 @@ export const translations = {
     // Common labels
     home: "Inicio",
     blog: "Blog",
+    guides: "Guías",
     news: "Noticias",
     categories: "Categorías",
     tags: "Etiquetas",
@@ -346,13 +357,20 @@ export const translations = {
 
     // PopularTopics
     popularTopics: "Temas populares",
-    popularTopicsSub: "Los temas más leídos del sitio",
+    popularTopicsSub: "Los temas con más guías",
     viewAllTagPosts: "Ver todos los artículos de {tag}",
 
     // Author box / misc
     moreGuidesFrom: "Más guías de {name}",
+    authorBio:
+      "Ingeniero DevOps con más de 10 años en TI. Escribo estas guías mientras hago las instalaciones en mi home lab con Proxmox y en VPS reales.",
     enlargedImage: "Imagen ampliada",
     close: "Cerrar",
+
+    // Next step + search
+    nextStep: "Siguiente paso",
+    journeyStage: "Self-Hosted Journey · Etapa {n} de {total}",
+    browseCategories: "Explora por categoría",
 
     // Services
     svcBackToServices: "Volver a servicios",
@@ -454,7 +472,8 @@ export const translations = {
       "Guías prácticas de DevOps, programación y self-hosting para desarrolladores y operadores.",
     affiliateDisclaimer:
       "Algunos enlaces son de afiliados. Si compras a través de ellos, podemos recibir una comisión sin coste adicional para ti.",
-    noTrackingCookies: "Sin cookies de seguimiento — analíticas respetuosas con la privacidad de Plausible.",
+    noTrackingCookies:
+      "Sin cookies de seguimiento — analíticas respetuosas con la privacidad de Plausible.",
     quickResult: "Resultado rápido",
     needHelpCta: "¿Necesitas ayuda con Astro, VPS o una app self-hosted? ",
     viewServices: "Ver servicios →",
@@ -475,6 +494,7 @@ export const translations = {
     // Header / nav
     search: "Suche",
     searchAria: "Suche",
+    searchPlaceholder: "Anleitungen suchen…",
     openMenu: "Hauptmenü öffnen",
     closeMenu: "Hauptmenü schließen",
     switchLang: "English",
@@ -494,6 +514,7 @@ export const translations = {
     // Common labels
     home: "Start",
     blog: "Blog",
+    guides: "Anleitungen",
     news: "News",
     categories: "Kategorien",
     tags: "Tags",
@@ -580,13 +601,20 @@ export const translations = {
 
     // PopularTopics
     popularTopics: "Beliebte Themen",
-    popularTopicsSub: "Die Stacks, für die Leser hierherkommen",
+    popularTopicsSub: "Die Themen mit den meisten Anleitungen",
     viewAllTagPosts: "Alle Artikel zu {tag} anzeigen",
 
     // Author box / misc
     moreGuidesFrom: "Mehr Anleitungen von {name}",
+    authorBio:
+      "DevOps-Engineer mit über 10 Jahren IT-Erfahrung. Ich schreibe diese Anleitungen, während ich die Installationen in meinem Proxmox-Homelab und auf echten VPS durchführe.",
     enlargedImage: "Vergrößertes Bild",
     close: "Schließen",
+
+    // Next step + search
+    nextStep: "Nächster Schritt",
+    journeyStage: "Self-Hosted Journey · Etappe {n} von {total}",
+    browseCategories: "Nach Kategorie stöbern",
 
     // Services
     svcBackToServices: "Zurück zu den Services",
@@ -612,7 +640,8 @@ export const translations = {
     svcProofPublishedText:
       "Diese Seiten verlinken direkt auf echte, bereits veröffentlichte Anleitungen.",
     svcProofTechTitle: "Technisch und praxisnah",
-    svcProofTechText: "Der Fokus liegt auf Setups, Deployments und Struktur, die du weiterbetreiben kannst.",
+    svcProofTechText:
+      "Der Fokus liegt auf Setups, Deployments und Struktur, die du weiterbetreiben kannst.",
     svcProofCombTitle: "Services sind kombinierbar",
     svcProofCombText: "Ein Projekt kann Astro, VPS, Dokploy und Self-hosted-Apps verbinden.",
 
@@ -712,6 +741,7 @@ export type TranslationKey = keyof typeof translations.en;
 /** Map English menu labels (from menu.json) to translation keys */
 export const menuLabelKeys: Record<string, TranslationKey> = {
   Home: "home",
+  Guides: "guides",
   Resources: "resources",
   Courses: "courses",
   About: "about",

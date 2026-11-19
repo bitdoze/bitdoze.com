@@ -46,7 +46,7 @@ These entries never leave your device and are not accessible to us — they stor
 
 Some articles contain affiliate or referral links (including `/go/` redirect links and Amazon Associates links). When you click one of those links, you leave `bitdoze.com` and the destination merchant's privacy policy applies. We disclose affiliate relationships above the first affiliate link on each relevant page.
 
-Embedded YouTube videos use a click-to-load preview thumbnail. The player iframe — served from `youtube-nocookie.com` (privacy-enhanced mode) — and its requests load only after you interact with the video.
+Embedded YouTube videos use a click-to-load preview thumbnail. The player iframe — served from `youtube-nocookie.com` (privacy-enhanced mode) — and its requests load only after you interact with the video. Product images in buying guides load from Amazon's image CDN (`m.media-amazon.com`) when the page is viewed.
 
 ## 6. Your Rights and Contact
 

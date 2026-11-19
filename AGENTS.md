@@ -379,3 +379,14 @@ Text in the SVG must render correctly in the rasterized WebP — keep using `fon
   - CSS variables in arbitrary values: `bg-(--brand-color)` instead of `bg-[--brand-color]`
   - Stacked variants now apply left-to-right (not right-to-left)
   - Use CSS variables instead of `theme()` function
+
+## Article Mechanics (shipped)
+
+- **Frontmatter `related`** (optional, max 3): same-locale post slugs pinned to the top of "Related" in the given order. **`next`** (optional): same-locale slug for the "Next step" card; else the next position in the post's `series`, else the next Self-Hosted Journey link (EN). Unknown slugs fail the build.
+- **Reading time:** 220 words/minute plus a flat 10 seconds per fenced code block; `import` lines, code fences, JSX/HTML tags, image syntax and link URLs are stripped before counting.
+- **Image titles:** `![alt](src "nocaption")` renders without a caption and drops the title attribute — use for decorative scene images.
+- **Validators in `bun run build`:** `validate-internal-links.mjs` (every `dist/**/*.html` anchor must resolve to a file, an index dir, or a `_redirects` source; directory links need the trailing slash), `validate-content-meta.mjs` (errors: 4-digit year in `title`/`meta_title` below the `lastmod ?? date` year, allowlist `scripts/title-year-allowlist.json`; warns: titles >65 chars, descriptions >160), `validate-news.mjs` also warns over 1,800 words and missing "Why it matters".
+- **Covers:** flat SVG system (see above) for guides; photo covers are allowed for `gadgets` posts and buying guides.
+- **Title-year policy:** evergreen install/setup/fix guides carry no year in the title. Reviews, pricing and roundups may keep a year, changed only together with a real re-check and a `lastmod` bump.
+- **Carrd promo:** `shouldShowCarrdPromo(tags, categories)` in `src/utils/promo.ts` — renders while the build date is before 2026-12-02 and the post is tagged `carrd` or categorized `web-development`; the aside carries `data-promo-end` so cached pages self-remove after the sale (Nov 27–30).
+- **Newsletter:** `newsletter` key in `src/config/config.json` (`action`, `email_field`, `hidden_fields`); FollowBox renders the form only when `action` is non-empty.

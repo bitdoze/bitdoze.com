@@ -22,7 +22,10 @@ export function codeBlockHeader() {
       if (!pre) return;
 
       const lang = String(this.options.lang ?? "text").toLowerCase();
-      const label = LANG_LABELS[lang] ?? lang;
+      // Plain-text blocks get no language chip — the header bar and Copy
+      // button still render, just with an empty label.
+      const rawLabel = LANG_LABELS[lang] ?? lang;
+      const label = ["text", "txt", "plaintext", ""].includes(rawLabel) ? "" : rawLabel;
       // ```lang title="docker-compose.yml" → filename shown beside the lang chip,
       // DigitalOcean-style: readers know which file the block belongs in.
       const meta = String(this.options.meta?.__raw ?? "");
@@ -209,11 +212,18 @@ export const taskListLabels = {
  * are scrollable by keyboard and get an accessible name. PostLayout's script
  * adds .is-scrollable when scrollWidth > clientWidth (mask only when needed).
  */
+// Unique label per table on the page: "Scrollable table 1", "2", …
+// `before` runs once per document, so each page restarts the numbering.
+let tableScrollIndex = 0;
 export const tableScrollWrapper = {
   name: "bitdoze:table-scroll",
+  before() {
+    tableScrollIndex = 0;
+  },
   element: {
     filter: ["table"],
     visit(node, ctx) {
+      const n = ++tableScrollIndex;
       ctx.wrapNode(node, {
         type: "element",
         tagName: "div",
@@ -221,7 +231,7 @@ export const tableScrollWrapper = {
           className: ["table-scroll"],
           role: "region",
           tabIndex: 0,
-          ariaLabel: "Scrollable table",
+          ariaLabel: `Scrollable table ${n}`,
         },
       });
     },
@@ -258,6 +268,12 @@ export const imageCaptions = {
   element: {
     filter: ["img"],
     visit(node, ctx) {
+      // `![alt](src "nocaption")` — decorative image: no caption, no title tooltip.
+      if (node.properties?.title === "nocaption") {
+        const properties = { ...node.properties };
+        delete properties.title;
+        return { ...node, properties };
+      }
       const alt = typeof node.properties?.alt === "string" ? node.properties.alt.trim() : "";
       if (alt.length < 4 || FILENAME_LIKE.test(alt)) return;
 

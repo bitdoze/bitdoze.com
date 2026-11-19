@@ -141,9 +141,7 @@ export async function categoryIndexSeo(
     }
   }
   const hreflangs =
-    entries.length < 2
-      ? []
-      : [...entries, { lang: "x-default", href: absoluteUrl(enPath, site) }];
+    entries.length < 2 ? [] : [...entries, { lang: "x-default", href: absoluteUrl(enPath, site) }];
 
   const jsonLd = {
     "@context": "https://schema.org",

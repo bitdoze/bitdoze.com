@@ -90,7 +90,10 @@ export function localeSharedHreflangs(
   return [
     ...SUPPORTED_LOCALES.map((locale) => ({
       lang: locale,
-      href: absoluteUrl(locale === "en" ? enPath : `/${locale}${enPath === "/" ? "/" : enPath}`, site),
+      href: absoluteUrl(
+        locale === "en" ? enPath : `/${locale}${enPath === "/" ? "/" : enPath}`,
+        site
+      ),
     })),
     { lang: "x-default", href: absoluteUrl(enPath, site) },
   ];

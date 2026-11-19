@@ -1,63 +1,25 @@
 /**
- * Calculate the estimated reading time for a given text
- * @param text The text content to analyze
- * @param wordsPerMinute The average reading speed (default: 200 words per minute)
- * @param codeReadingFactor The factor to reduce code reading speed (default: 0.3)
+ * Estimate reading time: prose at 220 wpm plus a flat 10 seconds per fenced
+ * code block. MDX plumbing (imports, JSX, images, link URLs) is ignored.
+ * @param text The MDX source to analyze
  * @returns An object with minutes, seconds and the formatted reading time string
  */
-export function getReadingTime(
-  text: string,
-  wordsPerMinute: number = 200,
-  codeReadingFactor: number = 0.3
-) {
-  // Strip HTML tags if present
-  const plainText = text.replace(/<\/?[^>]+(>|$)/g, "");
+export function getReadingTime(text: string) {
+  const blocks = (text.match(/```[\s\S]*?```/g) ?? []).length;
 
-  // Identify code blocks (markdown code blocks with ``` or indented code)
-  const codeBlockRegex = /```[\s\S]*?```|`[^`]+`|\n( {4}|\t)[^\n]+/g;
-  const codeBlocks = plainText.match(codeBlockRegex) || [];
+  const prose = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^\s*import\s.*$/gm, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\]\([^)]*\)/g, "]")
+    .replace(/<[^>]+>/g, " ");
 
-  // Calculate code content and non-code content
-  let codeContent = "";
-  codeBlocks.forEach((block) => {
-    codeContent += block;
-  });
-
-  // Remove code blocks from text to count regular text separately
-  let nonCodeContent = plainText;
-  codeBlocks.forEach((block) => {
-    nonCodeContent = nonCodeContent.replace(block, "");
-  });
-
-  // Count words in regular text
-  const regularWords = nonCodeContent.trim().split(/\s+/).filter(Boolean).length;
-
-  // Count words in code (code takes longer to read)
-  const codeWords = codeContent.trim().split(/\s+/).filter(Boolean).length;
-
-  // Apply different reading speeds to regular text and code
-  // Code is read more slowly than regular text
-  const adjustedCodeWords = codeWords / codeReadingFactor;
-
-  // Calculate total adjusted word count
-  const totalAdjustedWords = regularWords + adjustedCodeWords;
-
-  // Calculate reading time in minutes and seconds
-  const minutes = Math.floor(totalAdjustedWords / wordsPerMinute);
-  const seconds = Math.floor((totalAdjustedWords % wordsPerMinute) / (wordsPerMinute / 60));
-
-  // Format the reading time
-  let readingTime = "";
-  if (minutes > 0) {
-    readingTime = `${minutes} min`;
-    if (seconds > 0) readingTime += ` ${seconds} sec`;
-  } else {
-    readingTime = `${seconds} sec`;
-  }
+  const words = prose.trim().split(/\s+/).filter(Boolean).length;
+  const minutes = Math.max(1, Math.round(words / 220 + (blocks * 10) / 60));
 
   return {
     minutes,
-    seconds,
-    text: readingTime,
+    seconds: 0,
+    text: `${minutes} min`,
   };
 }
