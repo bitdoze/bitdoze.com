@@ -1,0 +1,267 @@
+---
+date: 2026-11-19T00:00:00Z
+translationKey: "tailscale-setup-guide"
+title: "Tailscale einrichten: Mesh-VPN, MagicDNS, Subnet Router und Exit Nodes"
+meta_title: "Tailscale einrichten: Mesh-VPN, MagicDNS & Exit Nodes"
+description: "Tailscale unter Linux, macOS, Windows und Docker einrichten: MagicDNS, Subnet Router, Exit Nodes, Key Expiry, Tailscale SSH, Taildrop und Serve."
+image: "@assets/images/26/11/tailscale-setup-guide.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["tailscale", "networking", "self-hosted"]
+canonical: "https://www.bitdoze.com/de/tailscale-einrichten-anleitung/"
+quickAnswer: "curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up -> verbindet das Gerät per verschlüsseltem WireGuard-Tailnet samt MagicDNS"
+testedOn: ["Ubuntu 24.04", "macOS 15", "Docker 27.3"]
+timeToComplete: "15 Min."
+---
+
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Wer schon einmal versucht hat, einen Homeserver oder ein NAS sicher aus dem Internet erreichbar zu machen, kennt das Theater mit Portweiterleitungen. Dynamische Heim-IPs, CGNAT beim Internetanbieter, Router-Firewalls und das ständige Abgleichen von OpenVPN- oder WireGuard-Dateien auf jedem Laptop kosten unnötig Zeit.
+
+Tailscale umgeht all das. Du installierst einen schlanken Client auf jedem Gerät, meldest dich einmal an und jede Maschine bekommt eine feste `100.x.y.z`-IP über verschlüsselte WireGuard-Tunnel. Kein offener Port am Router nötig, selbst hinter CGNAT.
+
+Ich nutze Tailscale immer dann, wenn Fernzugriff in fünf Minuten stehen soll, ohne noch einen weiteren VPS zu betreuen. Hier ist die komplette Einrichtung inklusive der Funktionen, die im Alltag wirklich zählen.
+
+![Tailscale Admin Console mit verbundenen Geräten, MagicDNS-Hostnamen und Exit-Node-Status](@assets/images/26/11/tailscale-admin-ui.webp)
+
+## Was der kostenlose Personal-Plan bietet
+
+Tailscales kostenloser Personal-Tarif ist für Homelabs erstaunlich großzügig:
+
+- **Bis zu 6 Nutzer** in einem Tailnet
+- **Unbegrenzte Nutzergeräte** (deine Laptops, Smartphones und Desktops)
+- **Bis zu 50 getaggte Nodes** (Headless-Server, Raspberry Pis, VPS)
+- **MagicDNS, Subnet Router, Exit Nodes, Tailscale SSH und Taildrop** inklusive
+
+Bezahlte Tarife (ab 8 $/Nutzer/Monat im Standard-Plan) brauchst du erst bei Team-Verwaltung, mehr als 3 ACL-Gruppen oder kommerzieller Nutzung mit mehreren Personen.
+
+<Notice type="info" title="Control-Server lieber selbst hosten?">
+Tailscale betreibt den Koordinationsserver in der eigenen Cloud. Wenn du die Control Plane selbst besitzen willst, schau in unsere [Headscale-Setup-Anleitung](/de/headscale-tailscale-self-hosted-einrichten/) oder die [NetBird-Self-Hosted-Anleitung](/de/netbird-self-hosted-einrichten/), oder lies den Vergleich [NetBird vs Headscale vs Tailscale](/de/netbird-vs-headscale-vs-tailscale/).
+</Notice>
+
+## Schritt 1: Tailscale auf deinen Geräten installieren
+
+<Tabs>
+<Tab name="Linux">
+
+Unter Ubuntu, Debian und den meisten Linux-Distributionen richtet das offizielle Skript das Paket-Repo ein und startet `tailscaled`:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+Öffne die ausgegebene URL im Browser, melde dich über Google, GitHub, Microsoft oder E-Mail an, und das Gerät taucht sofort in der Admin Console auf.
+
+</Tab>
+<Tab name="Docker">
+
+Wenn deine Dienste in Containern auf einem NAS oder Homeserver laufen, kannst du Tailscale im `host`-Netzwerk betreiben:
+
+```yaml
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: docker-host
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+```
+
+Den `TS_AUTHKEY` erstellst du in der Tailscale Admin Console unter **Settings > Keys**.
+
+</Tab>
+<Tab name="macOS & Windows">
+
+- **macOS**: Tailscale aus dem Mac App Store laden oder per Homebrew (`brew install --cask tailscale`) installieren und über das Menüleisten-Icon anmelden.
+- **Windows**: Installer von `tailscale.com/download/windows` laden und über das Tray-Symbol einloggen.
+- **iOS & Android**: Offizielle Tailscale-App aus dem App Store oder Google Play laden und mit demselben Konto anmelden.
+
+</Tab>
+</Tabs>
+
+Verbindung in jedem Terminal prüfen:
+
+```bash
+tailscale status
+tailscale ping <geraetename>
+```
+
+Zeigt `tailscale ping` `via 192.168.x.x` oder `via <oeffentliche-ip>`, steht ein direkter Peer-to-Peer-Tunnel. Steht dort `via DERP(...)`, läuft der Traffic über ein Relay, weil beide Seiten hinter striktem NAT liegen.
+
+## Schritt 2: MagicDNS statt IP-Adressen merken
+
+Ständig `100.84.12.9` einzutippen nervt schnell. **MagicDNS** ist in neuen Tailnets standardmäßig aktiv und ordnet jedem Hostnamen direkt die passende Tailscale-IP zu.
+
+Danach erreichst du SSH, Netzlaufwerke oder Web-UIs einfach per Namen:
+
+```bash
+ssh dragos@homelab-nas
+```
+
+Oder über die volle Domain (`homelab-nas.tailnet-name.ts.net`), was praktisch ist, wenn du im privaten Netz gültige HTTPS-Zertifikate nutzen willst.
+
+Betreibst du einen eigenen DNS-Server wie NextDNS oder Pi-hole, trägst du ihn unter **DNS > Nameservers** als globalen Nameserver ein, sodass jedes Gerät im Tailnet ihn automatisch verwendet.
+
+## Schritt 3: Subnet Router für dein Heimnetz einrichten
+
+Du kannst Tailscale nicht auf jedes Gerät installieren. Drucker, IP-Kameras, Smart-Home-Hubs oder manche NAS-Boxen haben keinen eigenen Client. Ein **Subnet Router** löst das, indem ein dauerhaft laufender Linux-Rechner (Mini-PC, Raspberry Pi oder Proxmox-LXC) dein komplettes lokales Subnetz (`192.168.1.0/24`) ins Tailnet ankündigt.
+
+Aktiviere zuerst IP-Forwarding auf dem Linux-Host:
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+Danach gibst du dein LAN-Subnetz bekannt:
+
+```bash
+sudo tailscale up --advertise-routes=192.168.1.0/24
+```
+
+Öffne die Tailscale Admin Console, klicke beim Gerät auf das Drei-Punkte-Menü, wähle **Edit route settings** und aktiviere das Subnetz.
+
+<Notice type="warning" title="Linux-Clients brauchen --accept-routes">
+macOS, Windows, iOS und Android übernehmen freigegebene Subnetz-Routen automatisch. Linux-Clients tun das nicht. Auf jedem Linux-Laptop oder Server, der `192.168.1.0/24` erreichen soll, musst du `sudo tailscale up --accept-routes` ausführen.
+</Notice>
+
+Ab sofort erreicht dein Laptop im Café `192.168.1.50` genau wie im heimischen WLAN. Das harmoniert perfekt mit [NFS-Freigaben unter Linux](/setup-nfs-linux/) oder [Samba-Dateifreigaben](/setup-samba-linux/), um dein NAS unterwegs einzubinden, ohne SMB- oder NFS-Ports ins Internet zu öffnen.
+
+### Key Expiry auf Servern unbedingt deaktivieren
+
+Standardmäßig laufen Tailscale-Node-Keys nach 180 Tagen ab. Auf einem Laptop klickst du einfach neu auf Login, aber bei einem entfernten NAS, Raspberry Pi oder Cloud-VPS sperrst du dich nach sechs Monaten unbemerkt aus.
+
+Öffne für jeden Dauer-Server oder Subnet Router **Machines** in der Admin Console, klicke auf das Drei-Punkte-Menü neben dem Gerät und wähle **Disable key expiry** (oder registriere den Server mit einem Tag wie `tag:server`, was den Ablauf automatisch abschaltet).
+
+## Schritt 4: Exit Node für unsichere WLANs einrichten
+
+Ein Subnet Router leitet nur Anfragen für dein Heimnetz weiter. Ein **Exit Node** schickt dagegen deinen *gesamten* Internetverkehr durch ein bestimmtes Tailscale-Gerät, ähnlich wie ein klassisches VPN.
+
+Auf deinem Homeserver oder einem günstigen Cloud-VPS:
+
+```bash
+sudo tailscale up --advertise-exit-node
+```
+
+Bestätige **Use as exit node** in der Admin Console unter **Edit route settings**. Auf Laptop oder Smartphone wählst du diesen Node anschließend im Menü **Exit Node** aus (oder unter Linux per `sudo tailscale up --exit-node=homelab-nas`).
+
+Wenn du viel reist und im Hotel nicht jedes Gerät einzeln konfigurieren willst, übernimmt ein kleiner Router aus unserem Guide zum [besten Reiserouter für WireGuard und Tailscale](/best-travel-router-wireguard-tailscale/) die Exit-Node-Verbindung direkt fürs gesamte Reise-WLAN.
+
+## Schritt 5: Tailscale SSH aktivieren
+
+SSH-Keys auf fünf Servern und drei Laptops aktuell zu halten macht wenig Freude. Mit **Tailscale SSH** authentifiziert Tailscale die SSH-Sitzung über deine Tailnet-Identität, sodass keine `~/.ssh/authorized_keys`-Dateien mehr gepflegt werden müssen.
+
+Auf dem Linux-Server aktivieren:
+
+```bash
+sudo tailscale up --ssh
+```
+
+Und von jedem berechtigten Gerät verbinden:
+
+```bash
+ssh root@mein-server
+```
+
+Tailscale prüft deine ACL-Regeln und öffnet die Sitzung direkt über WireGuard. Für klassisches Port-Forwarding per SSH schau in unsere [SSH-Tunneling-Anleitung für Linux](/ssh-tunneling-linux/).
+
+## Tailscale Serve, Funnel und Taildrop
+
+Tailscale bringt zwei eingebaute Reverse-Proxy-Befehle mit (aktiviere vorher **HTTPS Certificates** unter **DNS** in der Admin Console, sonst fordern beide Befehle dich dazu auf):
+
+- **`tailscale serve`**: Macht einen lokalen Port (wie `localhost:3000`) per HTTPS mit gültigem Zertifikat **nur** innerhalb deines Tailnets erreichbar. Praktisch für interne Dashboards wie [Dockhand](/dockhand-docker-install/) oder [Termix](/termix-self-host/).
+- **`tailscale funnel`**: Macht einen lokalen Port über Tailscales Edge-Relays im **öffentlichen Internet** erreichbar. Gut für schnelle Webhook-Tests oder Demos; für dauerhaftes öffentliches Self-Hosting bietet ein dedizierter Tunnel-Proxy wie [Pangolin](/pangolin-cloudflare-tunnels-alternative/) mehr Kontrolle.
+
+```bash
+# Privat nur im Tailnet
+tailscale serve --bg 3000
+
+# Öffentlich im Internet
+tailscale funnel --bg 3000
+```
+
+Für schnelle Dateiübertragungen ohne `scp` oder Samba schickt **Taildrop** Dateien direkt per WireGuard zwischen deinen Geräten:
+
+```bash
+# Datei von Linux an dein MacBook senden
+tailscale file cp backup.tar.gz macbook-pro:
+
+# Eingehende Dateien unter Linux abholen
+sudo tailscale file get .
+```
+
+## Diagnose: direkter Tunnel oder Relay?
+
+Wenn Übertragungen langsamer wirken als erwartet, zeigen `tailscale netcheck` und `tailscale status`, ob UDP-Hole-Punching geklappt hat oder ein DERP-Relay einspringt:
+
+```bash
+tailscale netcheck
+tailscale status
+```
+
+`netcheck` gibt deinen NAT-Typ (`MappingVariesByDestIP: false` bedeutet leichte Direktverbindungen) sowie die Latenz zu allen nahen DERP-Regionen aus.
+
+## Einfache ACLs zur Abschottung einzelner Nodes
+
+Standardmäßig darf jedes Gerät in deinem Tailnet jedes andere erreichen. Sobald ein VPS oder das Gerät einer anderen Person dazukommt, solltest du Zugriffe eingrenzen.
+
+Unter **Access Controls** in der Admin Console kannst du Server taggen (`tag:server`) und Ports einschränken:
+
+```json
+{
+  "tagOwners": {
+    "tag:server": ["autogroup:admin"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["*:*"]
+    },
+    {
+      "action": "accept",
+      "src": ["tag:server"],
+      "dst": ["tag:server:443"]
+    }
+  ]
+}
+```
+
+## Tailscale vs Headscale vs NetBird
+
+![Architekturvergleich zwischen Tailscale, Headscale und NetBird mit Logos, Control Planes und direkten WireGuard-Tunneln](@assets/images/26/11/mesh-vpn-logos-architecture.webp)
+
+Tailscale gewinnt bei Einrichtungstempo und Mobile-Komfort. Abstriche machst du bei der Hoheit über die Control Plane: Tailscales Server koordinieren deine Schlüssel und kennen deinen Netzwerkgraphen. Wenn du diese Kontrolle auf deinen eigenen VPS holen willst, lies unsere [Headscale-Setup-Anleitung](/de/headscale-tailscale-self-hosted-einrichten/) oder die [NetBird-Self-Hosted-Anleitung](/de/netbird-self-hosted-einrichten/), oder vergleiche alle drei in [NetBird vs Headscale vs Tailscale](/de/netbird-vs-headscale-vs-tailscale/).
+
+## Häufige Fragen
+
+<Accordion label="Bremst Tailscale meine Internetgeschwindigkeit aus?" group="tailscale-faq" expanded="true">
+Nur dann, wenn der Traffic über einen Exit Node oder ein DERP-Relay läuft. Direkte Peer-to-Peer-WireGuard-Verbindungen erreichen auf modernen CPUs nahezu volle Leitungsgeschwindigkeit.
+</Accordion>
+
+<Accordion label="Funktioniert Tailscale hinter CGNAT?" group="tailscale-faq">
+Ja. Tailscale nutzt NAT-Traversal (STUN/ICE) und weicht auf sein globales DERP-Relay-Netz aus, falls beide Seiten hinter symmetrischem NAT oder CGNAT sitzen. Eine öffentliche IPv4-Adresse oder Portweiterleitung am Router brauchst du nicht.
+</Accordion>
+
+<Accordion label="Ist Tailscale sicher für den Zugriff auf ein Heim-NAS?" group="tailscale-faq">
+Ja, deutlich sicherer als SMB-, NFS- oder SSH-Ports am Heimrouter zu öffnen. Nur authentifizierte Geräte deines Tailnets sehen das NAS, und der gesamte Datenverkehr ist Ende-zu-Ende per WireGuard verschlüsselt.
+</Accordion>
+
+<Accordion label="Was mache ich, wenn der kostenlose Plan nicht mehr reicht?" group="tailscale-faq">
+Du kannst auf einen bezahlten Tailscale-Tarif wechseln (8 $/Nutzer/Monat), die Control Plane mit [Headscale](/de/headscale-tailscale-self-hosted-einrichten/) bei gleichen Clients selbst hosten oder für einen komplett eigenen Open-Source-Stack zu [NetBird](/de/netbird-self-hosted-einrichten/) wechseln.
+</Accordion>

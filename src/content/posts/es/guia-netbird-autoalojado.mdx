@@ -1,0 +1,238 @@
+---
+date: 2026-11-19T00:00:00Z
+translationKey: "netbird-self-hosted-setup"
+title: "Guía de NetBird autoalojado: VPN de malla completa y de código abierto con Docker"
+meta_title: "Guía de NetBird autoalojado: VPN de malla con Docker"
+description: "Despliega NetBird autoalojado con Docker y netbird-server: IdP integrado, HTTPS con Traefik o proxy propio, setup keys, rutas, backups y NetBird Proxy."
+image: "@assets/images/26/11/netbird-self-hosted-setup.webp"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["netbird", "self-hosted", "docker"]
+canonical: "https://www.bitdoze.com/es/guia-netbird-autoalojado/"
+quickAnswer: "curl -fsSL https://github.com/netbirdio/netbird/releases/latest/download/getting-started.sh | bash -> netbird-server unificado + panel web + Traefik TLS en tu dominio"
+testedOn: ["Ubuntu 24.04", "Docker 27.3", "NetBird 0.76+"]
+timeToComplete: "20 min"
+---
+
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+*Divulgación: esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.*
+
+Si te gusta la idea de Tailscale pero quieres ser dueño de cada componente de la pila, **NetBird** es la alternativa de código abierto más limpia disponible. A diferencia de [Headscale](/es/headscale-tailscale-autoalojado/), que depende del protocolo propietario y de las apps de Tailscale, NetBird incluye sus propios clientes de código abierto, servidor de control, relé y panel web.
+
+Autoalojar NetBird solía ser bastante enredado. Tenías que levantar contenedores separados para management, signal, relay y coturn junto con un proveedor de identidad externo como Zitadel o Keycloak. Esa arquitectura quedó atrás. NetBird ahora distribuye un contenedor unificado `netbird-server` con un único `config.yaml`, un **proveedor de identidad integrado** de serie y TLS automático con Traefik.
+
+Pasé un clúster de pruebas a la nueva pila unificada y la instalación pasó de llevar una tarde entera a unos 15 minutos. Aquí tienes cómo desplegarlo.
+
+![Panel web autoalojado de NetBird mostrando peers, filtros rápidos, grupos y enrutamiento de red](@assets/images/26/11/netbird-dashboard-ui.webp)
+
+## Qué diferencia a NetBird
+
+Antes de pasar a los comandos, estas son las razones por las que la gente elige NetBird frente a Tailscale o Headscale:
+
+- **Cero dependencia de proveedor**: tanto el servidor como todos los clientes (Linux, macOS, Windows, iOS, Android, Docker) son de código abierto.
+- **Soporte móvil real**: a diferencia de Headscale, las apps oficiales de NetBird para iOS y Android te dejan escribir tu dominio autoalojado sin complicaciones al iniciar sesión.
+- **Panel web muy cuidado**: los peers se filtran rápido con botones para **User Devices** y **Servers**, y gestionas grupos, ACLs, DNS y rutas desde la interfaz en lugar de editar archivos JSON por SSH.
+- **Funciones extra integradas**: las versiones actuales incluyen SSH basado en identidad y **NetBird Proxy** para exponer servicios web internos sobre TLS sin abrir puertos en el router de casa.
+
+Para una comparativa cara a cara de las tres opciones, consulta [NetBird vs Headscale vs Tailscale](/es/netbird-vs-headscale-vs-tailscale/).
+
+## Requisitos previos
+
+<ListCheck>
+- Un **VPS Linux** con al menos 1 vCPU y 2 GB de RAM (Ubuntu 24.04 o Debian 12). [Hetzner](https://go.bitdoze.com/hetzner) o [Hostinger](https://go.bitdoze.com/hostinger-vps) funcionan muy bien.
+- Un **nombre de dominio** con un registro `A` apuntando a la IP de tu VPS (por ejemplo, `netbird.example.com`).
+- **Docker** con el plugin Compose v2, `curl` y `jq` instalados.
+- Puertos abiertos en el firewall: **443/TCP**, **80/TCP** (para Let's Encrypt) y **3478/UDP** (para STUN/relé).
+</ListCheck>
+
+<Notice type="warning" title="Mantén NetBird en la v0.76.0 o superior">
+Versiones anteriores del cliente NetBird (v0.5.0 a v0.75.1) tenían un problema local de privilegios en gRPC (GHSA-qcpp-8vwj-hhwr). Asegúrate de que tanto el contenedor `netbird-server` como todos los clientes conectados estén en la v0.76.0 o superior.
+</Notice>
+
+## Paso 1: Desplegar NetBird con el script unificado
+
+NetBird ofrece un script oficial `getting-started.sh` que genera `docker-compose.yml`, `config.yaml` y `dashboard.env`, configura Traefik para HTTPS y prepara el proveedor de identidad integrado.
+
+Crea un directorio para el despliegue y ejecuta el script:
+
+```bash
+mkdir -p /opt/netbird && cd /opt/netbird
+curl -fsSL https://github.com/netbirdio/netbird/releases/latest/download/getting-started.sh | bash
+```
+
+El instalador te pedirá tu dominio (por ejemplo `netbird.example.com`) y el correo y contraseña de administrador para el IdP integrado. Cuando termina, levanta tres piezas principales:
+
+1. **`netbird-server`**: el backend unificado (gestión, señalización, IdP integrado y relé) configurado desde `config.yaml`.
+2. **`dashboard`**: la interfaz web configurada mediante `dashboard.env`.
+3. **`traefik`**: terminación TLS automática con Let's Encrypt en los puertos 80 y 443.
+
+Comprueba que todos los contenedores estén arrancados y sanos:
+
+```bash
+docker compose ps
+docker compose logs -f netbird-server
+```
+
+Si también usas UFW en el VPS, recuerda que Docker modifica `iptables` directamente. Revisa nuestra [guía de reglas de firewall Docker y UFW](/es/informe-seguridad-bsi-docker-ufw/) para asegurarte de que solo 80/TCP, 443/TCP y 3478/UDP quedan expuestos.
+
+## Paso 2: Entrar en el panel de NetBird
+
+Abre `https://netbird.example.com` en el navegador e inicia sesión con las credenciales de administrador que creaste.
+
+Dentro del panel verás:
+
+- **Peers**: todos los dispositivos conectados, con filtros rápidos para **User Devices** y **Servers** además de filtros por grupo o sistema operativo.
+- **Network Routing**: rutas de subred y nodos de salida para alcanzar redes locales o sacar el tráfico de internet por un peer concreto.
+- **Access Control**: políticas de firewall basadas en grupos (por ejemplo, permitir que `devops` alcance `prod-servers` solo en los puertos 22 y 443).
+- **DNS**: dominios internos propios y servidores DNS enviados a los clientes.
+- **Settings**: claves de configuración (Setup Keys), ajustes de OIDC/SSO y controles de autenticación.
+
+Si ya tienes un proveedor OIDC externo como Authentik o Keycloak, puedes apuntar `config.yaml` hacia él más adelante. Para la mayoría de homelabs y equipos pequeños, el IdP integrado funciona perfectamente por sí solo.
+
+## Paso 3: Conectar tus dispositivos
+
+<Tabs>
+<Tab name="Linux">
+
+Instala el cliente de NetBird y apúntalo a tu URL de gestión autoalojada:
+
+```bash
+curl -fsSL https://pkgs.netbird.io/install.sh | sh
+sudo netbird up --management-url https://netbird.example.com
+```
+
+Imprimirá un enlace de autenticación. Ábrelo en el navegador, inicia sesión y el equipo se unirá a tu malla al instante.
+
+</Tab>
+<Tab name="macOS y Windows">
+
+1. Descarga el cliente de escritorio de NetBird desde `netbird.io/download` (o `brew install --cask netbird-ui` en macOS).
+2. Abre la app en la bandeja o barra de menú, ve a **Settings** y cambia **Management URL** a `https://netbird.example.com`.
+3. Pulsa **Connect** e inicia sesión en el navegador.
+
+</Tab>
+<Tab name="Docker / Servidores">
+
+Para servidores sin entorno gráfico o contenedores, crea una **Setup Key** en **Settings > Setup Keys** dentro del panel web (márcala como reusable si vas a dar de alta varios servidores con la misma clave) y ejecuta:
+
+```bash
+sudo netbird up \
+  --management-url https://netbird.example.com \
+  --setup-key TU-SETUP-KEY
+```
+
+Para un contenedor Docker junto a tus [contenedores del servidor doméstico](/es/contenedores-docker-servidor-casa/):
+
+```yaml
+services:
+  netbird:
+    image: netbirdio/netbird:latest
+    container_name: netbird
+    hostname: docker-node
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - NB_MANAGEMENT_URL=https://netbird.example.com
+      - NB_SETUP_KEY=TU-SETUP-KEY
+    volumes:
+      - ./netbird-client:/etc/netbird
+```
+
+</Tab>
+<Tab name="iOS y Android">
+
+Instala la app **NetBird** desde App Store o Google Play. Toca el icono de ajustes en la pantalla de bienvenida, introduce `https://netbird.example.com` como Management URL e inicia sesión.
+
+</Tab>
+</Tabs>
+
+Comprueba la conectividad y el estado de NAT/relés desde cualquier dispositivo conectado:
+
+```bash
+netbird status -d
+```
+
+La opción `-d` (detallado) muestra `Management: Connected`, `Signal: Connected`, tus candidatos STUN/ICE y si cada peer va en `P2P` (WireGuard directo) o `Relayed` a través de tu VPS.
+
+### ¿Ya usas Nginx, Caddy o Traefik en el puerto 443?
+
+Si tu VPS ya aloja webs o paneles como Coolify en los puertos 80 y 443, el contenedor de Traefik incluido chocará con tu proxy existente. Al ejecutar `getting-started.sh`, elige la opción de proxy inverso externo para que el script omita Traefik y exponga `netbird-server` y `dashboard` de forma interna.
+
+Dos detalles importan al conectar tu propio proxy:
+
+- Activa soporte para **HTTP/2 y gRPC** (`application/grpc` sin buffering) para las rutas de management y signal de NetBird.
+- Mantén abierto **UDP 3478** directamente en el firewall del VPS para que STUN y el descubrimiento de relés funcionen.
+
+## Copias de seguridad y DNS interno propio
+
+En **DNS** dentro del panel de NetBird puedes definir un dominio privado (por ejemplo `lab.internal`) y empujar servidores DNS como NextDNS o Pi-hole a grupos concretos de peers.
+
+Antes de actualizar tu despliegue, haz copia de `/opt/netbird` (`config.yaml`, `dashboard.env`, `docker-compose.yml`) y del volumen `netbird-data` de Docker para restaurar tus peers y políticas sin sobresaltos:
+
+```bash
+cd /opt/netbird
+docker compose stop
+docker run --rm -v netbird_netbird-data:/data -v /opt/netbird/backups:/backup alpine \
+  tar czf /backup/netbird-$(date +%F).tar.gz -C /data .
+docker compose up -d
+```
+
+## Paso 4: Configurar grupos, ACLs y enrutamiento de subred
+
+Por defecto, NetBird mete los peers en el grupo `All`. Antes de añadir servidores o compañeros, ajusta tus políticas:
+
+1. Crea grupos en el panel, como `laptops`, `homelab-servers` y `exit-nodes`.
+2. Asigna cada peer a su grupo desde la tabla **Peers**.
+3. En **Access Control > Policies**, sustituye la regla abierta por defecto por reglas explícitas (por ejemplo, `laptops -> homelab-servers` en TCP `22, 80, 443`).
+
+Para alcanzar dispositivos de tu red local que no pueden ejecutar NetBird (como una impresora, una interfaz IPMI o un NAS), activa **Network Routing**:
+
+1. Asegúrate de tener habilitado el reenvío de IP en tu peer Linux de casa (`net.ipv4.ip_forward = 1`).
+2. En el panel, entra en **Network Routing**, pulsa **Add Route**, escribe tu subred local (por ejemplo `192.168.1.0/24`) y elige tu servidor doméstico como peer de enrutamiento.
+
+Para usar un peer como **Exit Node** al conectarte desde el Wi-Fi de un hotel, añade una ruta `0.0.0.0/0` asignada a ese peer.
+
+## SSH basado en identidad y NetBird Proxy
+
+Dos funciones recientes hacen que NetBird sea mucho más útil que un simple envoltorio de WireGuard:
+
+- **NetBird SSH**: activa el servidor SSH integrado en un peer Linux (`sudo netbird up --allow-server-ssh`) y habilita el acceso SSH desde el panel. NetBird autentica las sesiones SSH con la identidad de tu IdP, evitando repartir claves SSH por todos los servidores.
+- **NetBird Proxy**: permite exponer aplicaciones web internas de tu malla por HTTPS con certificados TLS automáticos, de forma similar a [Pangolin](/es/pangolin-alternativa-cloudflare-tunnels/) o [Tailscale Serve/Funnel](/es/guia-configuracion-tailscale/).
+
+## NetBird vs Headscale vs Tailscale
+
+![Comparación de arquitectura entre Tailscale, Headscale y NetBird mostrando sus logotipos, planos de control y túneles WireGuard directos](@assets/images/26/11/mesh-vpn-logos-architecture.webp)
+
+Si todavía estás valorando opciones:
+
+- Elige **Tailscale** si quieres cero mantenimiento de servidor y configuración en cinco minutos ([guía de configuración de Tailscale](/es/guia-configuracion-tailscale/)).
+- Elige **Headscale** si ya tienes clientes de Tailscale por todas partes y solo quieres autoalojar el plano de control ([guía de configuración de Headscale](/es/headscale-tailscale-autoalojado/)).
+- Elige **NetBird** si quieres una VPN de malla unificada, 100 % de código abierto y autoalojada, con un panel web limpio y buenas apps móviles.
+
+Para la comparativa completa de funciones y costes, lee [NetBird vs Headscale vs Tailscale](/es/netbird-vs-headscale-vs-tailscale/).
+
+## Preguntas frecuentes
+
+<Accordion label="¿Cuánta RAM y CPU necesita NetBird autoalojado?" group="netbird-faq" expanded="true">
+Un VPS con 1 vCPU y 2 GB de RAM sobra para un homelab o un equipo pequeño de entre 10 y 50 peers. Casi todo el tráfico viaja de igual a igual por WireGuard, así que el VPS solo gestiona señalización, autenticación y tráfico retransmitido cuando falla el NAT directo.
+</Accordion>
+
+<Accordion label="¿Puedo ejecutar NetBird en un mini PC en casa en lugar de un VPS?" group="netbird-faq">
+Sí, siempre que tu conexión doméstica tenga IP pública (no esté bajo CGNAT) y puedas abrir los puertos 443/TCP y 3478/UDP hacia ese equipo. Si no, un VPS de 5 $/mes es mucho más fiable como punto de coordinación y relé. Revisa nuestro análisis sobre las [subidas de precios en VPS](/es/subidas-precios-vps/) si estás comparando costes frente a hardware local.
+</Accordion>
+
+<Accordion label="¿Sigue haciendo falta Keycloak o Zitadel para autoalojar NetBird?" group="netbird-faq">
+No. Las versiones actuales de `netbird-server` incluyen un proveedor de identidad integrado que `getting-started.sh` configura automáticamente. Solo necesitas OIDC externo si quieres conectar NetBird a un SSO corporativo ya existente.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo mi servidor NetBird autoalojado?" group="netbird-faq">
+Ejecuta `docker compose pull && docker compose up -d` dentro de `/opt/netbird`, y mantén actualizados los clientes de escritorio y servidores con el gestor de paquetes de tu sistema o con `netbird update`.
+</Accordion>
