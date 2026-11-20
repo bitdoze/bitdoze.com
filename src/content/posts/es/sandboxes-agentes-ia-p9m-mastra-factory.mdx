@@ -1,0 +1,179 @@
+---
+date: 2026-11-20T00:00:00Z
+translationKey: "p7y-mastra-factory-self-hosted-agent-sandboxes"
+title: "Sandboxes Autoalojados de Agentes IA: p9m (p7y) y Mastra"
+meta_title: "Sandboxes de Agentes IA Autoalojados: p9m y Mastra Factory"
+description: "Aísla agentes de código en tu servidor: Purgatorium (p9m, antes p7y) da un Docker y URL por agente, y Mastra Factory convierte issues en PRs."
+image: "@assets/images/26/11/p7y-mastra-factory-agent-sandboxes.webp"
+imageAlt: "Portada de sandboxes autoalojados de agentes IA con p9m y Mastra Factory"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["mastra", "docker", "ai-agents"]
+related: ["es/crear-agente-ia-mastra", "es/docker-podman-entorno-seguro-ia", "es/vps-configuracion-codificacion-ia"]
+canonical: "https://www.bitdoze.com/es/sandboxes-agentes-ia-p9m-mastra-factory/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Ejecutar un agente de programación en tu portátil funciona bien hasta que lanzas tres en paralelo. Uno intenta ocupar el puerto 3000 que ya usa otro, un tercero lanza `docker compose down -v` sobre la base de datos equivocada y acabas cuidando entornos en vez de revisar código.
+
+Dos proyectos open source atacan mitades complementarias de este problema en tu propia infraestructura: **Purgatorium (`p9m`, antes `p7y`)** entrega a cada desarrollador y agente IA su propio sandbox Docker-in-Docker con URL pública y suspensión por inactividad, mientras **Mastra Factory** (`mastra-ai/template-factory`) convierte tickets de GitHub, Linear, Jira y Slack en planes, implementaciones y pull requests revisados.
+
+Aquí tienes cómo funciona cada uno, cómo desplegarlos en un VPS sin exponer el host y cuándo combinar ambos.
+
+## Dos capas distintas del stack autoalojado de agentes
+
+Se suelen mezclar "sandboxes de agentes" y "factorías de agentes", pero resuelven tareas distintas:
+
+| Pieza | Purgatorium (`p9m`, antes `p7y`) | Mastra Factory |
+|---|---|---|
+| Repo y licencia | [csakaszamok/p9m](https://github.com/csakaszamok/p9m) (**AGPL-3.0**) | [mastra-ai/template-factory](https://github.com/mastra-ai/template-factory) (**Apache-2.0**) |
+| Función principal | Sandbox Docker efímero por rama/agente con URLs de preview | Factoría de software de issue a PR (triaje, plan, código, revisión) |
+| Aislamiento | Sysbox rootless DinD o microVMs Kata por sandbox | Sandboxes de plataforma Mastra o `LocalFactorySandbox` |
+| Ahorro en reposo | Duerme sandboxes ociosos con Sablier y despierta en menos de 10s | Servidor Node.js persistente + PostgreSQL (`pgvector`) |
+| Integración con agentes | API HTTP, servidor MCP y plugin oficial de Claude Code (`p9m-team/p9m`) | Agentes Mastra + disparadores de GitHub, Linear, Jira y Slack |
+| Mejor encaje | Dejar que Claude Code o Codex levanten apps Compose con URLs seguras | Convertir backlogs o menciones en Slack en PRs revisados |
+
+<Notice type="info" title="Sobre el cambio de nombre de p7y a p9m">
+Si viste este proyecto en tendencias de GitHub como `p7y-dev/p7y`, el repositorio ahora vive en `csakaszamok/p9m` (**Purgatorium**) con redirección automática. Su imagen oficial es `ghcr.io/csakaszamok/p9m:0.21.1` (pre-1.0, con changelog activo y posibles cambios entre versiones menores).
+</Notice>
+
+## Parte 1: Purgatorium (`p9m`), un demonio Docker y una URL por agente
+
+La mayoría de guías para encerrar agentes en contenedores (como mi [guía de entorno seguro para CLI de IA](/es/docker-podman-entorno-seguro-ia/)) aíslan una sola shell, lo cual falla en cuanto el agente necesita lanzar `docker compose up` con Postgres y Redis. Montar `/var/run/docker.sock` dentro del contenedor del agente equivale a entregar root en el host.
+
+Purgatorium resuelve esto colocando **Sysbox** (o microVMs **Kata Containers**) bajo cada sandbox. Cada sandbox recibe su propio demonio Docker privado, su URL `https://<nombre>.<tu-dominio>` a través de [Traefik](/es/traefik-proxy-docker/), direcciones TCP TLS para Postgres/Redis/SSH y Sablier para dormir entornos sin tráfico y despertarlos al siguiente acceso HTTP en menos de 10 segundos.
+
+También incluye un registro de contenedores con escaneo de secretos, tokens limitados a un solo sandbox, un **servidor MCP** (JSON-RPC sobre HTTP) y un plugin de Claude Code para que el agente cree y compruebe sus propios entornos sin tocar el panel de administración.
+
+### Probar `p9m` en local vs desplegar en un VPS Linux
+
+<Tabs>
+<Tab name="Prueba local (lvh.me)">
+
+Con Docker Engine (o Docker Desktop) y los puertos 80 y 443 libres:
+
+```bash
+mkdir p9m && cd p9m
+curl -fsSLO https://github.com/csakaszamok/p9m/releases/latest/download/docker-compose.yml
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/setup.sh | bash
+docker compose up -d
+```
+
+`setup.sh` crea secretos aleatorios en `.env` e imprime la contraseña de administrador. Abre `http://p9m.lvh.me` (`lvh.me` apunta todos sus subdominios a `127.0.0.1`, sin tocar DNS) y pulsa **New sandbox**. El primero tarda un minuto descargando imágenes base; los siguientes arrancan en ~10 segundos.
+
+</Tab>
+<Tab name="VPS Linux en producción (Sysbox)">
+
+En un VPS Linux (por ejemplo un servidor configurado como en mi [guía de VPS para codificación con IA](/es/vps-configuracion-codificacion-ia/)), instala **Sysbox** primero para mantener `ALLOWED_RUNTIMES=sysbox` en lugar de `dind` privilegiado. Ejecuta primero la auditoría del host:
+
+```bash
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/check-host.sh | bash -s -- dev.example.com
+```
+
+Después inicializa con tu dominio wildcard (`*.dev.example.com` apuntando al VPS):
+
+```bash
+mkdir p9m && cd p9m
+curl -fsSLO https://github.com/csakaszamok/p9m/releases/latest/download/docker-compose.yml
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/setup.sh | bash -s -- dev.example.com
+docker compose up -d
+
+# Repite la comprobación para detectar cualquier ajuste inseguro pendiente
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/check-host.sh | bash
+```
+
+Para conectarlo con Claude Code, añade el marketplace oficial (`p9m-team/p9m`):
+
+```text
+/plugin marketplace add p9m-team/p9m
+/p9m:init https://sbx.dev.example.com
+```
+
+</Tab>
+</Tabs>
+
+Una regla de seguridad sacada del propio `docker-compose.yml` de `p9m`: mantén `ALLOWED_RUNTIMES=sysbox` (o `sysbox,kata` si dispones de virtualización anidada o bare metal). No actives `dind` privilegiado en servidores compartidos porque root dentro del sandbox podría alcanzar el host.
+
+## Parte 2: Mastra Factory, Kanban agéntico autoalojado de issue a PR
+
+El equipo detrás de Mastra (el framework TypeScript que cubrí en [crear un agente IA con Mastra](/es/crear-agente-ia-mastra/) y [herramientas Mastra vs MCP](/es/herramientas-mastra-vs-mcp/)) liberó el sistema interno con el que fusionaron 238 pull requests creados por agentes en una sola semana junto a 630 PRs humanos.
+
+Mastra Factory no es una CLI interactiva. Es un servidor persistente (interfaz web y API) apoyado en **PostgreSQL con `pgvector`** que se conecta a GitHub, Linear, Jira y Slack. Sincronizas issues en **Work -> Intake** (o mencionas al bot en Slack) y Factory ejecuta un flujo ordenado: investiga el repo, redacta un plan para revisión humana, implementa en un sandbox, abre el PR y responde a los comentarios de revisión automáticamente.
+
+### Crear un Mastra Factory autoalojado (sin Mastra Cloud)
+
+Por defecto, `npm create factory` enlaza con la nube de Mastra. Pasa `--no-platform` para generar la plantilla 100% autoalojada (mantén este proyecto separado de los repositorios que los agentes modificarán):
+
+```bash
+npm create factory -- --no-platform
+cd my-factory
+```
+
+Genera una clave de cifrado persistente para las claves API y guárdala a buen recaudo:
+
+```bash
+openssl rand -base64 32
+```
+
+Define al menos estas variables en `.env`:
+
+```env
+DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/factory
+FACTORY_CREDENTIAL_ENCRYPTION_KEY=pega-aqui-tu-clave-base64-de-32-bytes
+MASTRACODE_PUBLIC_URL=https://factory.example.com
+```
+
+`DATABASE_URL` exige PostgreSQL con la extensión **`pgvector`**. Si necesitas levantarlo rápido con Docker Compose, usa mi guía para [desplegar pgvector y pgAdmin en Docker](/es/desplegar-pgvector-pgadmin-docker/) (y revisa [novedades de PostgreSQL 19](/es/postgresql-19-novedades/) antes de fijar etiqueta para confirmar compatibilidad de paquetes).
+
+Para ejecución local en tu propia máquina o contenedor, pasa `new LocalFactorySandbox()` de `@mastra/factory` a `MastraFactory` en `src/mastra/index.ts`. Si activas Slack, recuerda configurar las cuatro variables (`SLACK_APP_TOKEN` o `SLACK_APP_SIGNING_SECRET`, además de `SLACK_APP_BOT_TOKEN`, `SLACK_APP_CLIENT_ID` y `SLACK_APP_CLIENT_SECRET`); una configuración parcial detiene el arranque a propósito en lugar de desactivar Slack en silencio.
+
+Compila y arranca el servidor:
+
+```bash
+npm install
+npm run build
+npm run start
+```
+
+Abre la interfaz, conecta tu GitHub App en **Settings -> Work Intake -> GitHub issues**, añade un proveedor de modelos y pruébalo primero con una tarea pequeña de documentación o tests.
+
+## Límites obligatorios antes de soltar agentes en tu VPS
+
+<ListCheck>
+<ul>
+<li><b>Limita CPU, RAM y cuotas por sandbox.</b> En <code>p9m</code> ajusta <code>SANDBOX_CPUS</code> (2), <code>SANDBOX_MEMORY</code> (4g), <code>SANDBOX_DISK</code> (20g) y <code>SANDBOX_QUOTA</code> (3 por usuario) para evitar que un bucle de compilación tumbe el VPS.</li>
+<li><b>No uses <code>dind</code> privilegiado en producción.</b> Instala Sysbox o Kata Containers siempre que el servidor aloje más de una prueba desechable.</li>
+<li><b>Mantén la aprobación humana para merge.</b> Deja que los agentes redacten, prueben y corrijan lint, con protección de ramas y CI obligatorios.</li>
+<li><b>Cierra puertos y controla accesos OIDC.</b> Termina TLS con Traefik o Caddy, restringe <code>OIDC_ALLOWED_EMAILS</code> y recuerda que [Docker se salta UFW](/es/docker-evita-firewall/) si expones <code>0.0.0.0</code>.</li>
+<li><b>Respalda la clave de cifrado de Factory y Postgres.</b> Perder <code>FACTORY_CREDENTIAL_ENCRYPTION_KEY</code> inutiliza todas las credenciales guardadas en la base de datos.</li>
+</ul>
+</ListCheck>
+
+## Cuándo usar cada uno
+
+Si ya trabajas feliz con tu CLI interactiva (Claude Code, OpenCode o Codex) y solo necesitas un entorno autoalojado donde cada agente levante stacks Compose con enlaces de preview seguros, **Purgatorium (`p9m`)** cubre un hueco muy concreto.
+
+Si gestionas un repositorio de equipo con flujo constante de pequeños arreglos y tareas desde GitHub o Slack, **Mastra Factory** encaja mejor, sobre todo si tu stack ya es TypeScript y PostgreSQL.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Por qué p7y redirige a p9m en GitHub?" group="faq" expanded="true">
+El autor renombró el proyecto de `p7y` a **Purgatorium (`p9m`)** en `github.com/csakaszamok/p9m`. La URL antigua redirige automáticamente, mientras que el marketplace del plugin de Claude Code sigue llamándose `p9m-team/p9m`.
+</Accordion>
+
+<Accordion label="¿Mastra Factory funciona sin Mastra Cloud?" group="faq">
+Sí. Inicializa con `npm create factory -- --no-platform`, apunta `DATABASE_URL` a tu propio PostgreSQL con `pgvector`, configura `LocalFactorySandbox` en `src/mastra/index.ts` y ejecútalo detrás de HTTPS en tu servidor.
+</Accordion>
+
+<Accordion label="¿Cuánta RAM necesita un VPS para sandboxes de p9m?" group="faq">
+Calcula al menos 8–16 GB de RAM en un VPS Linux. El plano de control consume poco y cada sandbox activo usa hasta 4 GB por defecto (`SANDBOX_MEMORY=4g`). Como Sablier suspende los inactivos automáticamente, 16 GB dan margen cómodo para varias ramas a la vez.
+</Accordion>
+
+<Accordion label="¿Funciona p9m en Windows o macOS?" group="faq">
+Sí para pruebas locales con Docker Desktop y dominios `lvh.me`. Para aislamiento real multiusuario con Sysbox o Kata Containers necesitas un host Linux con Docker Engine.
+</Accordion>

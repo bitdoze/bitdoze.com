@@ -1,0 +1,171 @@
+---
+date: 2026-11-20T00:00:00Z
+translationKey: "p7y-mastra-factory-self-hosted-agent-sandboxes"
+title: "Self-Hosted KI-Agent-Sandboxes: p9m (p7y) & Mastra Factory"
+meta_title: "Self-Hosted KI-Agent-Sandboxes: p9m (p7y) & Mastra Factory"
+description: "KI-Coding-Agenten sauber isolieren: Purgatorium (p9m, früher p7y) gibt jedem Agenten eigenen Docker-Daemon & URL, Mastra Factory macht aus Issues PRs."
+image: "@assets/images/26/11/p7y-mastra-factory-agent-sandboxes.webp"
+imageAlt: "Self-Hosted KI-Agent-Sandboxes mit p9m und Mastra Factory Titelgrafik"
+categories: ["ai"]
+authors: ["Dragos"]
+tags: ["mastra", "docker", "ai-agents"]
+related: ["de/postgresql-19-neuheiten", "de/docker-container-homeserver", "de/docker-container-unternehmen"]
+canonical: "https://www.bitdoze.com/de/self-hosted-ki-agent-sandboxes-p9m-mastra-factory/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Einen Coding-Agenten lokal am Laptop laufen zu lassen klappt gut, bis du drei parallel startest. Einer blockiert Port 3000 für den nächsten, der dritte führt `docker compose down -v` auf der falschen Datenbank aus, und plötzlich wartest du Umgebungen statt Code zu prüfen.
+
+Zwei Open-Source-Projekte lösen unterschiedliche Hälften dieses Problems auf eigener Hardware: **Purgatorium (`p9m`, früher `p7y`)** stellt jedem Entwickler und KI-Agenten eine isolierte Docker-in-Docker-Sandbox mit eigener URL und automatischem Schlafmodus bereit, während **Mastra Factory** (`mastra-ai/template-factory`) GitHub-, Linear-, Jira- und Slack-Aufgaben in geplante, umgesetzte und geprüfte Pull Requests überführt.
+
+## Zwei getrennte Ebenen im Self-Hosted-Agent-Stack
+
+„Agent-Sandboxes“ und „Agent-Factories“ werden oft in einen Topf geworfen, erledigen aber verschiedene Jobs:
+
+| Baustein | Purgatorium (`p9m`, früher `p7y`) | Mastra Factory |
+|---|---|---|
+| Repo & Lizenz | [csakaszamok/p9m](https://github.com/csakaszamok/p9m) (**AGPL-3.0**) | [mastra-ai/template-factory](https://github.com/mastra-ai/template-factory) (**Apache-2.0**) |
+| Hauptaufgabe | Flüchtige Docker-Sandbox pro Branch/Agent mit Live-Preview-URL | Issue-zu-PR-Software-Factory (Triage, Plan, Code, Review) |
+| Isolation | Sysbox Rootless DinD oder Kata-MicroVMs pro Sandbox | Mastra-Plattform-Sandboxes oder `LocalFactorySandbox` |
+| Leerlauf-Verhalten | Legt inaktive Sandboxes via Sablier schlafen, weckt unter 10s auf | Dauerhafter Node.js-Server + PostgreSQL (`pgvector`) |
+| Agent-Anbindung | HTTP-API, MCP-Server, offizielles Claude-Code-Plugin (`p9m-team/p9m`) | Mastra-Agenten + GitHub-/Linear-/Jira-/Slack-Trigger |
+| Bester Einsatz | Claude Code / Codex ganze Compose-Stacks mit Preview-Links testen lassen | Backlog-Tickets oder Slack-@Mentions automatisch in PRs verwandeln |
+
+<Notice type="info" title="Hinweis zur Umbenennung p7y -> p9m">
+Falls dir das Repo auf GitHub Trending als `p7y-dev/p7y` begegnet ist: Es liegt jetzt unter `csakaszamok/p9m` (**Purgatorium**) mit automatischer Weiterleitung. Das offizielle Docker-Image ist `ghcr.io/csakaszamok/p9m:0.21.1` (Pre-1.0 mit aktivem Changelog und möglichen Breaking Changes zwischen Minor-Versionen).
+</Notice>
+
+## Teil 1: Purgatorium (`p9m`), ein Docker-Daemon und eine URL pro Agent
+
+Einfache Container-Setups (wie unser [sicherer Docker-Container für KI-CLIs](/docker-podman-ai-cli-tools-safe-environment/), auf Englisch) isolieren nur eine Shell und scheitern, sobald ein Agent `docker compose up` samt Postgres und Redis starten will. `/var/run/docker.sock` direkt hineinzureichen öffnet dem Container Root-Rechte auf dem Host.
+
+Purgatorium legt **Sysbox** (oder **Kata Containers**-MicroVMs) unter jede Sandbox. Jede Instanz erhält einen eigenen Docker-Daemon, eine eigene `https://<name>.<deine-domain>`-Adresse über Traefik, TLS-TCP-Endpunkte für Postgres/Redis/SSH sowie Sablier, das ungenutzte Sandboxes schlafen legt und beim nächsten HTTP-Aufruf in unter 10 Sekunden weckt.
+
+Dazu kommen eine eingebaute Registry mit Secret-Scanning, auf einzelne Sandboxes begrenzte Tokens, ein **MCP-Server** (JSON-RPC über HTTP) und ein Claude-Code-Plugin.
+
+### `p9m` lokal testen vs. auf einem Linux-VPS betreiben
+
+<Tabs>
+<Tab name="Lokal testen (lvh.me)">
+
+Mit Docker Engine (oder Docker Desktop) und freien Ports 80/443:
+
+```bash
+mkdir p9m && cd p9m
+curl -fsSLO https://github.com/csakaszamok/p9m/releases/latest/download/docker-compose.yml
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/setup.sh | bash
+docker compose up -d
+```
+
+`setup.sh` erzeugt Zufalls-Secrets in `.env` und gibt das Admin-Passwort aus. Öffne `http://p9m.lvh.me` (`lvh.me` löst alle Subdomains auf `127.0.0.1` auf) und klicke auf **New sandbox**. Die erste Sandbox lädt Basis-Images herunter, jede weitere startet in etwa 10 Sekunden.
+
+</Tab>
+<Tab name="Produktiv auf Linux-VPS (Sysbox)">
+
+Auf einem Linux-VPS installierst du zuerst **Sysbox**, damit `ALLOWED_RUNTIMES=sysbox` ohne privilegiertes `dind` greift. Prüfe zuerst den Host:
+
+```bash
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/check-host.sh | bash -s -- dev.example.com
+```
+
+Danach mit deiner Wildcard-Domain (`*.dev.example.com` auf den VPS) einrichten:
+
+```bash
+mkdir p9m && cd p9m
+curl -fsSLO https://github.com/csakaszamok/p9m/releases/latest/download/docker-compose.yml
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/setup.sh | bash -s -- dev.example.com
+docker compose up -d
+
+# Host-Check wiederholen, um offene Sicherheitslücken zu finden
+curl -fsSL https://github.com/csakaszamok/p9m/releases/latest/download/check-host.sh | bash
+```
+
+In Claude Code bindest du das Plugin über den offiziellen Marketplace-Namen (`p9m-team/p9m`) ein:
+
+```text
+/plugin marketplace add p9m-team/p9m
+/p9m:init https://sbx.dev.example.com
+```
+
+</Tab>
+</Tabs>
+
+Wichtige Sicherheitsregel aus der `docker-compose.yml` von `p9m`: Belasse `ALLOWED_RUNTIMES=sysbox` (oder `sysbox,kata` bei Nested-Virt/Bare-Metal). Aktiviere niemals privilegiertes `dind` auf einem geteilten Server.
+
+## Teil 2: Mastra Factory, Self-Hosted-Kanban vom Issue bis zum PR
+
+Das Team hinter dem TypeScript-Framework Mastra (siehe [KI-Agent mit Mastra bauen](/build-ai-agent-mastra/), auf Englisch) hat das interne System veröffentlicht, mit dem es in einer Woche 238 Agent-PRs neben 630 menschlichen PRs gemergt hat.
+
+Mastra Factory ist ein dauerhafter Server (Web-UI + API) auf Basis von **PostgreSQL mit `pgvector`** und Anbindung an GitHub, Linear, Jira und Slack. Issues landen in **Work -> Intake** (oder per `@`-Erwähnung in Slack), werden analysiert, als Plan zur Freigabe vorgelegt, in einer Sandbox umgesetzt und als Pull Request samt automatischer Review-Antworten geöffnet.
+
+### Mastra Factory komplett selbst hosten (ohne Mastra Cloud)
+
+Ohne Flag verbindet `npm create factory` gegen Mastra Cloud. Mit `--no-platform` entsteht das selbst gehostete Template (getrennt vom Ziel-Repository anlegen):
+
+```bash
+npm create factory -- --no-platform
+cd my-factory
+```
+
+Verschlüsselungsschlüssel für gespeicherte API-Keys erzeugen und sicher sichern:
+
+```bash
+openssl rand -base64 32
+```
+
+Mindest-Einträge in `.env`:
+
+```env
+DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/factory
+FACTORY_CREDENTIAL_ENCRYPTION_KEY=erzeugter-32-byte-base64-key
+MASTRACODE_PUBLIC_URL=https://factory.example.com
+```
+
+`DATABASE_URL` verlangt PostgreSQL mit **`pgvector`** (Hinweise zu aktuellen Postgres-Docker-Stacks findest du im [PostgreSQL 19 Guide](/de/postgresql-19-neuheiten/) und im [pgvector-Docker-Guide](/deploy-pgvector-pgadmin-docker/), auf Englisch). Für lokale Sandbox-Ausführung übergibst du `new LocalFactorySandbox()` aus `@mastra/factory` an `MastraFactory` in `src/mastra/index.ts`. Bei Slack-Nutzung müssen alle vier Slack-Variablen gesetzt sein, sonst bricht der Start bewusst ab.
+
+Danach bauen und starten:
+
+```bash
+npm install
+npm run build
+npm run start
+```
+
+Verbinde im Web-UI unter **Settings -> Work Intake -> GitHub issues** deine GitHub App, hinterlege ein Modell und teste den ersten Lauf an einem kleinen Doku- oder Test-Ticket.
+
+## Leitplanken vor dem Live-Betrieb
+
+<ListCheck>
+<ul>
+<li><b>CPU, RAM und Quotas begrenzen.</b> Passe in <code>p9m</code> <code>SANDBOX_CPUS</code> (2), <code>SANDBOX_MEMORY</code> (4g), <code>SANDBOX_DISK</code> (20g) und <code>SANDBOX_QUOTA</code> (3 pro Nutzer) an, damit kein Build-Loop den VPS lahmlegt.</li>
+<li><b>Nur mit Sysbox oder Kata produktiv betreiben.</b> Privilegiertes DinD gehört nur auf Wegwerf-Testmaschinen.</li>
+<li><b>Menschliche Merge-Freigabe behalten.</b> Lass Agenten implementieren, testen und Lint beheben, aber halte Branch Protection und CI-Checks aktiv.</li>
+<li><b>Ports absichern und OIDC einschränken.</b> Terminiere TLS über Traefik oder Caddy, setze <code>OIDC_ALLOWED_EMAILS</code> und beachte, dass [Docker UFW umgeht](/docker-bypasses-firewall/) (auf Englisch).</li>
+<li><b>Encryption Key und Postgres sichern.</b> Ohne <code>FACTORY_CREDENTIAL_ENCRYPTION_KEY</code> sind alle gespeicherten Provider-Keys verloren.</li>
+</ul>
+</ListCheck>
+
+## Wann welches Tool passt
+
+Wenn du weiter direkt in Claude Code, OpenCode oder Codex arbeitest und schlicht eine saubere Self-Hosted-Plattform für Compose-Sandboxes samt Preview-URLs willst, löst **Purgatorium (`p9m`)** genau dieses Problem.
+
+Wenn ein Team-Repo laufend kleine Bugfixes und Tickets aus GitHub oder Slack abarbeiten soll, ist **Mastra Factory** der stärkere Einstieg, besonders in TypeScript- und PostgreSQL-Stacks.
+
+## Häufige Fragen (FAQ)
+
+<Accordion label="Warum leitet p7y auf GitHub zu p9m weiter?" group="faq" expanded="true">
+Das Projekt wurde von `p7y` in **Purgatorium (`p9m`)** unter `github.com/csakaszamok/p9m` umbenannt. Die alte Adresse leitet weiter; der Claude-Code-Plugin-Marketplace heißt `p9m-team/p9m`.
+</Accordion>
+
+<Accordion label="Läuft Mastra Factory komplett ohne Mastra Cloud?" group="faq">
+Ja. Mit `npm create factory -- --no-platform`, einer eigenen PostgreSQL-Instanz mit `pgvector` und `LocalFactorySandbox` betreibst du es vollständig auf eigener Hardware hinter HTTPS.
+</Accordion>
+
+<Accordion label="Wie viel RAM braucht ein VPS für p9m?" group="faq">
+Plane mindestens 8–16 GB RAM auf einem Linux-VPS ein. Jede aktive Sandbox darf standardmäßig bis zu 4 GB belegen (`SANDBOX_MEMORY=4g`); da Sablier inaktive Sandboxes schlafen legt, reichen 16 GB bequem für mehrere parallele Branches.
+</Accordion>

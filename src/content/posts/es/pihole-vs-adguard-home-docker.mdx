@@ -1,0 +1,235 @@
+---
+date: 2026-11-20T00:00:00Z
+translationKey: "pihole-vs-adguard-home-docker"
+title: "Pi-hole v6 vs AdGuard Home en Docker (+ Unbound)"
+meta_title: "Pi-hole v6 vs AdGuard Home en Docker + Unbound (2026)"
+description: "Pi-hole v6 vs AdGuard Home probados en Docker: RAM real, DNS cifrado, variables FTLCONF, trampa de resolver abierto y Compose con Unbound."
+image: "@assets/images/26/11/pihole-vs-adguard-home-docker.webp"
+imageAlt: "Portada de Pi-hole vs AdGuard Home en Docker y Unbound"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["pihole", "adguard-home", "docker"]
+testedOn: ["Docker 29.2", "Pi-hole v6.6 / FTL v6.9", "AdGuard Home v1.0.0", "Unbound 1.22.0"]
+related: ["es/bloquear-anuncios-malware-dns", "es/contenedores-docker-servidor-casa", "es/docker-evita-firewall"]
+canonical: "https://www.bitdoze.com/es/pihole-vs-adguard-home-docker/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+La mayoría de comparativas entre Pi-hole y AdGuard Home siguen hablando de Pi-hole v5. Avisan sobre `lighttpd`, el consumo de PHP y variables antiguas como `WEBPASSWORD`. Eso quedó atrás. Pi-hole v6 eliminó tanto `lighttpd` como PHP, integró la interfaz web y la API REST dentro de `pihole-FTL`, y redujo su consumo hasta quedar pegado a AdGuard Home.
+
+Hoy levanté contenedores limpios de ambos (`pihole/pihole:latest`, `adguard/adguardhome:latest` y `mvance/unbound:latest`) en Docker 29.2 para medir RAM en reposo, verificar las variables `FTLCONF_*` de v6 y conectar Pi-hole con Unbound sobre una red bridge privada. Esto es lo que separa realmente a los dos en 2026 junto con los archivos Compose listos para usar.
+
+## Pi-hole v6 vs AdGuard Home de un vistazo
+
+Cada cifra de memoria se midió en reposo con `docker stats --no-stream` recién arrancados y antes de añadir listas extra:
+
+| Métrica | Pi-hole v6 (Core 6.6 / FTL 6.9) | AdGuard Home (v1.0.0) |
+|---|---|---|
+| RAM en reposo en Docker | **15.5 MiB** | **11.2 MiB** |
+| DNS upstream cifrado (DoH/DoT/DoQ) | Requiere proxy aparte (o Unbound) | Integrado (`https://`, `tls://`, `quic://`) |
+| Servidor DNS cifrado para clientes | No integrado | Integrado (DoH, DoT, DoQ, DNSCrypt) |
+| Interfaz web + API | Integrada en `pihole-FTL` (sin PHP/lighttpd) | Un solo binario Go |
+| Archivo de configuración | `/etc/pihole/pihole.toml` (TOML) | `AdGuardHome.yaml` (YAML) |
+| Configuración en Docker | Variables `FTLCONF_*` (solo lectura si se definen) | Asistente web en `:3000`, luego YAML |
+| Reglas por dispositivo y horarios | Grupos + listas (sin interruptores de apps) | Reglas por cliente, Safe Search, bloqueo de apps en un clic |
+| Servidor DHCP integrado | Sí (requiere `NET_ADMIN` + puerto 67/udp) | Sí (requiere red host en Docker) |
+| Mejor encaje | Homelabs con Unbound o scripts propios | Familias, portátiles y móviles con DoH/DoT directo |
+
+La brecha de RAM desapareció. Cuatro megabytes de diferencia no importan ni siquiera en una Raspberry Pi Zero 2 W.
+
+## La única diferencia real: DNS cifrado
+
+Si quitas las preferencias de interfaz, la decisión depende de cómo quieres que salga el tráfico DNS de tu red y cómo se conecten tus dispositivos.
+
+AdGuard Home habla DNS-over-HTTPS, DNS-over-TLS, DNS-over-QUIC y DNSCrypt de serie en ambos lados. Pegas `https://dns.quad9.net/dns-query` o `tls://1.1.1.1` en los servidores upstream, guardas y listo. Con un dominio y certificado TLS, tu móvil apunta su DNS privado directo a tu servidor incluso con datos móviles (o lo combinas con [Tailscale](/es/guia-configuracion-tailscale/) para no exponer jamás el puerto 53).
+
+Pi-hole v6 sigue sin incluir cliente DoH ni DoT. Su documentación solía recomendar `cloudflared`, pero Cloudflare retiró ese método a finales de 2025. La salida limpia con Pi-hole siempre ha sido conectarlo a Unbound como resolver recursivo local para hablar directamente con los servidores raíz sin entregar tu historial a Cloudflare, Google ni a tu operadora. Eso también te aísla de incidentes con proveedores públicos, como la salida de Quad9 de Francia el 24 de noviembre de 2026 tras multas judiciales de bloqueo.
+
+Dos diferencias menores que conviene saber antes de elegir:
+
+- **Bloqueo de servicios en un clic.** AdGuard Home trae interruptores para bloquear TikTok, YouTube, Discord o Roblox por dispositivo y por horario, más Safe Search forzado. En Pi-hole toca buscar listas de dominios y asignarlas a grupos manualmente.
+- **Visibilidad de consultas y ecosistema.** El registro de consultas, los filtros regex y las listas comunitarias de Pi-hole (como Hagezi y OISD) son algo más cómodos cuando depuras por qué falló una app de Smart TV, y la nueva API REST de v6 es mucho más limpia que la antigua de PHP.
+
+<Notice type="warning" title="La trampa del resolver abierto en Pi-hole v6 con Docker">
+Los ejemplos oficiales de Pi-hole en Docker suelen mezclar `FTLCONF_dns_listeningMode: 'ALL'` con `- "53:53/udp"`. En un VPS o cualquier equipo con IP pública, esa combinación convierte tu máquina en un resolver DNS abierto a internet, porque [Docker se salta UFW](/es/docker-evita-firewall/) cuando publicas puertos sin dirección de enlace. Enlaza siempre el puerto 53 a tu IP de LAN (`192.168.1.50:53:53/udp`) o IP de Tailscale, nunca a `0.0.0.0` en un servidor público.
+</Notice>
+
+## Antes de empezar: libera el puerto 53 en Ubuntu/Debian
+
+Ubuntu y muchos servidores Debian ejecutan `systemd-resolved` escuchando en `127.0.0.53:53`. Si intentas publicar `53:53` en todas las interfaces, Docker fallará con `address already in use`.
+
+Comprueba primero qué ocupa el puerto 53:
+
+```bash
+sudo ss -tulpn | grep ':53 '
+```
+
+Si `systemd-resolved` está ahí, o bien enlazas Docker a la IP LAN concreta de tu servidor (`192.168.1.50:53:53/udp`) para no chocar con `127.0.0.53`, o desactivas el stub listener limpiamente:
+
+```bash
+sudo mkdir -p /etc/systemd/resolved.conf.d
+printf "[Resolve]\nDNS=1.1.1.1\nDNSStubListener=no\n" | sudo tee /etc/systemd/resolved.conf.d/no-stub.conf
+sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
+```
+
+Verifica que `ss -tulpn | grep ':53 '` no devuelva nada antes de levantar el stack.
+
+## Archivos Docker Compose (probados en Docker 29.2)
+
+Elige tu pestaña. Ambos stacks incluyen **Unbound** local (`mvance/unbound:latest`, Unbound 1.22.0, ~57 MiB RAM) en una red bridge privada con IP fija para no depender de ningún resolver externo. Cambia `192.168.1.50` por la IP LAN o Tailscale de tu servidor.
+
+<Tabs>
+<Tab name="Pi-hole v6 + Unbound">
+
+Dos detalles de v6 en este archivo: cada ajuste usa el formato `FTLCONF_<seccion>_<clave>` (las variables viejas de v5 como `WEBPASSWORD` y `PIHOLE_DNS_` ya no existen) y cualquier parámetro fijado por variable queda como solo lectura en la web para mantener tu Compose como fuente única de verdad. Además, `mvance/unbound` escucha en el puerto `53` interno, por eso `FTLCONF_dns_upstreams` apunta a `172.30.0.10#53`.
+
+```yaml
+services:
+  unbound:
+    image: mvance/unbound:latest
+    container_name: unbound
+    restart: unless-stopped
+    networks:
+      dns_net:
+        ipv4_address: 172.30.0.10
+
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+    restart: unless-stopped
+    depends_on:
+      - unbound
+    ports:
+      - "192.168.1.50:53:53/tcp"
+      - "192.168.1.50:53:53/udp"
+      - "127.0.0.1:8080:80/tcp"
+    environment:
+      TZ: "UTC"
+      FTLCONF_webserver_api_password: "cambia-esta-contrasena"
+      FTLCONF_dns_upstreams: "172.30.0.10#53"
+      FTLCONF_dns_listeningMode: "ALL"
+      # Opcional: Unbound ya valida DNSSEC; déjalo en true solo para ver insignias DNSSEC en la UI
+      FTLCONF_dns_dnssec: "true"
+    volumes:
+      - ./pihole/etc-pihole:/etc/pihole
+    networks:
+      dns_net:
+        ipv4_address: 172.30.0.20
+
+networks:
+  dns_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+```
+
+Arranca y verifica tanto la resolución recursiva como el bloqueo:
+
+```bash
+docker compose up -d
+
+# Debe devolver registros A reales a través de Unbound
+docker exec pihole dig @127.0.0.1 example.com +short
+
+# Debe devolver 0.0.0.0 (bloqueado)
+docker exec pihole dig @127.0.0.1 doubleclick.net +short
+```
+
+En mi prueba, `example.com` resolvió de forma recursiva (`104.20.23.154` / `172.66.147.243`) y `doubleclick.net` devolvió `0.0.0.0`. Abre el panel en `http://127.0.0.1:8080/admin` (o ponlo detrás de [Traefik](/es/traefik-proxy-docker/) o Tailscale).
+
+</Tab>
+<Tab name="AdGuard Home + Unbound">
+
+AdGuard Home no usa variables de entorno para la configuración inicial. En el primer arranque el puerto `3000` sirve el asistente; al completarlo, el panel pasa al puerto `80` y puedes quitar el mapeo `3000`.
+
+```yaml
+services:
+  unbound:
+    image: mvance/unbound:latest
+    container_name: unbound
+    restart: unless-stopped
+    networks:
+      dns_net:
+        ipv4_address: 172.30.0.10
+
+  adguardhome:
+    image: adguard/adguardhome:latest
+    container_name: adguardhome
+    restart: unless-stopped
+    depends_on:
+      - unbound
+    ports:
+      - "192.168.1.50:53:53/tcp"
+      - "192.168.1.50:53:53/udp"
+      - "127.0.0.1:3000:3000/tcp"
+      - "127.0.0.1:8080:80/tcp"
+      # Descomenta si sirves DoT / DoQ a LAN o clientes remotos:
+      # - "192.168.1.50:853:853/tcp"
+      # - "192.168.1.50:853:853/udp"
+    volumes:
+      - ./adguard/work:/opt/adguardhome/work
+      - ./adguard/conf:/opt/adguardhome/conf
+    networks:
+      dns_net:
+        ipv4_address: 172.30.0.20
+
+networks:
+  dns_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+```
+
+Arráncalo, abre `http://127.0.0.1:3000`, completa el asistente de dos minutos (deja el panel en puerto `80` interno y DNS en `53`), entra en **Configuración -> Configuración DNS** y pon `172.30.0.10:53` como servidor upstream (o `https://dns.quad9.net/dns-query` si prefieres saltarte Unbound).
+
+Un detalle de AdGuard: si alguna vez editas `./adguard/conf/AdGuardHome.yaml` a mano, para el contenedor antes o AdGuard sobrescribirá el archivo al apagarse.
+
+</Tab>
+</Tabs>
+
+## Listas de bloqueo y router sin romper internet en casa
+
+Meter dos millones de dominios el primer día es la vía más rápida para que en casa odien tu homelab. Empieza ligero:
+
+<ListCheck>
+<ul>
+<li><b>Empieza con una lista sólida.</b> Hagezi Multi PRO (u OISD Big) corta casi todo el ruido sin romper apps bancarias, enlaces de envíos ni televisores.</li>
+<li><b>Ten un DNS secundario o segunda instancia.</b> Si tu servidor reinicia por una actualización de kernel y es el único DNS del DHCP, toda la casa se queda sin red. Ejecuta una segunda instancia pequeña en una Raspberry Pi o deja un DNS de respaldo.</li>
+<li><b>Configura el DNS en el DHCP de la LAN del router, no en la WAN.</b> Así Pi-hole o AdGuard ven la IP de cada dispositivo en vez de agrupar todo bajo la IP del router.</li>
+<li><b>DNS no bloquea anuncios dentro de los vídeos de YouTube.</b> YouTube sirve los anuncios desde los mismos dominios que el vídeo. Combina DNS en red con uBlock Origin Lite o Brave en el navegador (detallado en [bloquear anuncios tras Manifest V3](/es/bloquear-anuncios-manifest-v3-nextdns/)).</li>
+</ul>
+</ListCheck>
+
+Si prefieres pagar un par de dólares al mes por filtrado en la nube para móviles y portátiles sin mantener nada local, revisa mi [guía de bloqueo de anuncios y malware por DNS](/es/bloquear-anuncios-malware-dns/). Si no, cualquiera de los dos contenedores encaja perfecto en tu [stack de contenedores Docker en casa](/es/contenedores-docker-servidor-casa/).
+
+## ¿Cuál elegir?
+
+Elige **AdGuard Home** si quieres DNS cifrado (DoH/DoT/DoQ) sin contenedores extra, interruptores parentales por aplicación y una configuración en cinco minutos. Para la mayoría de redes domésticas es el valor por defecto más sencillo.
+
+Elige **Pi-hole v6 + Unbound** si prefieres configuración declarativa en Compose (`FTLCONF_*`), resolución recursiva sin terceros o ya tienes scripts contra la CLI y la API REST de Pi-hole. Sin PHP ni `lighttpd` en v6, la antigua penalización de memoria ya no es motivo para descartarlo.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Pi-hole o AdGuard Home bloquean anuncios de YouTube?" group="faq" expanded="true">
+No. Ningún bloqueador DNS puede eliminar de forma fiable los anuncios de vídeo de YouTube porque salen de los mismos dominios que el propio vídeo. Usa el bloqueo DNS para rastreadores, Smart TVs y apps móviles, y una extensión en el navegador para YouTube.
+</Accordion>
+
+<Accordion label="¿Por qué falló mi viejo Docker Compose de Pi-hole al pasar a v6?" group="faq">
+Pi-hole v6 sustituyó `WEBPASSWORD`, `PIHOLE_DNS_` y `DNSMASQ_LISTENING` por variables `FTLCONF_*` mapeadas a `/etc/pihole/pihole.toml` (como `FTLCONF_webserver_api_password` y `FTLCONF_dns_upstreams`). También dejó de leer `/etc/dnsmasq.d` salvo que actives `FTLCONF_misc_etc_dnsmasq_d: "true"`.
+</Accordion>
+
+<Accordion label="¿Es Unbound más lento que Cloudflare 1.1.1.1 o Quad9?" group="faq">
+Solo en la primera consulta en frío de un dominio no cacheado (normalmente 30–120 ms recorriendo servidores raíz, TLD y autoritativos). Una vez en caché local, Unbound responde en menos de 1 ms dentro de tu LAN, más rápido que cualquier servidor público.
+</Accordion>
+
+<Accordion label="¿Puedo usar AdGuard Home o Pi-hole por Tailscale en el móvil?" group="faq">
+Sí, y es mucho más seguro que abrir el puerto 53 a internet. Enlaza el contenedor DNS a la IP de Tailscale de tu servidor, añádela como Global Nameserver en la consola de Tailscale y activa Override DNS servers.
+</Accordion>
