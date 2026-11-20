@@ -1,0 +1,399 @@
+---
+date: 2026-11-20T00:00:00Z
+translationKey: "postgresql-19-whats-new"
+title: "PostgreSQL 19: REPACK, Plan Advice, JIT Off y Guía"
+meta_title: "PostgreSQL 19: Novedades, Pruebas Docker y Migración"
+description: "PostgreSQL 19 salió el 19 nov 2026 con REPACK (CONCURRENTLY), pg_plan_advice, WAIT FOR LSN, JIT desactivado y LZ4 en TOAST. Probado en Docker."
+image: "@assets/images/26/11/postgresql-19-whats-new.webp"
+imageAlt: "Portada de novedades de PostgreSQL 19 con icono azul de base de datos sobre fondo claro"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["postgresql", "docker", "self-hosted"]
+testedOn: ["Docker 29.2", "postgres:19-alpine (PG 19.0)"]
+related: ["es/que-reemplaza-postgres", "es/multiples-bases-datos-postgres-docker", "es/desplegar-pgvector-pgadmin-docker"]
+canonical: "https://www.bitdoze.com/es/postgresql-19-novedades/"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+PostgreSQL 19 salió el 19 de noviembre de 2026, unos dos meses más tarde de su ventana habitual de septiembre después de que el equipo principal pasara el otoño lidiando con una oleada de reportes de fallos generados con IA. La espera mereció la pena. A nivel operativo es la versión más útil de Postgres en varios años.
+
+Dos cambios lo resumen bien: `REPACK (CONCURRENTLY)` permite por fin recuperar espacio muerto en tablas desde el propio núcleo sin bloquear lecturas ni escrituras, y `jit` viene desactivado por defecto tras años provocando picos de latencia inesperados en cargas OLTP. Detrás de esos dos llegan `pg_plan_advice`, `WAIT FOR LSN` para lecturas consistentes en réplicas, replicación lógica sin reiniciar el servidor, `INSERT ... ON CONFLICT DO SELECT`, salida JSON en `COPY` y `lz4` como compresión TOAST predeterminada.
+
+Levanté hoy un contenedor `postgres:19-alpine` en Docker y probé cada función de esta guía para darte SQL real, salidas de `EXPLAIN` verificadas y las trampas que pasan desapercibidas en las [notas oficiales de la versión](https://www.postgresql.org/docs/release/19.0/).
+
+## Qué cambió por defecto en PostgreSQL 19
+
+Antes de probar comandos nuevos, revisa los valores por defecto que cambiaron por debajo. Todos los datos de esta tabla salen de `pg_settings` en un contenedor `postgres:19-alpine` recién iniciado:
+
+| Parámetro | Por defecto PG 18 | Por defecto PG 19 | Por qué importa |
+|---|---|---|---|
+| `jit` | `on` | `off` | Evita picos de compilación JIT en consultas OLTP; cargas analíticas deben reactivarlo |
+| `default_toast_compression` | `pglz` | `lz4` | Compresión y descompresión más rápidas para columnas grandes si está compilado con LZ4 |
+| `log_lock_waits` | `off` | `on` | Las esperas largas por bloqueos aparecen en los logs desde el primer día |
+| `max_locks_per_transaction` | `64` | `128` | Cambió el cálculo de la tabla de bloqueos; duplica tu valor anterior si lo ajustaste |
+| `io_workers` | `3` | eliminado | Sustituido por `io_min_workers` (`2`) e `io_max_workers` (`8`) con escalado automático |
+| `autovacuum_max_parallel_workers` | n/a | `0` | El vacuum paralelo de índices en autovacuum es opcional; sube este valor para usarlo |
+| `md5_password_warnings` | n/a | `on` | Registra un aviso de obsolescencia tras cada inicio de sesión con MD5 |
+| `standard_conforming_strings` | `on` (editable) | `on` (fijo) | Desactivarlo ya no está soportado en el servidor |
+
+<Notice type="warning" title="Dos trampas de configuración antes de cambiar la etiqueta del contenedor">
+Primero: si tu `postgresql.conf` define `io_workers`, PostgreSQL 19 no arrancará porque el parámetro desapareció en favor de `io_min_workers` e `io_max_workers`. Segundo: `postgres:19-alpine` usa `PGDATA=/var/lib/postgresql/19/docker`, igual que la 18. Monta `/var/lib/postgresql` en Docker Compose y no `/var/lib/postgresql/data`, o perderás los datos la próxima vez que recrees el contenedor.
+</Notice>
+
+## Prueba PostgreSQL 19 primero en Docker
+
+Si quieres ejecutar las consultas de esta guía sin tocar un servidor real, guarda este archivo como `compose.yaml` en una carpeta temporal:
+
+```yaml
+services:
+  postgres:
+    image: postgres:19-alpine
+    container_name: pg19-lab
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: change-me-locally
+      POSTGRES_DB: demo
+    volumes:
+      - pg19_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg19_data:
+```
+
+Arráncalo y comprueba la versión:
+
+```bash
+docker compose up -d
+docker compose exec postgres psql -U postgres -d demo -c "SELECT version();"
+```
+
+Deberías ver `PostgreSQL 19.0`. Vincular el puerto a `127.0.0.1` evita exponerlo a internet; recuerda que [Docker se salta el firewall UFW](/es/docker-evita-firewall/) si publicas `5432:5432` sin interfaz. Para entornos reales saca la contraseña de las variables de entorno con [secretos en Docker Compose](/es/secretos-docker-compose/), y si quieres alojar varias bases de datos en un solo contenedor, el patrón de script de inicialización de mi guía sobre [múltiples bases de datos Postgres en Docker](/es/multiples-bases-datos-postgres-docker/) funciona igual en la 19.
+
+## REPACK (CONCURRENTLY): recupera espacio sin bloquear la tabla
+
+Las tablas con muchos `UPDATE` y `DELETE` acumulan espacio muerto (bloat). El `VACUUM` normal marca esos huecos como reutilizables, pero casi nunca devuelve espacio al sistema operativo. Hasta ahora, en Postgres puro solo tenías `VACUUM FULL` y `CLUSTER`, y ambos toman un bloqueo `ACCESS EXCLUSIVE` durante toda la reescritura. En una tabla de 40 GB eso obligaba a abrir ventana de mantenimiento o instalar la extensión externa `pg_repack`.
+
+PostgreSQL 19 mete ese flujo en el núcleo con `REPACK` (que sustituye tanto a `VACUUM FULL` como a `CLUSTER`, aunque los nombres antiguos se mantienen por compatibilidad). Con `CONCURRENTLY`, la tabla se reescribe en segundo plano bajo un bloqueo `SHARE UPDATE EXCLUSIVE` y solo pide un breve `ACCESS EXCLUSIVE` al final para intercambiar los archivos.
+
+Lo probé con una tabla de 50,000 filas en `postgres:19-alpine`, borré la mitad y ejecuté `REPACK (CONCURRENTLY)` reordenando por índice:
+
+```sql
+CREATE TABLE orders (
+  id bigserial PRIMARY KEY,
+  customer_id int NOT NULL,
+  payload text NOT NULL
+);
+CREATE INDEX idx_orders_customer ON orders (customer_id);
+
+INSERT INTO orders (customer_id, payload)
+SELECT (g % 500) + 1, repeat('x', 200)
+FROM generate_series(1, 50000) AS g;
+
+DELETE FROM orders WHERE id % 2 = 0;
+
+SELECT pg_size_pretty(pg_relation_size('orders')) AS before_repack,
+       pg_size_pretty(pg_total_relation_size('orders')) AS total_before;
+```
+
+Antes de reempaquetar, `orders` ocupaba `12 MB` (`13 MB` con índices). Después ejecuté:
+
+```sql
+REPACK (CONCURRENTLY) orders USING INDEX idx_orders_customer;
+```
+
+Al terminar, `pg_relation_size('orders')` bajó a `6144 kB` (`6928 kB` en total). En trabajos largos puedes seguir el avance en tiempo real con la nueva vista `pg_stat_progress_repack`.
+
+Cuatro límites reales que conviene tener claros antes de meter esto en un cron:
+
+1. **La tabla necesita un índice de identidad.** Ejecutar `REPACK (CONCURRENTLY)` sobre una tabla sin clave primaria ni `REPLICA IDENTITY USING INDEX` falla al instante con `Relation "..." has no identity index`.
+2. **No puede ejecutarse dentro de un bloque de transacción.** La mayoría de herramientas de migración envuelven los scripts en `BEGIN ... COMMIT` por defecto, así que lánzalo fuera de transacción, igual que `CREATE INDEX CONCURRENTLY`.
+3. **Necesitas aproximadamente el doble de espacio en disco.** `REPACK` crea una copia nueva de la tabla y de todos sus índices antes de borrar los archivos viejos, más espacio temporal de ordenación si `USING INDEX` elige ordenar en disco.
+4. **Ojo con transacciones concurrentes largas.** La documentación advierte que `REPACK (CONCURRENTLY)` no es seguro para MVCC: cualquier transacción que abrió su snapshot *antes* de iniciar el repack verá la tabla vacía cuando este haga commit. No lo lances mientras haya consultas largas de reporting abiertas.
+
+## Fijar malos planes con pg_plan_advice y pg_stash_advice
+
+Todo el que lleva tiempo con Postgres ha vivido esa tarde de martes en la que un `ANALYZE` mueve un poco las estimaciones de filas, el planificador cambia un nested loop por un hash join (o abandona un índice) y la latencia p99 se multiplica por diez. Antes había que tocar el SQL de la aplicación, pelearse con parámetros `enable_*` o instalar `pg_hint_plan`.
+
+PostgreSQL 19 incluye dos módulos escritos por Robert Haas: `pg_plan_advice`, para describir y forzar decisiones del planificador con un mini-lenguaje compacto, y `pg_stash_advice`, para asociar esas indicaciones a un identificador de consulta de forma automática sin tocar el código de la app.
+
+Para ver la cadena exacta que genera Postgres para una consulta, carga `pg_plan_advice` y pídesela a `EXPLAIN`:
+
+```sql
+LOAD 'pg_plan_advice';
+
+EXPLAIN (PLAN_ADVICE)
+SELECT o.id, o.customer_id
+FROM orders o
+WHERE o.customer_id = 42;
+```
+
+Salida real en nuestro contenedor Docker:
+
+```text
+ Bitmap Heap Scan on orders o  (cost=5.26..335.57 rows=125 width=12)
+   Recheck Cond: (customer_id = 42)
+   ->  Bitmap Index Scan on idx_orders_customer  (cost=0.00..5.22 rows=125 width=0)
+         Index Cond: (customer_id = 42)
+ Generated Plan Advice:
+   BITMAP_HEAP_SCAN(o)
+   NO_GATHER(o)
+```
+
+Fuerza un plan distinto en la sesión actual para probar alternativas:
+
+```sql
+SET pg_plan_advice.advice = 'SEQ_SCAN(o)';
+
+EXPLAIN (COSTS OFF)
+SELECT o.id, o.customer_id
+FROM orders o
+WHERE o.customer_id = 42;
+```
+
+```text
+          QUERY PLAN
+------------------------------
+ Seq Scan on orders o
+   Filter: (customer_id = 42)
+ Supplied Plan Advice:
+   SEQ_SCAN(o) /* matched */
+```
+
+Para aplicarlo automáticamente en producción sin redesplegar la aplicación, añade `pg_stash_advice` a `shared_preload_libraries`, reinicia Postgres y guarda la indicación con el `Query Identifier` que muestra `EXPLAIN (VERBOSE, PLAN_ADVICE)`:
+
+```sql
+CREATE EXTENSION pg_stash_advice;
+
+-- Obtén el Query Identifier con EXPLAIN (VERBOSE, PLAN_ADVICE)
+SELECT pg_create_advice_stash('prod');
+SELECT pg_set_stashed_advice('prod', 4904561378319701717, 'BITMAP_HEAP_SCAN(items)');
+ALTER DATABASE demo SET pg_stash_advice.stash_name = 'prod';
+```
+
+Mi opinión honesta: trata `pg_stash_advice` como un torniquete, no como rutina diaria. Es buenísimo cuando tienes una incidencia ardiendo y necesitas recuperar el plan anterior en 60 segundos. Dejar planes fijados para siempre solo esconde índices que faltan o estadísticas desactualizadas, y la propia documentación avisa de que evaluar plan advice añade coste al planificador incluso cuando no cambia el plan. Arregla la consulta o las estadísticas y borra el stash después.
+
+## Mejoras de SQL que de verdad vas a usar
+
+Buena parte de las novedades SQL de Postgres 19 eliminan código incómodo que llevábamos años rodeando con trucos. Si ya concentras varias piezas de tu stack en Postgres como cuento en [qué puede reemplazar Postgres](/es/que-reemplaza-postgres/), estas mejoras lo dejan aún más limpio.
+
+<Tabs>
+<Tab name="ON CONFLICT DO SELECT">
+
+El clásico patrón "obtener o crear" te obligaba antes a hacer dos viajes de red o un `DO UPDATE SET slug = EXCLUDED.slug` falso (que escribía tuplas muertas y WAL solo para que `RETURNING` devolviera la fila). Ahora existe `DO SELECT`:
+
+```sql
+CREATE TABLE tags (
+  id bigserial PRIMARY KEY,
+  slug text UNIQUE NOT NULL
+);
+
+INSERT INTO tags (slug) VALUES ('postgresql')
+ON CONFLICT (slug) DO SELECT RETURNING id, slug;
+
+-- La segunda ejecución detecta el conflicto y devuelve la fila sin escribir tuplas muertas
+INSERT INTO tags (slug) VALUES ('postgresql')
+ON CONFLICT (slug) DO SELECT RETURNING id, slug;
+```
+
+Si necesitas bloquear la fila existente durante el resto de la transacción, añade `FOR UPDATE` o `FOR SHARE` (`ON CONFLICT (slug) DO SELECT FOR UPDATE RETURNING id, slug`).
+
+</Tab>
+<Tab name="COPY JSON y ON_ERROR">
+
+`COPY TO` exporta ahora JSON directamente, línea por línea o envuelto en un único array con `FORCE_ARRAY`:
+
+```sql
+COPY (SELECT id, slug FROM tags) TO STDOUT (FORMAT json);
+-- {"id":1,"slug":"postgresql"}
+
+COPY (SELECT id, slug FROM tags) TO STDOUT (FORMAT json, FORCE_ARRAY);
+-- [{"id":1,"slug":"postgresql"}]
+```
+
+`COPY TO` también funciona directamente sobre tablas particionadas sin tener que envolverlas en `COPY (SELECT * FROM ...)`. Al importar, `COPY FROM` permite saltar varias cabeceras (`HEADER 2`) y convertir valores mal formados en `NULL` en lugar de abortar toda la carga:
+
+```sql
+CREATE TABLE imports (id int, amount int);
+
+COPY imports FROM STDIN (FORMAT csv, HEADER 2, ON_ERROR set_null);
+# Exported from billing
+id,amount
+1,500
+2,not_a_number
+3,750
+\.
+-- NOTICE:  in 1 row, columns were set to null due to data type incompatibility
+-- La fila 2 entra con amount = NULL sin tumbar la importación
+```
+
+</Tab>
+<Tab name="Ventanas IGNORE NULLS">
+
+Rellenar huecos en series temporales con SQL solía requerir trucos feos con `COUNT()` particionados. Ahora `lead()`, `lag()`, `first_value()`, `last_value()` y `nth_value()` aceptan `IGNORE NULLS`:
+
+```sql
+CREATE TABLE metrics (day date, price numeric);
+INSERT INTO metrics VALUES
+  ('2026-11-01', 100),
+  ('2026-11-02', NULL),
+  ('2026-11-03', NULL),
+  ('2026-11-04', 115),
+  ('2026-11-05', NULL);
+
+SELECT day,
+       price,
+       last_value(price) IGNORE NULLS OVER (ORDER BY day) AS filled_price
+FROM metrics
+ORDER BY day;
+```
+
+Las filas 2 y 3 arrastran `100` limpiamente; la fila 5 arrastra `115`.
+
+</Tab>
+<Tab name="jsonpath, random y base64url">
+
+Tres pequeños añadidos que quitan código pegamento:
+
+```sql
+-- Nuevos métodos de texto en jsonpath: ltrim, rtrim, btrim, lower, upper, initcap, replace, split_part
+SELECT jsonb_path_query(
+  '{"email": "  Admin@Bitdoze.COM  "}',
+  '$.email.btrim().lower()'
+);
+-- "admin@bitdoze.com"
+
+-- Fechas y timestamps aleatorios sin aritmética de epochs
+SELECT random('2026-01-01'::date, '2026-12-31'::date);
+
+-- base64url apto para URLs y base32hex ordenable de serie
+SELECT encode(E'\\x68656c6c6f3f'::bytea, 'base64url');
+-- aGVsbG8_
+```
+
+</Tab>
+</Tabs>
+
+## Replicación y réplicas: slots lógicos sin reinicio y WAIT FOR LSN
+
+Dos dolores de cabeza clásicos de la replicación desaparecen en PostgreSQL 19.
+
+### Activar replicación lógica sin reiniciar Postgres
+
+Antes de la 19, configurar CDC o una réplica lógica implicaba cambiar `wal_level = logical` y reiniciar el servidor. Ahora, mientras `wal_level` esté en `replica` (el valor por defecto), crear el primer slot de replicación lógica eleva automáticamente `effective_wal_level` a `logical`. Borras el último slot y vuelve solo a `replica`.
+
+Esta es la secuencia exacta que ejecuté en Docker sin ningún reinicio:
+
+```sql
+SHOW wal_level;           -- replica
+SHOW effective_wal_level; -- replica
+
+SELECT slot_name, lsn FROM pg_create_logical_replication_slot('test_slot', 'pgoutput');
+SHOW effective_wal_level; -- logical
+
+SELECT pg_drop_replication_slot('test_slot');
+SHOW effective_wal_level; -- replica
+```
+
+La replicación lógica suma además dos peticiones pendientes desde Postgres 10:
+
+- **Replicación de secuencias** con `CREATE PUBLICATION seq_pub FOR ALL SEQUENCES;` y `ALTER SUBSCRIPTION ... REFRESH SEQUENCES`. Los failovers ya no se arriesgan a colisiones de claves primarias por secuencias desfasadas.
+- **Excluir tablas ruidosas** dentro de `FOR ALL TABLES` con `EXCEPT`:
+
+```sql
+CREATE PUBLICATION app_pub FOR ALL TABLES EXCEPT (TABLE audit_scratch);
+```
+
+Fíjate en que `TABLE` va *dentro* de los paréntesis. Al primer intento en `psql` lo puse fuera y saltó error de sintaxis, así que quédate con la forma de arriba.
+
+### Consistencia read-your-writes en réplicas con WAIT FOR LSN
+
+Cuando una aplicación escribe en el primario y lee de una réplica en streaming, siempre existe una pequeña ventana de retardo en la que un usuario guarda un cambio, recarga y ve el dato viejo. PostgreSQL 19 añade `WAIT FOR LSN` en réplicas para que la sesión espere hasta que el WAL haya reproducido la posición exacta de la escritura.
+
+En el primario tras escribir:
+
+```sql
+UPDATE orders SET payload = 'shipped' WHERE id = 101;
+SELECT pg_current_wal_insert_lsn();
+-- devuelve p. ej. 0/038D7788 (guárdalo en sesión o cookie firmada)
+```
+
+En la réplica antes de leer:
+
+```sql
+WAIT FOR LSN '0/038D7788' WITH (TIMEOUT '100ms', NO_THROW);
+SELECT payload FROM orders WHERE id = 101;
+```
+
+Sin `NO_THROW`, agotar el timeout lanza un error para que tu aplicación pueda redirigir la lectura al primario. También puedes pasar `MODE` (`standby_replay`, `standby_write`, `standby_flush` o `primary_flush`).
+
+## Rendimiento, monitorización y TLS SNI en servidor
+
+### Velocidad y valores por defecto más sensatos
+
+Desactivar `jit` por defecto es el cambio que más notarán los servidores autoalojados. En consultas pequeñas y medianas, compilar con LLVM JIT solía gastar más CPU de la que ahorraba en cuanto la estimación cruzaba `jit_above_cost`. Dejarlo apagado quita un ajuste que yo metía en todos los `postgresql.conf` de producción desde Postgres 14. Si mueves un data warehouse o agregaciones analíticas pesadas, activa `jit = on` para ese rol o base de datos.
+
+Cualquier compilación de PostgreSQL 19 con soporte LZ4, incluidas las imágenes oficiales de Docker, usa ahora `default_toast_compression = lz4` en lugar de `pglz`. Las columnas anchas de tipo `text` y `jsonb` se comprimen y descomprimen mucho más rápido casi sin gasto de CPU.
+
+En almacenamiento, PostgreSQL 19 amplía la capa de E/S asíncrona de la 18: `io_method = worker` ajusta ahora los workers de fondo automáticamente entre `io_min_workers` (2) e `io_max_workers` (8), y cierra los inactivos tras `io_worker_idle_timeout` (60 segundos). Autovacuum también gana limpieza paralela de índices y un sistema de puntuación que puedes consultar en `pg_stat_autovacuum_scores`. Un detalle: `autovacuum_max_parallel_workers` viene en `0`, así que súbelo (o configura `autovacuum_parallel_workers` por tabla) si tienes tablas con muchos índices que se quedan atrás.
+
+Otras mejoras llegan sin tocar nada: `NOT IN (SELECT ...)` se convierte en anti-join cuando las columnas son `NOT NULL` (comprobado como `Merge Anti Join` en `EXPLAIN` sobre nuestra tabla `orders`), algunas agregaciones pueden ejecutarse antes de los joins para reducir filas intermedias, las comprobaciones de claves foráneas se reescribieron haciendo las inserciones masivas casi el doble de rápidas en pruebas, y `NOTIFY` ahora despierta solo a los backends suscritos al canal correspondiente.
+
+### Observabilidad y TLS SNI
+
+Depurar E/S lenta y bloqueos requiere menos adivinación en la 19. `EXPLAIN (ANALYZE, BUFFERS, IO)` imprime métricas de prefetch asíncrono directamente en el plan (`Prefetch: avg=1.00 max=1 capacity=94`), `pg_stat_lock` registra conteos y tiempos por tipo de bloqueo, y `pg_stat_recovery` muestra el estado de recuperación de la réplica. Además `log_lock_waits` viene en `on` por defecto, algo que llevaba años pendiente.
+
+Para servidores multi-inquilino llega por fin TLS SNI en el servidor mediante `PGDATA/pg_hosts.conf`. Una sola instancia de Postgres puede presentar certificados TLS distintos según el dominio al que se conecte el cliente.
+
+## Cambios incompatibles y checklist de actualización
+
+Los saltos de versión mayor siguen pidiendo `pg_dumpall`, `pg_upgrade` o replicación lógica. Antes de subir un clúster 16, 17 o 18 a la 19, repasa esta lista:
+
+<ListCheck>
+<ul>
+<li><b>Haz una copia fuera del servidor primero.</b> Si despliegas con Dokploy, deja automatizados los volcados con mi guía de [backups de Dokploy a Cloudflare R2](/es/backups-dokploy-cloudflare-r2/) antes de tocar la etiqueta del contenedor.</li>
+<li><b>Elimina <code>io_workers</code> de tus configs personalizados.</b> Se retiró en la 19; cámbialo por <code>io_min_workers</code> e <code>io_max_workers</code> si ajustaste AIO en PG 18.</li>
+<li><b>Revisa tus extensiones antes de actualizar.</b> Si dependes de pgvector (mira mi guía para [desplegar pgvector y pgAdmin en Docker](/es/desplegar-pgvector-pgadmin-docker/)), PostGIS o TimescaleDB, confirma primero que tu imagen Docker o paquete tiene compilación para PostgreSQL 19. El núcleo salió ayer; las extensiones suelen tardar unos días o semanas.</li>
+<li><b>Comprueba índices <code>btree_gist</code> en columnas <code>inet</code>/<code>cidr</code>.</b> Esas clases de operadores tenían fallos y <code>pg_upgrade</code> rechazará el clúster si existen. Bórralos y recréalos con GiST estándar antes de migrar.</li>
+<li><b>Revisa contraseñas MD5 y RADIUS.</b> La autenticación RADIUS se eliminó por completo. MD5 sigue funcionando de momento, pero genera avisos (<code>md5_password_warnings = on</code>) y desaparecerá; migra esos roles a <code>scram-sha-256</code>.</li>
+<li><b>Ojo con las rutas de volumen en Docker.</b> Si saltas desde PG 17 o anterior en Docker, toca pasar de <code>/var/lib/postgresql/data</code> a <code>/var/lib/postgresql</code> además del dump/restore o <code>pg_upgrade</code>.</li>
+<li><b>Reindexa búsqueda de texto completo y <code>pg_trgm</code> en locales que no sean libc.</b> Si usas proveedores ICU o builtin, la clasificación de caracteres cambió en la 19 y las notas recomiendan reindexar FTS/trigramas y recalcular columnas <code>tsvector</code> almacenadas tras <code>pg_upgrade</code>.</li>
+<li><b>Revisa <code>max_locks_per_transaction</code> y <code>jit</code>.</b> Si configuraste <code>max_locks_per_transaction</code> a mano en versiones previas, duplícalo para conservar la misma capacidad. Si tienes cargas analíticas que dependían de JIT, pon <code>jit = on</code> explícitamente.</li>
+</ul>
+</ListCheck>
+
+## ¿Conviene actualizar hoy?
+
+Para desarrollo local, CI y proyectos nuevos que no dependan de extensiones externas sin paquete para la 19 todavía, sí. `postgres:19-alpine` ya está en Docker Hub y encaja sin problemas junto al resto de tu [stack de contenedores Docker en casa](/es/contenedores-docker-servidor-casa/).
+
+En bases de datos de producción, espera a la 19.1 salvo que estés peleando ahora mismo con un problema que la 19 resuelve de raíz, como tablas infladas que no puedes bloquear con `VACUUM FULL` o un primario que no puedes reiniciar para activar replicación lógica. Toda versión `.0` de Postgres pule casos borde en su primera actualización menor, y las imágenes de extensiones como `pgvector` y PostGIS suelen ponerse al día en ese mismo margen. Aprovecha estas semanas para restaurar una copia de tu volcado de producción en `postgres:19-alpine` y comprobar tus planes con `jit = off`.
+
+## Preguntas frecuentes
+
+<Accordion label="¿REPACK (CONCURRENTLY) sustituye por completo a la extensión pg_repack?" group="faq" expanded="true">
+En la mayoría de tablas, sí. Recupera espacio muerto y puede reordenar filas según un índice sin bloquear lecturas ni escrituras, todo desde el núcleo sin compilar ni mantener una extensión externa. Ten presentes dos límites: la tabla sigue necesitando un índice de identidad (clave primaria o índice único no nulo) y necesitas espacio libre equivalente a la tabla más sus índices mientras dura la copia.
+</Accordion>
+
+<Accordion label="¿Desactivar JIT por defecto hará más lenta mi base de datos?" group="faq">
+Para aplicaciones web, backends SaaS y herramientas autoalojadas (OLTP), apagar JIT suele mejorar la latencia de cola, no empeorarla. Muchos equipos ya forzaban `jit = off` en PG 14–18 porque el tiempo de compilación penalizaba consultas cortas y medias. Solo data warehouses y consultas analíticas pesadas suelen beneficiarse de reactivar `jit = on`.
+</Accordion>
+
+<Accordion label="¿Puedo actualizar directo de PostgreSQL 16 o 17 a 19 en Docker?" group="faq">
+Sí, mediante `pg_dumpall` y restauración en un contenedor limpio de `postgres:19-alpine`, o usando `pg_upgrade` con una imagen multiversión. No puedes limitarte a cambiar la etiqueta en `compose.yaml` apuntando PostgreSQL 19 a un directorio de datos de la 16, 17 o 18. Recuerda que PostgreSQL 14 llegó al fin de soporte el 12 de noviembre de 2026, así que conviene priorizar la salida de la 14.
+</Accordion>
+
+<Accordion label="¿Cómo activo el autovacuum paralelo en PostgreSQL 19?" group="faq">
+El vacuum paralelo de índices en autovacuum viene desactivado (`autovacuum_max_parallel_workers = 0`). Configura `autovacuum_max_parallel_workers` con un número mayor que cero (por ejemplo `2` o `4`, dentro de `max_parallel_workers`) en `postgresql.conf` o con `ALTER SYSTEM` y recarga. Puedes ver qué tablas prioriza autovacuum consultando `pg_stat_autovacuum_scores`.
+</Accordion>
