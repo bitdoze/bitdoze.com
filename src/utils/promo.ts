@@ -10,3 +10,24 @@ export function shouldShowCarrdPromo(tags: string[] = [], categories: string[] =
     (tags.includes("carrd") || categories.includes("web-development"))
   );
 }
+
+// Site-wide Black Friday homelab deals promo — same sale window as Carrd.
+// Renders on every post except the deals articles themselves (all locales)
+// and posts where the more specific Carrd promo already shows.
+export const BF_PROMO_END = new Date("2026-12-02T00:00:00Z");
+
+const BF_PROMO_EXCLUDED_KEYS = new Set([
+  "black-friday-home-server-deals",
+  "carrd-black-friday-2026",
+]);
+
+export function shouldShowBFDealsPromo(
+  translationKey = "",
+  carrdPromoShowing = false
+): boolean {
+  return (
+    new Date() < BF_PROMO_END &&
+    !carrdPromoShowing &&
+    !BF_PROMO_EXCLUDED_KEYS.has(translationKey)
+  );
+}
