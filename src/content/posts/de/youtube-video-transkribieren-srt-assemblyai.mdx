@@ -1,0 +1,391 @@
+---
+date: 2026-11-23
+translationKey: "transcribe-youtube-video-srt-assemblyai"
+title: "YouTube-Video als Text und SRT transkribieren mit AssemblyAI"
+meta_title: "YouTube zu SRT: Videos transkribieren mit yt-dlp und AssemblyAI"
+description: "yt-dlp und AssemblyAI machen aus einem YouTube-Video Transkript, SRT, VTT, Untertitel mit Sprecherlabels und Kapitel. 9-Minuten-Video: 47 s, 4 Cent."
+image: "@assets/images/26/11/transcribe-youtube-video-srt-assemblyai.webp"
+imageAlt: "Schriftzug YouTube to SRT with AssemblyAI über einer YouTube-Logo-Karte mit Pfeil auf das AssemblyAI-Logo und eine SRT-Datei auf hellem Hintergrund"
+categories: ["ai"]
+authors:
+  - Dragos
+tags: ["assemblyai", "subtitles", "yt-dlp"]
+canonical: https://www.bitdoze.com/de/youtube-video-transkribieren-srt-assemblyai/
+quickAnswer: "./aai-srt.sh VIDEO_URL → transcript.txt, subtitles.srt, subtitles.vtt, speakers.srt, chapters.txt (9-Minuten-Video: 47 s insgesamt, etwa 4 Cent)"
+testedOn: ["Ubuntu 24.04", "yt-dlp 2026.08.19", "ffmpeg 6.1.1", "AssemblyAI STT-3.7"]
+timeToComplete: "10 min"
+related: ["de/assemblyai-review", "de/assemblyai-vs-deepgram", "de/openai-whisper-alternativen"]
+next: "de/assemblyai-review"
+---
+
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+*Hinweis: Dieser Guide enthält Referral-Links. Wenn du darüber kaufst, erhalte ich möglicherweise eine Provision ohne Mehrkosten für dich.*
+
+Lade die Tonspur mit `yt-dlp` herunter, schicke sie an [AssemblyAI](https://go.bitdoze.com/assemblyai) und hole Transkript, SRT und VTT ab. Bei einem gemeinfreien 9-Minuten-Film dauerte der ganze Lauf 47 Sekunden und kostete etwa 4 Cent.
+
+Das Skript schreibt außerdem ein SRT mit Sprecherlabels und eine Kapitelliste. Beim Sechs-Dateien-Genauigkeitstest hinter meinem [AssemblyAI-vs-Deepgram-Vergleich](/de/assemblyai-vs-deepgram/) machte dieses Modell 3 Fehler auf 562 Wörter.
+
+Eines solltest du vor den Befehlen wissen. YouTube hat `yt-dlp` von meinem Testserver mit dem Fehler "Sign in to confirm you're not a bot" abgewiesen. Deshalb habe ich alles auf einem gemeinfreien Film aus dem Internet Archive durchgespielt, den `yt-dlp` mit demselben Befehl lädt. Die Lösung für den YouTube-Fehler steht in Schritt 1, und ich markiere die zwei weiteren Nur-YouTube-Schritte, die ich von hier nicht ausführen konnte.
+
+## Was du brauchst
+
+- `yt-dlp` zum Herunterladen des Videos. Ich habe Release 2026.08.19 verwendet.
+- `ffmpeg` zum Extrahieren der Tonspur und zum Einbrennen der Untertitel.
+- `jq`, `curl` und `python3` für das Skript.
+- Einen API-Key von [AssemblyAI](https://go.bitdoze.com/assemblyai). Neue Konten bekommen 50 $ Guthaben ohne Karte, etwa 238 Stunden Video zum Satz, den dieser Guide verwendet.
+
+```bash
+pip install -U yt-dlp          # oder ohne Installation ausführen: uvx --from yt-dlp yt-dlp
+sudo apt install ffmpeg jq curl python3
+export ASSEMBLYAI_API_KEY=dein_key
+```
+
+## Schritt 1: Video mit yt-dlp herunterladen
+
+```bash
+yt-dlp -f "bv*[height<=720]+ba/b[height<=720]/b" --merge-output-format mp4 \
+  -o "%(id)s/%(id)s.%(ext)s" VIDEO_URL
+```
+
+Der Formatstring fordert das beste Video bis 720p plus den besten Ton, in einer MP4-Datei zusammengeführt. Untertitel brauchen keine 1080p, und eine kleinere Datei lädt schneller hoch. `-o "%(id)s/%(id)s.%(ext)s"` legt jedes Video in einen Ordner mit seiner YouTube-ID, was die Ausgaben eines Batch-Laufs getrennt hält.
+
+Antwortet YouTube mit "Sign in to confirm you're not a bot", hängt die Prüfung an deiner IP-Adresse. Rechenzentrum- und VPN-Adressen stoßen oft darauf. Füge `--cookies-from-browser chrome` (oder `firefox`) hinzu, damit `yt-dlp` die Sitzung eines Browsers wiederverwendet, in dem du angemeldet bist.
+
+## Schritt 2: Eine kleine Tonspur extrahieren
+
+```bash
+ffmpeg -nostdin -y -i VIDEO.mp4 -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k audio.mp3
+```
+
+Der 9-minütige Testfilm ist eine 58 MB große MP4-Datei. Ihre Mono-MP3 mit 16 kHz ist 4,4 MB groß, und Spracherkennung profitiert weder von Stereo noch von 44,1 kHz. `-nostdin` spielt eine Rolle, wenn du das Skript aus einer Datei speist: Ohne diesen Flag liest `ffmpeg` die nächste Zeile deiner URL-Liste als Tastaturbefehl und bricht ab.
+
+Du kannst diesen Schritt überspringen und die MP4-Datei selbst hochladen. Ich habe es mit der 58-MB-Datei probiert, und der Job war nach 12 Sekunden fertig. Bei einer langsamen Verbindung dominiert aber der Upload den Lauf.
+
+## Schritt 3: Tonspur hochladen und Job starten
+
+![Diagramm der Pipeline von Video zu SRT: yt-dlp lädt das Video in einen Ordner, ffmpeg extrahiert eine Mono-Tonspur, das Skript lädt sie zu AssemblyAI hoch und startet einen Job mit Sprecherlabels und Kapitelzusammenfassungen, dann schreibt es Transkript, SRT, VTT, SRT mit Sprecherlabels und eine Kapitelliste](@assets/images/26/11/youtube-srt-pipeline.svg)
+
+Die Pre-recorded-API von AssemblyAI ist eine Job-Warteschlange: Datei hochladen, Job abschicken, dann pollen, bis der Status `completed` ist. `jq -n --arg` baut den JSON-Body und erspart dir die escapten Anführungszeichen, die du in `curl -d`-Strings brauchst:
+
+```bash
+api=https://api.assemblyai.com/v2
+auth="authorization: $ASSEMBLYAI_API_KEY"
+
+url=$(curl -s -X POST "$api/upload" -H "$auth" --data-binary @audio.mp3 \
+  | jq -r '.upload_url // empty')
+job=$(jq -n --arg url "$url" '{
+  audio_url: $url,
+  speech_models: ["assemblyai-stt-3-7"],
+  speaker_labels: true,
+  speech_understanding: {request: {summarization: {summary_type: "paragraph"}}}
+}')
+tid=$(curl -s -X POST "$api/transcript" -H "$auth" -H "content-type: application/json" \
+  -d "$job" | jq -r .id)
+```
+
+Drei Einstellungen erledigen die Arbeit:
+
+| Einstellung | Was sie tut |
+|---|---|
+| `speech_models` | Benennt das Modell. AssemblyAIs Docs sagen, dass der Standard zwischen Gratis- und Bezahlkonten abweichen kann, also setze ihn |
+| `speaker_labels` | Fügt jedem Wort einen Buchstaben pro Sprecher hinzu, den das SRT mit Sprecherlabels braucht |
+| `speech_understanding.request.summarization` | Zerlegt das Video in Abschnitte mit Zeitstempel, Schlagzeile und Absatz |
+
+## Schritt 4: Transkript, SRT und VTT einsammeln
+
+```bash
+while :; do
+  curl -s "$api/transcript/$tid" -H "$auth" > transcript.json
+  case "$(jq -r .status transcript.json)" in
+    completed) break ;;
+    error) jq -r .error transcript.json >&2; exit 1 ;;
+  esac
+  sleep 3
+done
+
+jq -r .text transcript.json > transcript.txt
+curl -s "$api/transcript/$tid/srt?chars_per_caption=32" -H "$auth" > subtitles.srt
+curl -s "$api/transcript/$tid/vtt" -H "$auth" > subtitles.vtt
+```
+
+Beim 9-Minuten-Film dauerte der Upload 2 Sekunden, und der Job war 12 Sekunden später fertig. Das Transkript ist einfacher Text mit Satzzeichen. Der SRT-Endpunkt schreibt Cues mit bis zu 32 Zeichen:
+
+```text
+11
+00:00:34,680 --> 00:00:37,190
+Duck and cover.
+
+12
+00:00:39,020 --> 00:00:40,700
+Be sure and remember what Bert
+```
+
+Ändere `chars_per_caption` für längere oder kürzere Zeilen. Die VTT-Datei enthält denselben Text in WebVTT, dem Format, das HTML-Player wollen.
+
+## Untertitel mit Sprecherlabels: Cues dürfen nicht über Sprecherwechsel laufen
+
+Das einfache SRT teilt Zeilen nach Zeichenanzahl, daher kann ein Cue das Ende des Satzes eines Sprechers und den Anfang des nächsten enthalten. Bei einem Testclip mit zwei Stimmen entstand `staging? Yes, but the smoke`, wo das erste Wort Sprecher A gehört und der Rest Sprecher B.
+
+![Diagramm, das zwei Untertitel-Cues für dieselbe Aufnahme vergleicht: Das SRT nach Zeichenanzahl zeigt eine Zeile "staging? Yes, but the smoke", die zwei Sprecher mischt, während das SRT mit Sprecherlabels zwei Cues zeigt, einen mit Präfix A, der am Sprecherwechsel endet, und einen mit Präfix B](@assets/images/26/11/youtube-srt-speaker-cues.svg)
+
+Das Transkript-JSON trägt bereits auf jedem Wort einen Sprecherbuchstaben, mit Zeiten in Millisekunden. Dieses Skript macht aus diesen Wörtern Cues, die an jedem Sprecherwechsel und an Satzenden enden:
+
+```python
+# Verwendung: python3 speaker_srt.py transcript.json > speakers.srt
+import json
+import sys
+import textwrap
+
+transcript = json.load(open(sys.argv[1], encoding="utf-8"))
+cues, current = [], []
+
+
+def flush():
+    if current:
+        cues.append(list(current))
+        current.clear()
+
+
+for word in transcript.get("words") or []:
+    text = " ".join(w["text"] for w in current)
+    if current and (
+        word.get("speaker") != current[0].get("speaker")
+        or word["end"] - current[0]["start"] > 7000
+        or len(text) > 84
+        or (len(text) >= 70 and current[-1]["text"].endswith((".", "?", "!")))
+    ):
+        flush()
+    current.append(word)
+flush()
+
+
+def stamp(ms):
+    seconds, ms = divmod(int(ms), 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{ms:03d}"
+
+
+for index, cue in enumerate(cues, 1):
+    speaker = cue[0].get("speaker") or "?"
+    lines = textwrap.wrap(" ".join(w["text"] for w in cue), width=42) or [""]
+    print(index)
+    print(f"{stamp(cue[0]['start'])} --> {stamp(cue[-1]['end'])}")
+    for line in [f"[{speaker}] " + lines[0]] + lines[1:]:
+        print(line)
+    print()
+```
+
+Vier Regeln bauen jeden Cue. Ein Sprecherwechsel beendet ihn. Das tun auch 7 Sekunden und mehr als 84 Zeichen. Ein Satzende beendet ihn ebenfalls, sobald der Cue 70 Zeichen enthält. Beim Testfilm schrieb er 95 Cues, die jeweils 3 bis 7 Sekunden liefen:
+
+```text
+4
+00:00:21,140 --> 00:00:27,230
+[A] He'd duck and cover, duck and cover.
+
+5
+00:00:27,770 --> 00:00:30,780
+[B] He did what we all must learn to do.
+```
+
+Lass das Präfix `[{speaker}] ` weg, wenn dein Video nur einen Sprecher hat. Bei einer Testdatei mit fünf Sprechern stimmten die Labels in allen zehn Turns, das Präfix kannst du Zuschauern also zeigen.
+
+## Kapitel und eine Zusammenfassung für die Videobeschreibung
+
+Das Summarization-Add-on liefert Abschnitte mit Startzeit, Schlagzeile und Absatz. Eine `jq`-Zeile macht daraus das Format, das YouTube liest:
+
+```bash
+jq -r '(.speech_understanding.response.summarization.summary // [])[] |
+  "\(.start / 60000 | floor | tostring | if length < 2 then "0" + . else . end):" +
+   "\(.start / 1000 | floor % 60 | tostring | if length < 2 then "0" + . else . end) \(.headline)"' \
+  transcript.json > chapters.txt
+```
+
+Für den Testfilm schrieb sie:
+
+```text
+00:00 Bert Introduces The Need To Prepare For Atomic Danger
+02:10 Recognizing The Atomic Flash And Practicing Protective Cover
+03:53 Following Warnings And Acting Quickly Wherever The Flash Appears
+05:46 Everyday Demonstrations Teach Children To Duck And Cover
+07:38 Stay Covered And Remember The Essential Safety Response
+```
+
+Füge das oben in die Beschreibung ein, und YouTube macht anklickbare Kapitel daraus. YouTube verlangt mindestens drei Zeitstempel in richtiger Reihenfolge, den ersten bei `00:00`, und Kapitel von mindestens 10 Sekunden. Prüfe die erste Zeile: Bei einem zweiten Film begann der früheste Abschnitt bei `00:25`, also habe ich von Hand eine Zeile `00:00 Intro` ergänzt. Die Schlagzeilen kommen von einem LLM, daher lieferten drei Läufe auf dem Testfilm 4, 5 und 5 Abschnitte mit unterschiedlichem Wortlaut, während die Grenzen nah beieinander blieben. Lies sie vor dem Veröffentlichen. Das Feld `text` jedes Abschnitts in `transcript.json` enthält eine Zusammenfassung in einem Absatz, die du für den Rest der Beschreibung verwenden kannst.
+
+## Untertitel einbrennen oder das SRT zu YouTube hochladen
+
+Für einen Player oder eine Plattform, die keine Begleitdateien liest, brenne das SRT mit Sprecherlabels ins Video ein:
+
+```bash
+ffmpeg -nostdin -y -i VIDEO.mp4 \
+  -vf "subtitles=speakers.srt:force_style='FontName=DejaVu Sans,FontSize=18,Outline=2'" \
+  -c:a copy subbed.mp4
+```
+
+Das encodiert das Video neu und kopiert den Ton. Der 9-Minuten-Film in 480p dauerte 40 Sekunden, und ein gegriffener Frame zeigte unten `[C] Be sure and remember what Bert the Turtle just did`.
+
+Für deinen eigenen YouTube-Upload lass das Video sauber und hänge die Datei an. Laut der [Hilfeseite von YouTube](https://support.google.com/youtube/answer/2734796?hl=de) öffnest du YouTube Studio und wählst Untertitel aus. Such das Video aus und klicke auf SPRACHE HINZUFÜGEN. Dann klickst du unter "Untertitel" auf HINZUFÜGEN und wählst Datei hochladen mit Zeit. Diesen Schritt habe ich aus meiner Testsitzung nicht ausgeführt.
+
+## Eine Playlist oder eine Liste von Videos abarbeiten
+
+Speichere eine URL pro Zeile und loope:
+
+```bash
+while read -r url; do ./aai-srt.sh "$url"; done < urls.txt
+```
+
+Für eine YouTube-Playlist liste zuerst die Video-IDs auf und baue die URLs neu:
+
+```bash
+yt-dlp --flat-playlist --print "%(id)s" \
+  "https://www.youtube.com/playlist?list=PLAYLIST_ID" \
+  | sed 's#^#https://www.youtube.com/watch?v=#' > urls.txt
+```
+
+Ich habe die Schleife mit zwei Zeichentrickfilmen aus dem Internet Archive von 9 und 9,5 Minuten laufen lassen. Beide waren in 117 Sekunden fertig, inklusive einem Download, und der zweite kam mit fünf Sprechern auf 89 Cues zurück. Der Playlist-Befehl ist Standard-Nutzung von `yt-dlp`, die ich von diesem Server aus nicht ausführen konnte.
+
+## Das komplette Skript
+
+```bash
+#!/usr/bin/env bash
+# Macht aus einem Video Transkript, SRT, VTT, SRT mit Sprecherlabels und Kapitelliste.
+# Verwendung: ./aai-srt.sh VIDEO_URL
+set -euo pipefail
+: "${ASSEMBLYAI_API_KEY:?export ASSEMBLYAI_API_KEY first}"
+api=https://api.assemblyai.com/v2
+auth="authorization: $ASSEMBLYAI_API_KEY"
+
+# 1. Video herunterladen, 720p oder weniger, in einen Ordner mit seiner ID
+id=$(yt-dlp -q --no-warnings --no-update --no-simulate --print "pre_process:%(id)s" \
+  -f "bv*[height<=720]+ba/b[height<=720]/b" --merge-output-format mp4 \
+  -o "%(id)s/%(id)s.%(ext)s" "$1")
+dir="$id"
+video=$(find "$dir" -maxdepth 1 -type f -name "$id.*" | head -n 1)
+
+# 2. Eine kleine Mono-Tonspur für den Upload behalten
+ffmpeg -nostdin -y -loglevel error -i "$video" -vn -ac 1 -ar 16000 \
+  -c:a libmp3lame -b:a 64k "$dir/audio.mp3"
+
+# 3. Tonspur hochladen und einen Job mit Sprecherlabels und Kapitelzusammenfassungen starten
+url=$(curl -s -X POST "$api/upload" -H "$auth" --data-binary @"$dir/audio.mp3" \
+  | jq -r '.upload_url // empty')
+[ -z "$url" ] && { echo "upload failed" >&2; exit 1; }
+job=$(jq -n --arg url "$url" '{
+  audio_url: $url,
+  speech_models: ["assemblyai-stt-3-7"],
+  speaker_labels: true,
+  speech_understanding: {request: {summarization: {summary_type: "paragraph"}}}
+}')
+tid=$(curl -s -X POST "$api/transcript" -H "$auth" -H "content-type: application/json" \
+  -d "$job" | jq -r '.id // empty')
+[ -z "$tid" ] && { echo "submit failed" >&2; exit 1; }
+
+# 4. Auf den Job warten
+while :; do
+  curl -s "$api/transcript/$tid" -H "$auth" > "$dir/transcript.json"
+  case "$(jq -r .status "$dir/transcript.json")" in
+    completed) break ;;
+    error) jq -r .error "$dir/transcript.json" >&2; exit 1 ;;
+  esac
+  sleep 3
+done
+
+# 5. Ausgaben einsammeln
+jq -r .text "$dir/transcript.json" > "$dir/transcript.txt"
+curl -s "$api/transcript/$tid/srt?chars_per_caption=32" -H "$auth" > "$dir/subtitles.srt"
+curl -s "$api/transcript/$tid/vtt" -H "$auth" > "$dir/subtitles.vtt"
+jq -r '(.speech_understanding.response.summarization.summary // [])[] |
+  "\(.start / 60000 | floor | tostring | if length < 2 then "0" + . else . end):" +
+   "\(.start / 1000 | floor % 60 | tostring | if length < 2 then "0" + . else . end) \(.headline)"' \
+  "$dir/transcript.json" > "$dir/chapters.txt"
+python3 speaker_srt.py "$dir/transcript.json" > "$dir/speakers.srt"
+ls -la "$dir"
+```
+
+Zwei Details in Schritt 1 haben mich je einen fehlgeschlagenen Batch gekostet. `--print` allein versetzt `yt-dlp` in den Simulationsmodus, es wird also nichts heruntergeladen; `--no-simulate` schaltet den Download wieder ein. Und `pre_process` gibt die ID vor dem Download aus, was zählt, wenn du ein Video wiederholst, das schon auf der Platte liegt.
+
+Der Lauf endet mit acht Dateien im Video-Ordner:
+
+| Datei | Inhalt |
+|---|---|
+| `VIDEO_ID.mp4` | Das heruntergeladene Video |
+| `audio.mp3` | Die hochgeladene Tonspur |
+| `transcript.json` | Volles Ergebnis: Text, Wörter mit Zeiten und Sprechern, Zusammenfassungsabschnitte |
+| `transcript.txt` | Transkript als einfacher Text |
+| `subtitles.srt`, `subtitles.vtt` | Cues mit 32 Zeichen in beiden Formaten |
+| `speakers.srt` | Cues, die an Sprecherwechseln enden, mit einem Präfix im Stil `[A]` |
+| `chapters.txt` | Zeitstempel und Schlagzeilen für die Videobeschreibung |
+
+<Button text="AssemblyAI testen (50 $ gratis)" link="https://go.bitdoze.com/assemblyai" variant="solid" color="blue" size="md" icon="arrow-right" />
+
+## Was kostet es, ein Video zu transkribieren?
+
+Etwa 4 Cent für ein 9-Minuten-Video mit Sprecherlabels und Kapiteln, oder 0,25 $ pro Videostunde. Das Skript nutzt drei kostenpflichtige Teile: Transkription zu 0,21 $ pro Stunde, Sprecherlabels zu 0,02 $ und Zusammenfassung zu 0,02 $. Schalte die Zusammenfassung aus und spare 0,02 $ pro Stunde.
+
+| Videolänge | Nur Transkript | Mit Sprecherlabels und Kapiteln |
+|---|---|---|
+| 9 Minuten (der Testfilm) | 0,03 $ | 0,04 $ |
+| 30 Minuten | 0,11 $ | 0,13 $ |
+| 60 Minuten | 0,21 $ | 0,25 $ |
+| 5 Stunden | 1,05 $ | 1,25 $ |
+
+AssemblyAI rechnet pro Audiostunde ab, das 58-MB-Video und seine 4,4-MB-Tonspur kosten also gleich viel.
+
+## Fehlerbehebung
+
+<Notice type="warning" title="yt-dlp: Sign in to confirm you're not a bot">
+Füge `--cookies-from-browser chrome` oder `firefox` hinzu. Die Prüfung folgt deiner IP-Adresse, ein VPN-Exit-Knoten kann sie also auch auslösen.
+</Notice>
+
+<Notice type="warning" title="upload failed oder submit failed">
+Prüfe `echo "$ASSEMBLYAI_API_KEY"` in derselben Shell und führe `curl -s -X POST "$api/upload" -H "$auth" --data-binary @audio.mp3` von Hand aus. Eine 401 deutet auf den Key. Der Upload-Endpunkt nimmt Dateien bis 2,2 GB, ein längeres Video geht also als öffentliche URL in `audio_url` oder als extrahierte Tonspur rein.
+</Notice>
+
+<Notice type="warning" title="language_detection cannot be performed on files with no spoken audio">
+Der Ton enthält keine Sprache. Eine Wochenschau von 1937 in meinem Batch schlug so fehl. Mit `language_code` auf `en` wurde dieselbe Datei mit leerem Transkript fertig, es gab also nichts zu transkribieren.
+</Notice>
+
+<Notice type="info" title="Lieder und Intros werden zu Liedtext">
+Der Testfilm beginnt mit einem Jingle, und das Transkript startet mit `Dum, dum, dum, diddle dum dum`. Überspringe ihn mit `ffmpeg -ss 00:00:21 -i audio.mp3 -c copy lead-in.mp3` und lade diese Datei hoch.
+</Notice>
+
+## Häufig gestellte Fragen
+
+<Accordion label="Transkribiert YouTube Videos automatisch?" group="faq" expanded="true">
+Für gesprochenes Englisch und mehrere andere Sprachen, ja. YouTube fügt eine Weile nach dem Upload automatische Untertitel hinzu und zeigt sie im Player und in Studio an. Sie haben keine Sprecherlabels, und der Text enthält die üblichen Fehler eines Recognizers. Für alles, was du wiederverwenden willst, mach deine eigene Transkription.
+</Accordion>
+
+<Accordion label="Wie bekomme ich eine SRT-Datei aus einem YouTube-Video?" group="faq">
+Lade den Ton mit `yt-dlp` herunter, schicke ihn an eine Speech-to-Text-API und hole das SRT ab. Dieser Guide macht es mit AssemblyAI, dessen Transkript-Endpunkt SRT und VTT direkt liefert. Ein kostenloser Weg sind YouTubes eigene Untertitel: `yt-dlp --write-auto-subs --sub-langs en --sub-format srt --skip-download VIDEO_URL` speichert sie als Datei. Diesen Befehl konnte ich von meinem Server aus nicht testen, aus dem Grund aus Schritt 1, und die Textqualität ist die, die YouTubes Recognizer liefert.
+</Accordion>
+
+<Accordion label="Wie wandle ich ein YouTube-Transkript in SRT um?" group="faq">
+Ein Transkript mit Zeitstempeln lässt sich direkt umwandeln. AssemblyAIs Endpunkte `/srt` und `/vtt` erledigen das für ein fertiges Transkript, oder nutze das Skript `speaker_srt.py` von oben, wenn du Sprecherlabels in den Cues willst. Ein einfaches Transkript ohne Zeitstempel wird ohne erneutes Ausrichten auf das Audio kein SRT.
+</Accordion>
+
+<Accordion label="Wie lade ich eine SRT-Datei zu einem YouTube-Video hoch?" group="faq">
+Öffne in YouTube Studio die Untertitel des Videos, klicke auf SPRACHE HINZUFÜGEN und dann unter "Untertitel" auf HINZUFÜGEN und wähle Datei hochladen mit Zeit. Wähle die `.srt`-Datei aus und speichere. Die Untertitel stehen danach als Option im Player.
+</Accordion>
+
+<Accordion label="Wie genau ist das Transkript?" group="faq">
+In meinem Testset aus sechs Dateien machte dasselbe Modell 3 Fehler auf 562 Wörter, Deepgram 13. Es behielt DevOps-Werkzeugnamen wie `kubectl` und `/var/log/syslog` in ihrer geschriebenen Form und labelte alle fünf Sprecher einer Datei mit mehreren Stimmen. Details stehen im [AssemblyAI-vs-Deepgram-Vergleich](/de/assemblyai-vs-deepgram/).
+</Accordion>
+
+<Accordion label="Wie lang darf das Video sein?" group="faq">
+Bis zu 10 Stunden pro Datei über AssemblyAIs Pre-recorded-API. Der Haken ist der Upload. Der Upload-Endpunkt begrenzt Dateien auf 2,2 GB, lange Videos schickt man also besser als extrahierte Tonspur oder als öffentliche URL in `audio_url`.
+</Accordion>
+
+<Accordion label="Funktioniert das auch mit anderen Sprachen als Englisch?" group="faq">
+Ja. Das Skript lässt die Spracherkennung an, das ist der Standard, das Modell erkennt also die Sprache jedes Videos. Das aktuelle Modell deckt 32 Sprachen nativ ab, mit `universal-2` in `speech_models` sind es 99. Bei einem spanischen Testclip mit 47 Wörtern erkannte es Spanisch und machte null Fehler.
+</Accordion>
+
+## Weiterführende Artikel
+
+- [AssemblyAI-Review](/de/assemblyai-review/): Genauigkeit, Preise und die Teile der API, die dieser Guide nicht nutzt
+- [AssemblyAI vs Deepgram](/de/assemblyai-vs-deepgram/): der oben zitierte Sechs-Dateien-Test, dazu Preise und Limits
+- [OpenAI Whisper-Alternativen im Test](/de/openai-whisper-alternativen/): dieselbe Art Test für lokale und gehostete Spracherkennung
+- [YouTube-Videos in einen Astro-Blog einbinden](/add-youtube-videos-astro-blog/) (auf Englisch): was du mit dem Video machst, wenn die Untertitel fertig sind
