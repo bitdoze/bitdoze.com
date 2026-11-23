@@ -9,11 +9,6 @@
  * Add new redirects HERE ONLY — never edit public/_redirects by hand.
  */
 export const redirects = {
-  "/tools/": "https://bit-tools.com/tools",
-  "/tools/thumbnail-ideas/": "https://bit-tools.com/tools/youtube-thumbnail-ideas-generator",
-  "/tools/titles-generator/": "https://bit-tools.com/tools/ai-title-generator",
-  "/tools/youtube-script-generator/": "https://bit-tools.com/tools/youtube-script-generator",
-
   // Slug fixes (old paths were linked from posts/external shares)
   "/ai-coading-tools/": "/ai-coding-tools/",
   "/go/gmktec-n150/": "/go/beelink-mini-s13/",
