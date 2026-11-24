@@ -1,113 +1,459 @@
 ---
 date: 2026-02-26T00:00:00Z
+lastmod: 2026-11-23T00:00:00Z
 translationKey: "cloudpanel-varnish-cache"
-title: "Cómo acelerar WordPress con la caché Varnish de CloudPanel"
-description: "Guía paso a paso para activar y configurar Varnish Cache en CloudPanel para acelerar WordPress y reducir la carga del servidor."
+title: "Cómo configurar la caché Varnish de CloudPanel en WordPress"
+meta_title: "Caché Varnish de CloudPanel para WordPress"
+description: "Activa la caché Varnish de CloudPanel para WordPress: exclusiones, plugin de purga, cómo verificar un acierto, malloc en un VPS pequeño, errores y rollback."
 image: "@assets/images/wordpress/cloudpanel-varnish-cache.webp"
 categories: ["wordpress"]
 authors: ["Dragos"]
-tags: ["cloudpanel"]
+tags: ["varnish", "cloudpanel"]
 canonical: "https://www.bitdoze.com/es/varnish-cache-cloudpanel/"
 ---
 
-import { Picture } from "astro:assets";
+import Accordion from "@components/widgets/Accordion.astro";
+import Button from "@components/widgets/Button.astro";
+import Notice from "@components/widgets/Notice.astro";
 import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
-import imgVarnish from "@assets/images/wordpress/cp-varnish-1024x786.webp";
 
-*Divulgación: esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.*
+Para activar la caché Varnish de CloudPanel, abre el sitio en CloudPanel, activa **Varnish Cache** y guarda. Añade a Excludes las rutas de WooCommerce. Después ejecuta `curl -sI` dos veces y busca una cabecera `x-cache-age` que crezca, señal de que Varnish respondió desde memoria.
 
-WordPress es dinámico: cada petición de página dispara la ejecución de PHP y una consulta a la base de datos. Con tráfico normal no hay problema. Bajo carga se convierte en un cuello de botella muy rápido. Varnish Cache se sitúa delante de Nginx y sirve HTML prerenderizado directamente desde la memoria, saltándose PHP y MySQL por completo en la mayoría de las peticiones.
+WordPress ejecuta PHP y una consulta a la base de datos en cada petición de página. Con dos visitantes no pasa nada; con doscientos es un problema. Un acierto de caché se salta PHP-FPM y MySQL por completo, y CloudPanel incluye Varnish como un interruptor por sitio, así que no hay que escribir ningún archivo VCL.
 
-CloudPanel incluye soporte integrado para Varnish, así que la configuración es mucho más sencilla que hacerlo manualmente.
+El interruptor es la parte fácil. Lo que muerde son las exclusiones (una página de carrito cacheada), el tamaño de la caché en un VPS pequeño y demostrar un acierto. Esta guía los recorre en el orden en que te los encuentras.
 
 <YouTubeEmbed
   url="https://www.youtube.com/embed/wq8g9oFJHmM"
   label="Configuración de Varnish Cache en CloudPanel para WordPress"
 />
 
-## Cómo funciona Varnish en CloudPanel
+## Requisitos previos
+
+- **CloudPanel 2.1 o más reciente.** El soporte de Varnish llegó en la 2.1, y la versión actual es la 2.5.4 (julio de 2026). ¿Aún no tienes el panel? [Instala CloudPanel](/es/instalar-cloudpanel-alojar-nodejs/) primero. Si el sitio se creó antes de la 2.1, ejecuta primero el script de migración de la [documentación de CloudPanel](https://www.cloudpanel.io/docs/v2/frontend-area/varnish-cache/migration/). Si no, el interruptor no aparecerá.
+- **Un sitio de tipo WordPress** (o un vhost de WordPress basado en la plantilla de CloudPanel). [Instalar WordPress en CloudPanel](/es/instalar-wordpress-ubuntu-arm/) cubre cómo crear uno. Un vhost muy personalizado puede romper la página de ajustes de Varnish, y el changelog de la 2.4.0 lista justo ese fallo para las plantillas v2-varnish personalizadas.
+- **Una instantánea o copia de seguridad.** Activar una caché tiene poco riesgo; editar la unidad de systemd, no tanto. Mira [cómo actualizar CloudPanel de forma segura](/es/actualizar-cloudpanel-seguro/) para la costumbre de la instantánea y [copias de seguridad remotas de CloudPanel](/es/copias-seguridad-remotas-cloudpanel/) para la copia fuera del servidor.
+- **Margen de RAM.** CloudPanel necesita 2 GB por sí solo. Varnish arranca con un límite de almacenamiento de 512 MB que cuenta solo los objetos cacheados, así que el proceso usa más que eso cuando la caché se llena.
+
+<Notice type="info" title="Divulgación de afiliados">
+Esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.
+</Notice>
+
+Si estás dimensionando una máquina nueva para esto, un VPS de 4 GB da espacio para que MySQL, PHP-FPM y la caché convivan. Para ese tipo de servidor uso Hetzner (mira la [reseña de Hetzner Cloud](/es/hetzner-cloud-resena/)):
 
 <Button
-  text="Prueba Hetzner Cloud ahora"
+  text="Prueba Hetzner Cloud"
   link="https://go.bitdoze.com/hetzner"
   variant="solid"
   color="blue"
-  size="lg"
+  size="md"
   external={true}
   icon="rocket-launch"
 />
-<Button text="Prueba el VPS de Hostinger" link="https://go.bitdoze.com/hostinger-vps" variant="solid" color="green" size="lg" external={true} icon="rocket-launch" />
 
-_Los precios de los VPS subieron en general en 2026 — si estás replanteándote alquilar una máquina, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+_Los precios de los VPS subieron en general en 2026. Si el presupuesto está justo, [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/) cubre las alternativas._
 
-CloudPanel usa una configuración de proxy inverso. Varnish escucha en el puerto público y Nginx corre detrás en el puerto **6081**. Cuando llega una petición:
+## ¿Cómo cambia la caché Varnish de CloudPanel el camino de la petición?
 
-1. Varnish comprueba si tiene una copia en caché en memoria
-2. Si la tiene, sirve el HTML cacheado directamente — sin PHP, sin base de datos
-3. Si no, la petición pasa a Nginx, PHP la procesa y Varnish guarda el resultado
+Añade un salto. Nginx sigue terminando el TLS, y luego envía las peticiones de página a Varnish en `127.0.0.1:6081`, que responde desde memoria o vuelve a preguntar a Nginx en el puerto 8080.
 
-Los recursos estáticos (imágenes, CSS, JS) los sirve Nginx directamente y evitan Varnish — ya son rápidos de por sí.
+Con Varnish desactivado, Nginx envía cada petición no estática directamente a PHP-FPM. Con Varnish activado, la cadena crece un salto:
 
-## Cómo activar Varnish en CloudPanel
+1. Nginx sigue terminando el TLS en el puerto 443. Varnish nunca ve HTTPS. Escucha en HTTP plano en `127.0.0.1:6081`.
+2. Nginx sirve los archivos estáticos (CSS, JS, imágenes, fuentes) directamente, y Varnish nunca los guarda porque Nginx los entrega más rápido.
+3. Todo lo demás pasa por `location /` del vhost, donde el marcador `{{varnish_proxy_pass}}` se resuelve en `proxy_pass http://127.0.0.1:6081;`.
+4. Varnish devuelve una copia en caché desde memoria o reenvía el fallo de caché a Nginx en el puerto 8080, donde PHP-FPM construye la página. Varnish guarda la respuesta y la devuelve.
 
-Ve a tu sitio en CloudPanel → **Varnish Cache** → actívalo.
+Hay dos atajos integrados que no configuras tú:
 
-<Picture formats={["webp"]} fallbackFormat="webp" src={imgVarnish} alt="Panel de configuración de Varnish Cache en CloudPanel" />
+- El vhost tiene un bloque `location ~/(wp-admin/|wp-login.php)` que envía directamente al puerto 8080, así que `/wp-admin/` y `wp-login.php` nunca entran en Varnish.
+- El controlador PHP que CloudPanel antepone a WordPress con `auto_prepend_file` se niega a guardar en tres casos. El visitante ha iniciado sesión, la petición es un POST o la duración de la caché es 0.
 
-En el campo de exclusiones, añade las rutas que nunca deben cachearse — carrito, pago, páginas de cuenta y todo lo que sea específico del usuario:
+Lo que **no** se detecta: un visitante anónimo con algo en el carrito. El controlador comprueba `is_user_logged_in()` y nunca mira la cookie de sesión de WooCommerce. Ese visitante no ha iniciado sesión, así que `/cart/` y `/checkout/` son páginas que se pueden cachear a menos que las excluyas. Esta es la razón por la que las dos secciones siguientes importan más que el interruptor.
 
-```
-/wp-admin/
-/cart/
-/checkout/
-/my-account/
-/wp-login.php
-```
+![Diagrama del camino de la petición: del visitante a Nginx en el puerto 443, los archivos estáticos y wp-admin saltan Varnish, el resto va a Varnish en el puerto 6081, los fallos de caché van a Nginx 8080 donde decide el controlador PHP, y las purgas con X-Cache-Tags llegan a Varnish](@assets/images/wordpress/cloudpanel-varnish-request-flow.webp)
 
-## Detalles de configuración
+_Diagrama de una petición con Varnish activado. Dos locations de Nginx nunca llegan a Varnish, y el controlador PHP decide en cada fallo de caché si la copia puede guardarse._
 
-**Asignación de memoria:** Varnish usa 512 MB por defecto. Para aumentarla, edita:
+## Activa Varnish en CloudPanel
 
-```
-/lib/systemd/system/varnish.service
-```
+Abre el sitio en CloudPanel (Frontend Area, haz clic en el dominio), entra en **Varnish Cache** y actívalo. En la misma página están la duración de la caché, los parámetros GET excluidos, las exclusiones y los botones de purga.
 
-Busca el parámetro `-s malloc` y cambia el valor.
+El trabajo completo en una imagen. La caja oscura es la salida: si algo de abajo sale mal, el rollback es un solo interruptor.
 
-**Controlador PHP** (excluye páginas concretas de la caché):
-```
-/home/<siteUser>/.varnish-cache/controller.php
-```
+![Flujo de activación de la caché Varnish de CloudPanel en seis pasos, con una flecha de rollback desde la caja de apagado de vuelta al paso de activación](@assets/images/wordpress/cloudpanel-varnish-setup-flow.webp)
 
-**Registros:**
-```
-/home/<siteUser>/logs/varnish-cache/
+_Flujo del operador, de la instantánea a la purga. La flecha discontinua es el rollback: apaga Varnish y el vhost vuelve al puerto 8080._
+
+![Página Varnish Cache en la demo pública de CloudPanel, con el interruptor apagado y los campos Varnish Server 127.0.0.1:6081, Cache Lifetime 604800, Cache Tag Prefix, Excluded Params y Excludes](@assets/images/wordpress/cloudpanel-varnish-settings.webp)
+
+_Captura de la demo pública de CloudPanel (demo.cloudpanel.io), donde guardar está deshabilitado. En tu propio panel rellenas los campos y pulsas Save._
+
+Guarda y comprueba que el vhost lo ha recogido:
+
+```bash
+nginx -T 2>/dev/null | grep -E "proxy_pass http://127.0.0.1:(6081|8080)"
 ```
 
-## Duración de la caché
+El comando imprime las líneas `proxy_pass` del sitio. El puerto `6081` aparece cuando Varnish está activado. Con Varnish desactivado, la misma location dice `proxy_pass http://127.0.0.1:8080;`.
 
-CloudPanel usa por defecto una duración de caché de 7 días. Puedes cambiarla en el panel de configuración de Varnish Cache. Para sitios que se actualizan con frecuencia (noticias, publicaciones diarias), bájala a 1-2 días. Para sitios mayormente estáticos, 7-14 días está bien. La caché se purga automáticamente cuando usas el plugin de WordPress que verás a continuación.
+Si la página de ajustes da un 403 o no hay sección de Varnish, el vhost no es uno que CloudPanel reconozca. Reconstrúyelo desde la plantilla de WordPress original. Para un sitio creado antes de la 2.1, ejecuta como root el script de migración de la documentación, con tu propio dominio en lugar de `www.domain.com`:
 
-## Plugin de WordPress CLP Varnish Cache
+```bash
+curl -sSL https://raw.githubusercontent.com/cloudpanel-io/scripts/master/varnish/enable.php > /tmp/enable-varnish.php
+php8.1 /tmp/enable-varnish.php www.domain.com 'WordPress'
+```
 
-Instala el plugin [CLP Varnish Cache](https://wordpress.org/plugins/clp-varnish-cache/) en WordPress (versión actual 1.0.2, probado hasta WordPress 6.7.4). Te permite purgar la caché de Varnish desde la barra de administración de WordPress, algo útil después de publicar contenido nuevo o actualizar ajustes. No requiere una configuración compleja; conecta WordPress con la instalación de Varnish de CloudPanel automáticamente.
+La página de migración también lista el vhost de reemplazo que hay que pegar. Haz antes una copia del vhost actual.
 
-## Qué se cachea y qué no
+### Referencia de los ajustes de Varnish Cache
 
-Varnish en CloudPanel omite automáticamente el caché en:
-- El panel de administración de WordPress
-- La página de inicio de sesión
-- Las páginas con cookies de sesión activas
-- Las páginas de carrito y pago
+Todo lo que hay en la página. Los valores por defecto de la duración, Excluded Params y Excludes son los que rellena la demo pública de CloudPanel para un sitio PHP genérico; lee tus propios campos antes de fiarte de ellos.
 
-Todo lo demás — entradas, páginas, archivos — se cachea en la primera visita y se sirve desde memoria en las siguientes.
+| Ajuste | Qué hace | Por defecto | Cámbialo cuando |
+|---|---|---|---|
+| Varnish Server | A dónde envía Nginx `location /` y a dónde envían las purgas el plugin y el controlador | `127.0.0.1:6081` | Varnish corre en otra máquina o puerto. Con Varnish apagado, CloudPanel escribe ahí `127.0.0.1:8080` |
+| Cache Lifetime | Segundos que puede servirse una página guardada, enviados a Varnish como `Cache-Control: public, max-age=<value>, s-maxage=<value>` | `604800` (7 días) | Se publica contenido que el controlador no purga, o los widgets se quedan viejos. `0` desactiva la caché en todas las páginas |
+| Cache Tag Prefix | La etiqueta que lleva toda página cacheada. Las demás etiquetas empiezan por ella, como en `<prefix>-post-42` | generado por sitio | Casi nunca. Cambiarlo deja huérfanas todas las copias guardadas, así que purga después |
+| Excluded Params | Nombres de parámetros GET separados por comas. Una petición que lleve uno no se cachea | `__SID,noCache` | Un plugin añade cadenas de consulta por visitante |
+| Excludes | Rutas que no se cachean. `^` significa "empieza por", lo demás coincide por subcadena | `^/admin/` en la demo | Siempre con WooCommerce: añade `^/cart/`, `^/checkout/`, `^/my-account/` |
+| Purge Cache | Envía `PURGE` con una cabecera `X-Cache-Tags` al puerto 6081. La documentación describe introducir una URL o etiquetas separadas por comas | n/a | Tras importar contenido, cambiar un tema o plugin, o cuando una página se ve vieja |
+| Purge Entire Cache | Purga la etiqueta prefijo, que lleva toda página, así que se vacía la caché de todo el sitio | n/a | Tras editar Excludes o la duración, y cuando no sabes qué página está vieja |
 
-## Combinar Varnish con PageSpeed
+## Configura las exclusiones de caché
 
-CloudPanel también incluye un módulo PageSpeed integrado (mod_pagespeed) que comprime imágenes, minifica CSS/JS y optimiza la entrega. Puedes activarlo junto a Varnish para ganar velocidad extra. Varnish se encarga de la capa de caché; PageSpeed, de la optimización de recursos. No entran en conflicto entre sí.
+En el campo **Excludes**, añade las rutas de WooCommerce y de la cuenta. Las entradas que empiezan por `^` coinciden desde el principio de la URI; el resto coincide en cualquier parte de la URI.
 
-## Resultado
+```
+^/wp-admin/
+wp-login.php
+^/cart/
+^/checkout/
+^/my-account/
+```
 
-El efecto práctico es que un servidor que antes aguantaba 50 visitantes simultáneos antes de ralentizarse puede manejar varios cientos con Varnish delante. El uso de CPU y memoria baja porque PHP y MySQL solo se ejecutan para el primer visitante de cada página. La documentación de CloudPanel afirma que las páginas cargan entre 100 y 250 veces más rápido con Varnish activado, lo que coincide con mis pruebas en sitios de poco tráfico, donde las páginas cacheadas cargan en menos de 50 ms.
+Las dos primeras son por si acaso, porque el vhost ya las evita. Las otras tres son las que protegen a los compradores sin sesión iniciada. Si tu tienda usa slugs traducidos o personalizados (`/basket/`, `/my-account/orders/`), añádelos también.
 
-Es una de las mejoras de velocidad más efectivas que puedes hacer en un sitio WordPress sin cambiar de hosting ni añadir hardware.
+<Notice type="warning" title="Las exclusiones coinciden por subcadena">
+Una entrada sin `^` coincide en cualquier parte de la URL. Añadir `cart` también excluiría una entrada de blog sobre carritos de compra. Mantén las barras y usa el prefijo `^` donde la ruta sea fija.
+</Notice>
+
+**Excluded Params** admite nombres de parámetros GET. Una petición que lleve uno de ellos no se cachea. Déjalo vacío salvo que un plugin añada cadenas de consulta por visitante.
+
+Las exclusiones se aplican solo a las peticiones nuevas. Una página de carrito cacheada antes de la exclusión sigue en memoria hasta que acabe su duración o la purgues.
+
+### Dos comprobaciones más para WooCommerce
+
+Una prueba de carga independiente de una tienda WooCommerce en CloudPanel ([Andrei Brindas, octubre de 2026](https://andreibrindas.com/cloudpanel-varnish-woocommerce-cart-queue/)) encontró dos problemas que la lista Excludes no cubre. No reproduje ninguno de los dos, así que prueba tu propia tienda.
+
+- **Carrito de la Store API.** El controlador no tiene regla para REST, así que `/wp-json/wc/store/v1/cart` se guardó durante 7 días y se sirvió a todos los visitantes. Añade `^/wp-json/wc/store/` a Excludes y `rest_route` a Excluded Params, y purga después.
+- **Cola del carrito.** Las páginas excluidas no reciben cabecera `Cache-Control` del controlador, y el VCL por defecto de CloudPanel marca entonces la respuesta como no cacheable con un TTL de 0. Las peticiones simultáneas al carrito esperan unas a otras. La solución del artículo edita `/etc/varnish/default.vcl`, que comparten todos los sitios del servidor y que una actualización del paquete puede reemplazar.
+
+### Qué se cachea y qué no
+
+Estas reglas salen de la plantilla del vhost y del código del controlador. Donde ninguno dice nada, decide el VCL, y el `default.vcl` de CloudPanel no es público, así que prueba esa fila tú mismo con el comando `curl -sI` de las secciones siguientes.
+
+| Petición | ¿Se cachea? | Dónde está la regla |
+|---|---|---|
+| Visita anónima de página (GET) | Sí, durante la duración | Controlador |
+| Entradas y páginas | Sí, con la etiqueta `<prefix>-post-<id>`. Editar una purga su etiqueta | Controlador |
+| `/wp-admin/`, `wp-login.php` | Nunca, saltan Varnish | Location de Nginx para `wp-admin/` y `wp-login.php`, al puerto 8080 |
+| Usuarios con sesión iniciada | No, `is_user_logged_in()` lo impide | Controlador |
+| Peticiones POST | No, un `$_POST` no vacío lo impide | Controlador |
+| Carrito, checkout y mi cuenta de WooCommerce para un visitante sin sesión | Sí, salvo que los excluyas. El controlador nunca lee la cookie de sesión de WooCommerce | Controlador (sin regla), arréglalo en Excludes |
+| Cadenas de consulta | Sí, salvo que el parámetro esté en Excluded Params. `noCache=1` y `__SID` están excluidos por defecto | Controlador |
+| Archivos estáticos (CSS, JS, imágenes, fuentes) | Nunca, los sirve Nginx | Location de estáticos de Nginx |
+| Resultados de búsqueda (`/?s=`) | Ninguna regla lo impide. Añade `?s=` a Excludes si no quieres guardarlos | Controlador (sin regla) |
+| REST API (`/wp-json/`) | Sí. El controlador no tiene regla para REST, así que se guardan las rutas cacheables. En sitios WooCommerce excluye `^/wp-json/wc/store/` | Controlador (sin regla), arréglalo en Excludes |
+| Feeds (`/feed/`) | Verifícalo en tu sitio | n/a |
+| Páginas 404 | Verifícalo en tu sitio | n/a |
+
+## Instala el plugin CLP Varnish Cache
+
+El plugin [CLP Varnish Cache](https://wordpress.org/plugins/clp-varnish-cache/) es la parte de WordPress de la configuración. A noviembre de 2026 va por la versión 1.1.1, probado hasta WordPress 6.9.12, y necesita WordPress 6.0 y PHP 7.1 o más recientes.
+
+En WordPress ve a **Plugins**, **Add New**, busca "CLP Varnish Cache", instala y activa. Su página de ajustes está en **Settings**, **CLP Varnish Cache** y en la barra de administración.
+
+Lo que hace:
+
+- Purga una URL concreta, una etiqueta de caché o la caché completa desde WordPress.
+- Purga el sitio cuando se activa, se desactiva o se cambia un plugin o un tema, y cuando termina una actualización de plugin, tema o núcleo.
+
+Lo que no tiene que hacer: purgar después de publicar. El controlador PHP del servidor ya lo hace. Al actualizar una entrada purga la etiqueta de ese ID de entrada, y cuando cambia una categoría de producto purga todo. El plugin es tu botón manual y la red de seguridad para cambios de plugins.
+
+## Etiquetas de caché: cómo elige la purga sus objetivos
+
+Una etiqueta de caché es una marca pegada a una página guardada. Una purga nombra una o más etiquetas, y Varnish descarta toda copia que las lleve. El controlador de CloudPanel añade dos tipos:
+
+- El **Cache Tag Prefix** va en toda página cacheada. Purgarlo vacía el sitio, y eso es lo que hace **Purge Entire Cache**.
+- `<prefix>-post-<id>` va en una página por cada entrada de la consulta de WordPress. La entrada, una página y un archivo que liste esa entrada la llevan. Léelas con `curl -sI https://example.com/ | grep -i x-cache-tags`.
+
+El controlador purga por su cuenta en tres casos:
+
+| Evento | Qué se purga | Dónde en el controlador |
+|---|---|---|
+| Se guarda una entrada o página (REST, WordPress 6.0 o más reciente) | La etiqueta del `id` del cuerpo JSON | decodificación de `php://input` |
+| Se guarda una entrada (editor clásico, `post_ID` en el formulario) | `<prefix>-post-<post_ID>` | `$_POST['post_ID']` |
+| Se actualiza una categoría de producto de WooCommerce | La etiqueta prefijo, o sea todo el sitio | `$_POST['taxonomy'] == 'product_cat'` |
+
+Los menús, los widgets, los ajustes del tema y las opciones no están en esa lista. Guardar un menú cambia todas las páginas y no purga nada. Pulsa **Purge Entire Cache** o el botón de purga del plugin después.
+
+Para purgar una etiqueta desde el panel, usa **Purge Cache** e introduce la etiqueta, por ejemplo `<prefix>-post-42`, donde la documentación describe introducir una URL o etiquetas separadas por comas. Desde el servidor la misma petición es una línea de curl, como root, con el prefijo leído de la cabecera `x-cache-tags` de cualquier página:
+
+```bash
+curl -v -X PURGE -H 'X-Cache-Tags: yourprefix-post-42' 127.0.0.1:6081
+```
+
+## Verifica un acierto y un fallo de caché
+
+Ejecuta esto desde tu portátil, sustituye el dominio:
+
+```bash
+curl -sI https://example.com/ | grep -i -E 'x-cache|age|via'
+```
+
+Una página que puede cachearse devuelve cabeceras del controlador. La documentación nombra `x-cache-age` (segundos desde que se guardó la copia) y `x-cache-lifetime`, además de `x-cache-tags`. Ejecuta el comando dos veces seguidas:
+
+| Petición | `x-cache-age` | Significado |
+|---|---|---|
+| Primera | 0 o ausente | Fallo de caché: Varnish pidió la página a Nginx y la guardó |
+| Segunda | Un número pequeño, que crece en las siguientes llamadas | Acierto: servida desde memoria |
+
+Dos cosas que hacen tropezar:
+
+- `X-Varnish` no aparece. El vhost de CloudPanel lo oculta con `proxy_hide_header X-Varnish`. Busca `x-cache` en su lugar.
+- Si el primer comando no imprime nada, la página no se está cacheando. Has iniciado sesión (barra de administración en el mismo navegador o una cookie en el jar de curl), la petición coincidió con una exclusión o Varnish está desactivado. Prueba con una entrada cualquiera y una ventana privada.
+
+Mide la diferencia con tiempos:
+
+```bash
+curl -o /dev/null -s -w '%{http_code} %{time_total}\n' https://example.com/
+curl -o /dev/null -s -w '%{http_code} %{time_total}\n' https://example.com/
+```
+
+La primera llamada paga el coste de PHP; la segunda debería ser claramente más rápida. Repite cada una unas cuantas veces antes de sacar conclusiones: una sola muestra es ruido.
+
+En el servidor, como root:
+
+```bash
+varnishstat
+```
+
+Fíjate en `MAIN.cache_hit` y `MAIN.cache_miss` mientras recargas el sitio. Que los dos contadores suban significa que los fallos se convierten en aciertos. `MAIN.n_lru_nuked` por encima de cero significa que la caché está llena y Varnish está expulsando objetos. Sube el malloc.
+
+```bash
+varnishlog -g request -q 'ReqURL ~ "/cart/"'
+```
+
+Esto imprime cada petición cuya URL contenga `/cart/`. Carga la página del carrito en un navegador mientras corre. Un registro `Hit` en una URL de carrito significa que la exclusión está mal. Lo que quieres ver es `VCL_call MISS` o `VCL_call PASS`: Nginx construyó la página y Varnish no la guardó.
+
+### Caja de herramientas de comandos de Varnish
+
+Todos se ejecutan como root en el servidor. Los contadores y la sintaxis de consulta son los de las herramientas estándar de Varnish; no los ejecuté en una instalación de CloudPanel para esta guía.
+
+| Comando | Qué muestra aquí |
+|---|---|
+| `varnishstat` | Contadores en vivo. Mira cómo suben juntos `MAIN.cache_hit` y `MAIN.cache_miss`, y que `MAIN.n_lru_nuked` se quede en 0 |
+| `varnishstat -1 -f SMA.s0.g_bytes -f SMA.s0.g_space` | Uso y margen de la caché en bytes, impresos una sola vez. Los contadores de almacenamiento están en el grupo `SMA.s0`, no en `MAIN` |
+| `varnishlog -g request` | Cada petición agrupada como una transacción, con líneas `VCL_call HIT`, `MISS` o `PASS` y las cabeceras de la petición y la respuesta |
+| `varnishtop -i ReqURL` | Las URL más pedidas, para ver qué páginas merece la pena tener en memoria |
+| `varnishhist` | Un histograma del tiempo de petición. Los aciertos quedan en el borde izquierdo, los fallos forman un segundo montículo más a la derecha |
+| `varnishadm ban.list` | Los bans activos. Ejecútalo antes y después de una purga para ver si Varnish registró alguno |
+
+## Duración de la caché y purga después de publicar
+
+**Cache Lifetime** en la página de Varnish Cache fija cuánto tiempo permanece cacheada una página. La documentación de CloudPanel muestra el controlador enviando `Cache-Control: public, max-age=604800` para una duración de 7 días. Lee el valor en el panel: ese número es el que está en vigor.
+
+Más largo significa menos peticiones a PHP y una caché más grande. Más corto significa páginas más frescas para cualquier cosa que el controlador no purga por su cuenta (contenido traído de otra fuente, un widget que cambia con el tiempo, un feed).
+
+| Tipo de sitio | Cache Lifetime recomendada | Segundos | Por qué |
+|---|---|---|---|
+| Estático (web de empresa, landing pages) | 7 días | `604800` | El valor por defecto. El contenido cambia poco y el controlador purga las páginas editadas |
+| Blog | 7 días con el plugin, 1 día sin él | `604800` o `86400` | Las entradas se purgan solas; los menús y la portada puede que no |
+| Noticias, varias entradas al día | 1 día | `86400` | Los archivos y la portada se mantienen casi al día aunque un editor se salte la purga |
+| Tienda (WooCommerce) | 7 días con las exclusiones del carrito | `604800` | Editar un producto purga su propia etiqueta, editar una categoría purga todo |
+
+Cuando una página parece obsoleta después de publicar, la solución más rápida es **Purge Entire Cache** en la página de Varnish Cache o el botón de purga del plugin para la URL concreta.
+
+## Varnish detrás de Cloudflare u otro CDN
+
+Con un CDN delante hay dos cachés en el camino: el edge de Cloudflare y Varnish en tu servidor. Por defecto guardan cosas distintas.
+
+| Capa | Guarda | La purga |
+|---|---|---|
+| Cloudflare | Archivos estáticos por extensión. El HTML y el JSON no se cachean salvo que añadas una regla de caché | El panel o la API de Cloudflare |
+| Varnish (CloudPanel) | El HTML renderizado durante la duración de caché | El panel, el plugin, el controlador al guardar una entrada |
+| Navegador | Archivos estáticos, porque el vhost les pone `expires max` | Cuando cambia el nombre del archivo |
+
+El reparto por defecto es el que yo mantendría. Cloudflare no cachea HTML, así que cada petición de página llega a Varnish y una purga en CloudPanel surte efecto al momento. Si también cacheas HTML en Cloudflare, un **Purge Entire Cache** en el panel deja viejas las copias del edge hasta que caduquen.
+
+Lee las dos cabeceras en una misma página para saber quién respondió:
+
+```bash
+curl -sI https://example.com/ | grep -i -E 'cf-cache-status|x-cache-age'
+```
+
+| `cf-cache-status` | `x-cache-age` | Significado |
+|---|---|---|
+| `DYNAMIC` | crece entre dos llamadas | Cloudflare dejó pasar el HTML y Varnish sirvió el acierto. Es la configuración que quieres |
+| `MISS` o `EXPIRED`, y luego `HIT` | ausente | Cloudflare cacheó el HTML (hay una regla de caché activa). Varnish queda apartado durante el TTL del edge y las purgas del panel no llegan |
+| `DYNAMIC` | ausente | Nadie cacheó. Revisa Excludes, si tienes sesión iniciada y que Varnish esté activado |
+
+La reescritura en el edge de Cloudflare (Rocket Loader, ofuscación de direcciones de correo) ocurre a la salida y no cambia lo que guarda Varnish. Para la cadena completa, con Redis y page rules, lee [cómo encajan Cloudflare, Varnish y Redis](/es/acelerar-wordpress-cloudflare-varnish-redis/).
+
+## ¿Cuánta memoria necesita Varnish en un VPS pequeño?
+
+CloudPanel arranca Varnish con un malloc de 512 MB. Súbelo solo cuando `SMA.s0.g_space` quede bajo o `MAIN.n_lru_nuked` pase de cero.
+
+Varnish guarda las páginas cacheadas en un segmento de memoria llamado malloc. La documentación de CloudPanel dice que lo subas cuando el servidor aloja muchos sitios o sitios con muchas páginas.
+
+Comprueba qué se usa antes de cambiar nada:
+
+```bash
+free -h
+varnishstat -1 -f SMA.s0.g_bytes -f SMA.s0.g_space
+```
+
+`SMA.s0.g_bytes` es lo que la caché contiene ahora y `SMA.s0.g_space` es el margen. `s0` es el nombre que Varnish da al primer almacenamiento, aquí el de `-s malloc,512m`. Cuando `g_space` quede bajo, sube el límite. En una máquina de 2 GB no pasaría de 1 GB, porque MySQL y PHP-FPM necesitan el resto.
+
+Averigua dónde vive la unidad de verdad y añade una anulación en lugar de editar el archivo del paquete:
+
+```bash
+systemctl cat varnish
+```
+
+La línea ExecStart contiene `-s malloc,512m`. La documentación de CloudPanel edita `/lib/systemd/system/varnish.service` directamente. Una actualización del paquete puede reemplazar ese archivo, así que yo uso un drop-in, el mismo patrón que muestra la [guía de operaciones de Varnish](https://docs.varnish-software.com/book/operations/configuring-varnish):
+
+```bash
+systemctl edit varnish
+```
+
+Pega el ExecStart completo con el nuevo tamaño (conserva todas las demás opciones de tu salida de `systemctl cat`):
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/varnishd -a :6081 -f /etc/varnish/default.vcl -P %t/%N/varnishd.pid -p feature=+http2 -p http_resp_hdr_len=40000 -s malloc,1024m
+```
+
+La línea vacía `ExecStart=` tiene que ir primero: limpia el valor anterior. Después aplícala:
+
+```bash
+systemctl daemon-reload
+systemctl restart varnish
+systemctl status varnish
+```
+
+<Notice type="warning" title="Un malloc por encima de la RAM libre puede detener Varnish">
+Si el nuevo tamaño no cabe en la RAM, `varnishd` puede no arrancar, o el kernel puede matarlo más tarde. En ambos casos todas las páginas de todos los sitios con Varnish activado devuelven 502, porque Nginx sigue enviando al puerto 6081. Baja el valor o desactiva Varnish para el sitio en CloudPanel hasta que el servicio vuelva.
+</Notice>
+
+El VCL en sí es `/etc/varnish/default.vcl`. Después de un cambio ahí, `varnishreload` lo aplica sin vaciar la caché.
+
+El controlador escribe las peticiones de purga en `/home/<siteUser>/logs/varnish-cache/purge.log`, y solo en modo desarrollador (ver los errores habituales).
+
+## Errores habituales
+
+### Una página de carrito o de sesión se sirve desde la caché
+
+Síntoma: los visitantes ven el carrito de otro cliente o una página con el nombre de otra persona en la cabecera.
+
+Causa: la ruta no está excluida o purgaste antes de añadir la exclusión. Solución: añade la entrada con el prefijo `^`, purga y confírmalo con `varnishlog -g request -q 'ReqURL ~ "/cart/"'`.
+
+### Portada obsoleta después de publicar
+
+Al publicar se purga la etiqueta de la entrada que editaste. Una página construida con otra consulta no lleva esa etiqueta: un menú, un widget con listado, o HTML que un page builder o un plugin de optimización guardó por su cuenta. Esa página queda obsoleta hasta que acabe la duración.
+
+Solución: purga la caché completa desde el plugin después de publicar o acorta la duración. Comprueba qué etiquetas lleva la portada con el comando `curl -sI` y lee `x-cache-tags`.
+
+### Varnish no arranca después de cambiar el malloc
+
+`systemctl status varnish` muestra el servicio caído y todos los sitios devuelven 502. Ejecuta `journalctl -u varnish -n 50` para leer el motivo, baja el valor y después `systemctl restart varnish`.
+
+### Varnish activado con HTTPS
+
+Varnish no hace TLS en esta configuración. Lo hace Nginx, así que HTTPS sigue funcionando después de activarlo, siempre que el vhost siga enviando a `http://127.0.0.1:6081`. Los problemas aparecen cuando:
+
+- Un bloque de vhost personalizado usa `proxy_pass https://127.0.0.1:6081`. Cámbialo a `http`.
+- Apuntas un CDN o un balanceador al puerto 6081 para "saltarte Nginx". Eso evita la terminación TLS. Apúntalo al 443 como todo el mundo. Si hay un CDN delante, lee [cómo encajan Cloudflare, Varnish y Redis](/es/acelerar-wordpress-cloudflare-varnish-redis/).
+- Un vhost personalizado pierde las líneas `proxy_set_header` de la plantilla original (`Host`, `X-Forwarded-Host`, `X-Real-IP`, `X-Forwarded-For`). Consérvalas.
+
+### Una purga no surte efecto
+
+Dos componentes envían purgas y fallan de forma distinta.
+
+- **El plugin** envía `PURGE` a la dirección de Varnish Server de sus ajustes. Si Varnish no responde 200, imprime `Varnish Cache Purge Failed, Error Message: HTTP Status Code: <code>`. El código 0 suele indicar que la petición nunca salió de WordPress, por ejemplo un plugin de seguridad bloqueando la llamada al loopback.
+- **El controlador** purga al guardar una entrada, y solo registra en modo desarrollador:
+
+1. Abre `/home/<siteUser>/.varnish-cache/controller.php` como usuario del sitio y pon `define('VARNISH_DEVELOPER_MODE', true);`.
+2. Sigue el registro: `tail -f ~/logs/varnish-cache/purge.log`.
+3. Guarda una entrada. Cada registro es una purga con sus etiquetas. Sin registro nuevo, el controlador no puso nada en cola. Un registro con una página que sigue obsoleta significa que la etiqueta no coincidió, así que compárala con `x-cache-tags` de curl.
+
+Para ver llegar las purgas a Varnish desde cualquiera de las dos fuentes, ejecuta como root `varnishlog -g request -q 'ReqMethod eq "PURGE"'`. Después desactiva el modo desarrollador, porque el registro crece.
+
+## Rollback
+
+Abre el sitio en CloudPanel, **Varnish Cache**, desactívalo y guarda. CloudPanel reescribe el vhost para que `proxy_pass` apunte otra vez a `127.0.0.1:8080` y cada petición vaya directa a PHP-FPM.
+
+Comprueba:
+
+```bash
+curl -sI https://example.com/ | grep -i x-cache
+```
+
+Que no haya cabeceras `x-cache` significa que la página vino de Nginx y PHP, no de Varnish. El servicio varnish sigue corriendo en el servidor y conserva su memoria, lo que está bien para un sitio. Si lo desactivas en todos y quieres recuperar la memoria:
+
+```bash
+systemctl stop varnish
+systemctl disable varnish
+```
+
+Eso libera el malloc. Vuelve a activar el servicio antes de encender Varnish en cualquier sitio, porque Nginx envía al puerto 6081 y devuelve 502 cuando no escucha nada ahí.
+
+## Varnish y el módulo PageSpeed
+
+CloudPanel también incluye el módulo Google PageSpeed para Nginx como interruptor por sitio, en **Settings** del sitio, sección **PageSpeed**. Reescribe las páginas a la salida según sus reglas de filtros, y la documentación de CloudPanel enlaza con la documentación del módulo para editarlas.
+
+Los dos pueden estar activados. La documentación de CloudPanel describe cada función por separado y no cubre la combinación, y el lugar que ocupa PageSpeed en el camino de la petición decide si funciona en los aciertos de caché. Así que activa primero Varnish y confirma los aciertos. Después activa PageSpeed y confirma que la página sigue renderizando y que la tasa de aciertos no bajó. Depurar dos reescritores de salida a la vez es una mala noche.
+
+## Velocidad de WordPress en CloudPanel: qué esperar
+
+CloudPanel anuncia páginas que cargan hasta 250 veces más rápido con Varnish. Ese es el techo del fabricante para un acierto de caché frente a una petición PHP sin cachear. Tu cifra depende del tema y de los plugins que te saltas. Mídela con los dos comandos de tiempos de curl de arriba y tendrás una cifra de tu sitio, no una de marketing.
+
+En lo que sí puedes contar: un acierto se salta PHP-FPM y MySQL por completo, así que la CPU que usaban esas peticiones queda libre para los fallos de caché, la administración y el cron. En un VPS pequeño eso puede decidir si un pico de tráfico tumba el servidor. Si aún estás eligiendo tipo de servidor, la [comparativa ARM vs x86 de VPS para WordPress](/es/comparativa-arm-vs-x86-vps/) compara ambos.
+
+Antes de abrir el sitio a ese tráfico, repasa [cómo securizar CloudPanel](/es/securizar-cloudpanel/) y añade [autenticación en dos pasos para WordPress](/es/securizar-wordpress-2fa/), porque `wp-login.php` siempre llega a PHP. La caché Varnish hace más rápida la vía rápida. No dice nada sobre quién puede atacar tu `/xmlrpc.php`.
+
+## Preguntas frecuentes
+
+<Accordion label="¿CloudPanel Varnish cachea wp-admin?" group="faq">
+No. El vhost envía `location ~/(wp-admin/|wp-login.php)` directo a Nginx en el puerto 8080, y el controlador se niega a guardar páginas de quien tiene sesión iniciada. Nunca verás la barra de administración en una página cacheada.
+</Accordion>
+
+<Accordion label="¿Cómo sé que Varnish está funcionando?" group="faq">
+Ejecuta `curl -sI https://example.com/ | grep -i x-cache-age` dos veces. La primera respuesta muestra `0` o ninguna cabecera (fallo de caché), la segunda un número de segundos que crece (acierto). En el servidor `varnishstat` lista `MAIN.cache_hit` junto a `MAIN.cache_miss`. El vhost oculta `X-Varnish`, así que buscarlo no imprime nada aunque la caché funcione.
+</Accordion>
+
+<Accordion label="¿Están seguros los carritos de WooCommerce con Varnish activado?" group="faq">
+Solo con las exclusiones puestas. El controlador comprueba `is_user_logged_in()`, las peticiones POST y la lista Excludes, y nunca lee la cookie de sesión de WooCommerce, así que `/cart/` y `/checkout/` de un visitante sin sesión son páginas cacheables. Añade `^/cart/`, `^/checkout/`, `^/my-account/` y `^/wp-json/wc/store/` a Excludes y pulsa **Purge Entire Cache**, porque las copias antiguas siguen en memoria hasta purgarlas.
+</Accordion>
+
+<Accordion label="¿Cuánta RAM debo darle a Varnish?" group="faq">
+El servicio arranca con `-s malloc,512m`. Comprueba el uso con `varnishstat -1 -f SMA.s0.g_bytes -f SMA.s0.g_space` y súbelo solo cuando `SMA.s0.g_space` quede bajo o `MAIN.n_lru_nuked` pase de cero. En un servidor de 2 GB no pasaría de 1 GB, y en uno de 4 GB, entre 1 y 2 GB deja a MySQL y PHP-FPM su parte. Súbelo en un drop-in de `systemctl edit varnish`, no en la unidad del paquete.
+</Accordion>
+
+<Accordion label="¿Qué pasa con los formularios de contacto y las peticiones POST?" group="faq">
+No se cachean. El controlador devuelve "no cacheable" siempre que `$_POST` no esté vacío, y Nginx las reenvía al puerto 8080, donde PHP-FPM ejecuta el manejador del formulario. La propia página GET del formulario sí se cachea y muestra el mismo formulario en blanco a todos, que es lo que debe hacer un formulario de contacto.
+</Accordion>
+
+<Accordion label="¿Funciona la caché Varnish de CloudPanel con Cloudflare?" group="faq">
+Sí. Cloudflare no cachea HTML salvo que añadas una regla de caché, así que las peticiones de página pasan con `cf-cache-status: DYNAMIC` y Varnish responde con un `x-cache-age` que crece. Déjalo así: cachear también HTML en el edge significa que una purga del panel no llega a esas copias.
+</Accordion>
+
+<Accordion label="¿Cómo purgo la caché después de publicar?" group="faq">
+Normalmente no hay que hacer nada. Guardar una entrada hace que el controlador envíe un `PURGE` con `X-Cache-Tags: <prefix>-post-<id>` a `127.0.0.1:6081`, y toda página con esa etiqueta se descarta. Los menús, los widgets y la portada no quedan cubiertos, así que pulsa **Purge Entire Cache** en la página de Varnish Cache o usa el botón de purga del plugin cuando se vean viejos. Para una sola página, purga su etiqueta con `curl -v -X PURGE -H 'X-Cache-Tags: <prefix>-post-<id>' 127.0.0.1:6081`.
+</Accordion>
+
+<Accordion label="¿Por qué la carga de PHP sigue alta después de activar Varnish?" group="faq">
+La mayoría de los fallos de caché vienen de peticiones que nunca se guardan. Los rastreadores que recorren miles de URL distintas son una fuente, y [CrowdSec](/es/crowdsec-servidor-seguro/) puede bloquear bots abusivos. Los usuarios con sesión, las peticiones POST y las páginas que coinciden con una exclusión son las otras. Ejecuta `varnishlog -g request` y `varnishtop -i ReqURL` para ver qué URL acaban en `VCL_call MISS` o `PASS`, y acorta esa lista con Excludes o Excluded Params. Otra causa es una duración de `0`, que desactiva la caché en todas las páginas, así que lee el valor en el panel.
+</Accordion>

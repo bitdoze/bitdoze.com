@@ -1,163 +1,561 @@
 ---
 date: 2023-04-26T5:00:00Z
+lastmod: 2026-11-23T00:00:00Z
 translationKey: "upload-directory-oci-bucket-python"
-title: "Subida fácil de archivos a un bucket de Oracle Cloud (OCI): script de Python"
-description: "Un script de Python que facilita la subida de archivos a Oracle Cloud Infrastructure Object Storage."
+title: "Sube un árbol de directorios a un bucket de OCI con Python"
+meta_title: "Sube un árbol de directorios a un bucket de OCI con Python"
+description: "Sube un directorio a un bucket de OCI con Python: configuración, subidas multipart, reintentos, dry run, verificación, política IAM y costes del SDK oci."
+quickAnswer: "python upload_dir.py --dir ./backups --bucket my-bucket --dry-run muestra el plan; quita --dry-run para subir, los nombres de objeto conservan el árbol"
 image: "@assets/images/23/04/upload-files-oci-sm.jpeg"
 categories: ["hosting"]
 authors: ["Dragos"]
-tags: ["oci", "python"]
-canonical: "https://www.bitdoze.com/es/subir-directorio-oci-bucket-python/"
+tags: ["oracle-cloud", "object-storage", "python"]
+canonical: https://www.bitdoze.com/es/subir-directorio-oci-bucket-python/
 ---
 
-Este script de Python está pensado para principiantes que quieren subir archivos desde su ordenador a Oracle Cloud Infrastructure Object Storage. El script usa la librería OCI para conectarse a la nube y subir archivos a un bucket. Incluye funciones para comprobar si un bucket existe, crear uno nuevo si es necesario y subir a la nube los archivos de un directorio indicado.
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-El script es fácil de usar y se puede ejecutar con un simple comando en una consola o terminal. Esto lo convierte en una gran herramienta para cualquiera que busque una forma sencilla y eficiente de almacenar y acceder a archivos en la nube de OCI.
+Ejecuta `python upload_dir.py --dir ./backups --bucket my-bucket` para subir un árbol de directorios a Oracle Cloud Infrastructure (OCI) Object Storage con el SDK de Python. Los nombres de objeto conservan la ruta de carpetas, los archivos que ya están en el bucket se omiten y `--dry-run` muestra primero el plan. Añade `--compartment-id` cuando el bucket todavía no existe.
 
-## Qué hace el script
+La versión de 2023 de este artículo tenía un bug que perdía datos. Usaba solo el nombre del archivo como nombre de objeto, así que `data/2023/report.csv` y `data/2024/report.csv` acababan los dos como `report.csv`, y la segunda subida reemplazaba a la primera. Esta versión es un solo archivo, `upload_dir.py`. Conserva el árbol en los nombres de objeto, omite los archivos que ya están, reintenta las subidas fallidas y verifica el resultado listando el bucket.
 
-### Librerías
+<Notice type="warning" title="Qué se probó y qué no">
+El script se compiló y ejecutó en Python 3.12.3 con `oci` 2.192.0 de PyPI: `--help`, `--dry-run` sobre un árbol pequeño y la ruta completa de subida contra una implementación falsa en memoria de la API de Object Storage (creación del bucket, política de omisión, overwrite, fallos y verificación). En la máquina donde se escribió este artículo no había credenciales de OCI. No se ejecutó una subida real a un tenancy. Ejecuta primero `--dry-run` y revisa la salida de verificación de tu primera subida real.
+</Notice>
 
-El programa usa algunas librerías integradas de Python para trabajar con archivos y directorios, además de una librería llamada "oci" que permite al programa comunicarse con Oracle Cloud.
+## ¿Por qué perdía datos el script antiguo?
 
-### Crear un cliente de Object Storage
+Usaba el nombre base del archivo como nombre de objeto, así que dos archivos llamados `report.csv` en carpetas distintas se convertían en un solo objeto y la segunda subida reemplazaba a la primera. En total el script antiguo tenía tres problemas, y uno de ellos en silencio:
 
-El programa empieza creando un objeto "cliente de Object Storage". Este objeto es como una herramienta especial que ayuda al programa a comunicarse con Oracle Cloud y a hacer cosas como almacenar archivos.
+- **Los nombres de objeto se aplanaban.** `upload_manager.upload_file(namespace, bucket_name, file, file_path)` usaba `file`, el nombre base. Cada archivo con el mismo nombre en otra subcarpeta sobrescribía al anterior, y el resultado en el bucket era una lista plana.
+- **`max_parallel_uploads=10` no hacía nada.** `UploadManager` ignora los argumentos de palabra clave que no conoce. Las opciones que lee son `allow_multipart_uploads`, `allow_parallel_uploads` y `parallel_process_count` (3 por defecto).
+- **Sin verificación, sin resumen y sin manejo de fallos.** Una excepción en el tercer archivo terminaba la ejecución con un traceback. Tenías que adivinar qué había en el bucket.
 
-### Comprobar si el bucket existe
+![Flujo del script de subida desde la configuración hasta el resumen, con los dos puntos donde el script antiguo perdía datos marcados como cajas oscuras](@assets/images/23/04/upload-oci-bucket-pipeline.webp)
 
-El programa comprueba si ya existe un "bucket" en Oracle Cloud. Un bucket es como una carpeta especial en la nube donde se pueden almacenar archivos. Si el bucket ya existe, el programa no creará uno nuevo.
+*El pipeline. El dry run no necesita credenciales y se salta las tres primeras cajas; las cajas oscuras son donde el script de 2023 perdía datos.*
 
-### Crear un bucket
+## Requisitos previos
 
-Si el bucket no existe, el programa lo crea. Es como crear una carpeta nueva en la nube para almacenar archivos. El programa también establece algunas reglas para asegurarse de que nadie pueda ver los archivos del bucket sin permiso.
+<ListCheck>
+<ul>
+<li>Python 3.9 o posterior. PyPI lista `oci` 2.192.0 para Python 3.6 a 3.13, y la tabla de soporte de Oracle indica de 3.6 a 3.11 según el sistema. La instalación del SDK y el dry run de abajo corrieron en 3.12.3.</li>
+<li>Un tenancy de OCI, un usuario con permiso de escritura en un compartment y el OCID del compartment (empieza por `ocid1.compartment.`).</li>
+<li>Una política IAM para ese usuario, mira la [sección de autenticación](#configura-la-autenticación).</li>
+<li>La CLI de OCI (se usa una vez para crear el archivo de configuración y la clave de API) o una clave de firma que generes tú mismo.</li>
+<li>Sin espacio de trabajo extra: el script lee los archivos del disco, no los copia ni los comprime antes.</li>
+</ul>
+</ListCheck>
 
-### Subir archivos al bucket
+No necesitas la CLI de OCI para ejecutar el script. El paquete de Python `oci` es una instalación aparte y habla con la API REST de Object Storage por su cuenta. En un Mac, primero [instala Python y crea un venv con Homebrew](/es/instalar-actualizar-python-mac/); los comandos de abajo son idénticos.
 
-A continuación, el programa busca archivos en un directorio de tu ordenador y sube cada uno al bucket en la nube. Es como meter tus juguetes en una caja y enviar la caja a la nube, para poder jugar con ellos desde cualquier parte del mundo.
-
-### Juntarlo todo
-
-El programa reúne todos estos pasos en una función "main", que es como una gran receta que el ordenador debe seguir. También usa algunos comandos especiales que te permiten elegir desde qué directorio de tu ordenador subir los archivos y a qué bucket de la nube enviarlos.
-
-## Script de Python para subir el directorio al bucket de OCI Object Storage
-
-```python
-import oci
-import os
-import sys
-import argparse
-
-
-
-
-# Comprobar si el bucket existe
-def create_bucket_if_not_exists(object_storage, namespace, compartment_id, bucket_name):
-    try:
-        object_storage.get_bucket(namespace, bucket_name)
-        print(f"Bucket {bucket_name} already exists")
-    except oci.exceptions.ServiceError as e:
-        if e.status == 404:
-            # Crear el bucket si no existe
-            print(f"Creating bucket {bucket_name}")
-            create_bucket_details = oci.object_storage.models.CreateBucketDetails(
-                name=bucket_name,
-                compartment_id=compartment_id,
-                public_access_type="NoPublicAccess"
-            )
-            object_storage.create_bucket(namespace, create_bucket_details)
-        else:
-            raise
-
-# Subir el contenido del directorio
-def upload_directory_contents(bucket_name, object_storage, namespace, directory_path):
-    # Crear el Upload Manager
-    upload_manager = oci.object_storage.UploadManager(object_storage, max_parallel_uploads=10)
-    for root, dirs, files in os.walk(directory_path):
-        for file in files:
-            file_path = os.path.join(root, file)
-            print(f"Uploading {file_path}")
-            upload_manager.upload_file(namespace, bucket_name, file, file_path)
-
-def main():
-
-    # Crear el cliente de Object Storage
-    config = oci.config.from_file("~/.oci/config", "DEFAULT")
-    object_storage = oci.object_storage.ObjectStorageClient(config)
-    # Configurar los detalles del compartment y el bucket
-    compartment_id = "<compartment_id>"
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dir', required=True)
-    parser.add_argument('--bucket_name', required=True)
-    args = parser.parse_args()
-    bucket_name = args.bucket_name
-    directory_path = args.dir
-
-    namespace = object_storage.get_namespace().data
-    create_bucket_if_not_exists(object_storage, namespace, compartment_id, bucket_name)
-    upload_directory_contents(bucket_name, object_storage, namespace, directory_path)
-
-if __name__ == "__main__":
-    main()
-```
-
-En el script tienes que reemplazar **compartment_id** por tu propio compartment_id, que es donde se almacenará el bucket.
-
-## Preparar todo para ejecutar el script
-
-### Instalación de OCI
-
-Python ya debería estar instalado en tu PC, así que no lo trataré aquí. Primero tenemos que instalar la herramienta oci. Para ello, abre una consola o terminal y escribe el siguiente comando:
+## Instala el SDK en un entorno virtual
 
 ```bash
-pip install oci
+python3 -m venv .venv
+source .venv/bin/activate
+pip install oci==2.192.0
+python -c "import oci; print(oci.__version__)"
 ```
 
-Este comando instalará oci para que nuestro script de Python pueda usarlo.
+Última línea esperada: `2.192.0`. Fijar la versión importa. 2.192.0 era la versión más reciente en PyPI el 2026-11-23, y el SDK publica una nueva cada una o dos semanas ([lista de versiones](https://github.com/oracle/oci-python-sdk/releases)). Fijarla evita que un `pip install -r requirements.txt` del trimestre que viene traiga un cliente distinto.
 
-Otra opción es instalarlo con Yum; en Linux 7 sería:
+Si `pip install` falla en `cryptography`, actualiza pip primero. La [documentación de cryptography](https://cryptography.io/en/latest/installation/) señala un pip antiguo como la causa más común de problemas de instalación.
+
+## Configura la autenticación
+
+El SDK puede firmar las peticiones de varias formas. Dos cubren una subida de directorio:
+
+![Dos rutas de autenticación, un perfil de clave de API en ~/.oci/config y un instance principal, que terminan en el mismo cliente de Object Storage](@assets/images/23/04/oci-sdk-auth-methods.webp)
+
+*Ambas rutas producen el mismo `ObjectStorageClient`. Elige según dónde se ejecuta el script, no según lo que sube.*
+
+### Perfil de clave de API (portátil, runner de CI con una clave guardada)
+
+La CLI escribe el archivo y el par de claves en un solo diálogo ([instalación y configuración de la CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm)):
 
 ```bash
-sudo yum install python36-oci-cli
+oci setup config
 ```
 
-Más información en [Working With CLI](https://docs.public.oneportal.content.oci.oraclecloud.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm)
-
-### Crear el archivo de configuración
-
-A continuación necesitamos un archivo secreto llamado config que indica al script cómo acceder a nuestra caja de juguetes en OCI. El archivo debería tener este aspecto:
+Pide el OCID del usuario, el OCID del tenancy y la región, genera un par de claves RSA e imprime la huella. Añade la clave pública a tu usuario en *API keys* en la consola, y el archivo `~/.oci/config` queda así:
 
 ```ini
 [DEFAULT]
-user=ocid1.user...
-fingerprint=...
-key_file=path/to/your/oci_api_key.pem
-tenancy=ocid1.tenancy...
-region=us-ashburn-1
+user=ocid1.user.oc1..aaaa...
+fingerprint=aa:bb:cc:...
+key_file=~/.oci/oci_api_key.pem
+tenancy=ocid1.tenancy.oc1..aaaa...
+region=eu-frankfurt-1
 ```
 
-El script buscará este archivo cuando se ejecute. Debes configurarlo con tus datos; la documentación de OCI te ayudará a hacerlo. El archivo se lee en el script en esta línea:
-
-```python
-config = oci.config.from_file("~/.oci/config", "DEFAULT")
-```
-
-### Ejecutar el script
-
-Para ejecutar el script, abre una consola o terminal y escribe el siguiente comando:
+Comprueba el resultado sin subir nada:
 
 ```bash
-python script.py --dir /path/to/your/folder --bucket_name your_bucket_name
+oci os ns get
 ```
 
-Sustituye `/path/to/your/folder` por la ruta a la carpeta con los juguetes (archivos) que quieres almacenar, y `your_bucket_name` por el nombre que quieras darle a tu caja de juguetes (bucket).
+Imprime tu namespace de Object Storage cuando la clave y la huella funcionan. Oracle documenta `GetNamespace` como una llamada que no necesita política y que valida tus credenciales ([detalles de políticas de Object Storage](https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/objectstoragepolicyreference.htm)), así que esta comprobación no prueba la política de tu bucket. `NotAuthenticated` indica que la clave pública no se subió o que la huella no coincide. Un archivo de configuración ausente aparece en el script como `ConfigFileNotFound`.
 
-### Qué ocurre cuando se ejecuta el script
+Si `~/.oci/config` no existe, el SDK lee la ruta del archivo de la variable de entorno `OCI_CONFIG_FILE`. Un perfil sin entrada `region` recurre a `OCI_REGION`.
 
-Cuando el script se ejecuta, hace lo siguiente:
+### Instance principal (script en una VM de OCI)
 
-- Lee el archivo de configuración secreto.
-- Comprueba si nuestro bucket existe o crea uno nuevo si es necesario.
-- Toma todos los archivos de la carpeta elegida y los sube a nuestro bucket en OCI.
+Una VM dentro de OCI puede autenticarse como ella misma. No hay clave que copiar, nada que rotar y nada que se filtre en una copia del directorio home. Dos pasos únicos ([Calling Services from an Instance](https://docs.oracle.com/en-us/iaas/Content/Identity/Tasks/callingservicesfrominstances.htm)):
 
-¡Eso es todo! Ahora ya sabes cómo funciona el script y cómo usarlo para almacenar tus archivos de forma segura en OCI.
+1. Crea un grupo dinámico con una regla de pertenencia, por ejemplo `instance.id = 'ocid1.instance.oc1..aaaa...'` o `instance.compartment.id = 'ocid1.compartment.oc1..bbbb...'`.
+2. Añade una política para ese grupo (misma sintaxis que abajo, con `dynamic-group` en lugar de `group`).
+
+Después ejecuta el script con `--instance-principal`. Lee un token de corta duración del servicio de metadatos de la instancia en `169.254.169.254`, así que solo funciona en una instancia de OCI. En un portátil esa llamada falla tras una espera y el script termina con un error de autenticación.
+
+### Política IAM para crear buckets y escribir objetos
+
+Pon esto en una política (Identity, Policies), cambiando el nombre del grupo y del compartment:
+
+```
+allow group backup-uploaders to manage object-family in compartment backups
+```
+
+Crear un bucket requiere `BUCKET_CREATE`, que viene con `manage buckets`, y las llamadas de subida multipart requieren `manage objects` ([detalles de políticas de Object Storage](https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/objectstoragepolicyreference.htm)). Si el bucket ya existe y no quieres que el script cree ni borre ninguno, crea el bucket tú y estrecha la política:
+
+```
+allow group backup-uploaders to read buckets in compartment backups
+allow group backup-uploaders to manage objects in compartment backups
+```
+
+Leer objetos para la verificación requiere `OBJECT_INSPECT`, que tanto `read` como `manage` incluyen.
+
+## El script
+
+Guarda esto como `upload_dir.py`. Solo importa la librería estándar y `oci`.
+
+```python
+#!/usr/bin/env python3
+"""Upload a directory tree to an OCI Object Storage bucket.
+
+Object names are the file paths relative to --dir (POSIX separators), so the
+folder structure survives and two files called report.csv in different folders
+no longer overwrite each other.
+"""
+
+import argparse
+import fnmatch
+import mimetypes
+import os
+import sys
+import time
+
+import oci
+from oci.object_storage import ObjectStorageClient, UploadManager
+
+DEFAULT_EXCLUDES = [".git", ".DS_Store", "__pycache__", "node_modules", ".venv", "*.pyc", "*.swp"]
+PART_SIZE = 128 * 1024 * 1024  # files above this size go up as multipart uploads
+ATTEMPTS = 3                   # script retries per file, on top of the SDK retries
+BACKOFF_SECONDS = 2            # wait 2s, then 4s, then 8s between those retries
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Upload a directory tree to an OCI Object Storage bucket.")
+    parser.add_argument("--dir", required=True, help="local directory to upload")
+    parser.add_argument("--bucket", required=True, help="target bucket (created when missing)")
+    parser.add_argument("--prefix", default="", help="optional object name prefix, for example backups/db1")
+    parser.add_argument("--include", action="append", default=[], help="glob pattern to include, repeatable")
+    parser.add_argument("--exclude", action="append", default=[], help="glob pattern to exclude, repeatable")
+    parser.add_argument("--dry-run", action="store_true", help="print the plan, touch nothing, needs no credentials")
+    parser.add_argument("--overwrite", action="store_true", help="upload every file, even when the size matches")
+    parser.add_argument("--compartment-id", help="compartment OCID, only needed to create the bucket")
+    parser.add_argument("--profile", default="DEFAULT", help="profile name inside ~/.oci/config")
+    parser.add_argument("--instance-principal", action="store_true", help="auth as the OCI instance itself, no config file")
+    return parser.parse_args()
+
+
+def build_client(args):
+    """Return an Object Storage client with the SDK retry strategy attached."""
+    retry = oci.retry.DEFAULT_RETRY_STRATEGY
+    try:
+        if args.instance_principal:
+            signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+            config = {"region": signer.region}
+            return ObjectStorageClient(config, signer=signer, retry_strategy=retry, timeout=(10, 60))
+        config = oci.config.from_file(profile_name=args.profile)
+        oci.config.validate_config(config)
+        return ObjectStorageClient(config, retry_strategy=retry, timeout=(10, 60))
+    except Exception as e:
+        sys.exit("Authentication failed (%s: %s). Fix ~/.oci/config or run on an OCI instance with --instance-principal." % (type(e).__name__, e))
+
+
+def ensure_bucket(object_storage, namespace, args):
+    """Return the bucket, creating it with NoPublicAccess when it is missing."""
+    try:
+        return object_storage.get_bucket(namespace, args.bucket).data
+    except oci.exceptions.ServiceError as e:
+        if e.status != 404:
+            raise
+    if not args.compartment_id:
+        sys.exit("Bucket %s does not exist. Pass --compartment-id to create it." % args.bucket)
+    print("Creating bucket %s" % args.bucket)
+    details = oci.object_storage.models.CreateBucketDetails(
+        name=args.bucket,
+        compartment_id=args.compartment_id,
+        public_access_type="NoPublicAccess",
+        storage_tier="Standard",
+    )
+    return object_storage.create_bucket(namespace, details).data
+
+
+def object_prefix(args):
+    """The prefix as the SDK expects it: empty, or a path ending with a slash."""
+    return args.prefix.strip("/") + "/" if args.prefix else ""
+
+
+def walk_directory(args):
+    """Return (file_path, relative_name, size) for every file that passes the filters."""
+    plan = []
+    excludes = DEFAULT_EXCLUDES + args.exclude
+    for root, dirs, files in os.walk(args.dir):
+        # Prune excluded directories in place so os.walk never descends into them.
+        dirs[:] = sorted(d for d in dirs if not matches(d, excludes))
+        for name in sorted(files):
+            if matches(name, excludes):
+                continue
+            relative_root = os.path.relpath(root, args.dir).replace(os.sep, "/")
+            relative = name if relative_root == "." else relative_root + "/" + name
+            if args.include and not any(fnmatch.fnmatch(relative, p) or fnmatch.fnmatch(name, p) for p in args.include):
+                continue
+            file_path = os.path.join(root, name)
+            plan.append((file_path, relative, os.path.getsize(file_path)))
+    return plan
+
+
+def matches(name, patterns):
+    return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
+def upload_file(upload_manager, namespace, args, file_path, name):
+    """Upload one file; files above PART_SIZE become multipart uploads. Returns an error or None."""
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            upload_manager.upload_file(
+                namespace, args.bucket, name, file_path,
+                part_size=PART_SIZE, content_type=content_type,
+            )
+            return None
+        except Exception as e:  # the SDK already retried timeouts, 429 and 5xx
+            if attempt == ATTEMPTS:
+                return "%s: %s" % (type(e).__name__, e)
+            time.sleep(BACKOFF_SECONDS * 2 ** (attempt - 1))
+
+
+def list_bucket(object_storage, namespace, args):
+    """Return {object_name: size} for every object under the prefix, 1000 objects per call."""
+    remote = {}
+    start = None
+    while True:
+        response = object_storage.list_objects(
+            namespace, args.bucket, prefix=object_prefix(args), fields="name,size", start=start
+        )
+        for obj in response.data.objects or []:
+            remote[obj.name] = obj.size
+        start = response.data.next_start_with
+        if not start:
+            return remote
+
+
+def main():
+    args = parse_args()
+    args.dir = os.path.realpath(args.dir)
+    if not os.path.isdir(args.dir):
+        sys.exit("%s is not a directory" % args.dir)
+
+    namespace = remote = upload_manager = None
+    if not args.dry_run:
+        object_storage = build_client(args)
+        namespace = object_storage.get_namespace().data
+        bucket = ensure_bucket(object_storage, namespace, args)
+        print("Namespace %s, bucket %s, compartment %s" % (namespace, bucket.name, bucket.compartment_id))
+        # The manager reconfigures its client for parallel parts, so it gets its own.
+        upload_manager = UploadManager(
+            build_client(args),
+            allow_multipart_uploads=True,
+            allow_parallel_uploads=True,
+            parallel_process_count=3,
+        )
+        remote = list_bucket(object_storage, namespace, args)
+
+    plan = walk_directory(args)
+    pending, skipped = [], 0
+    for file_path, relative, size in plan:
+        name = object_prefix(args) + relative
+        if not args.dry_run and not args.overwrite and remote.get(name) == size:
+            skipped += 1
+            print("skip   %s (%d bytes, identical)" % (name, size))
+            continue
+        pending.append((file_path, name, size))
+
+    print("Plan: %d files, %d bytes to upload to %s" % (len(pending), sum(p[2] for p in pending), args.bucket))
+    if args.dry_run:
+        for _, name, size in pending:
+            print("would upload %s (%d bytes)" % (name, size))
+        return 0
+
+    started = time.time()
+    uploaded = failed = bytes_sent = 0
+    failures = []
+    for file_path, name, size in pending:
+        error = upload_file(upload_manager, namespace, args, file_path, name)
+        if error:
+            failed += 1
+            failures.append((name, error))
+            print("FAIL   %s: %s" % (name, error))
+        else:
+            uploaded += 1
+            bytes_sent += size
+            print("ok     %s (%d bytes)" % (name, size))
+
+    # Verify: list the bucket and compare object names and sizes with the local plan.
+    remote = list_bucket(object_storage, namespace, args)
+    expected = {object_prefix(args) + relative: size for _, relative, size in plan}
+    missing = sorted(n for n in expected if n not in remote)
+    mismatched = sorted(n for n, s in expected.items() if n in remote and remote[n] != s)
+
+    print("-" * 60)
+    print("uploaded %d files (%d bytes) in %.1fs, skipped %d, failed %d" % (
+        uploaded, bytes_sent, time.time() - started, skipped, failed))
+    print("verify: %d local files, %d objects in the bucket under the prefix" % (len(expected), len(remote)))
+    for name in missing:
+        print("  missing in bucket: %s" % name)
+    for name in mismatched:
+        print("  size differs: %s (local %d, bucket %d)" % (name, expected[name], remote[name]))
+    for name, error in failures:
+        print("  failed: %s: %s" % (name, error))
+    return 1 if failed or missing or mismatched else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+## Qué hace cada flag y cada ajuste
+
+Flags de la línea de comandos:
+
+| Flag | Qué hace | Por defecto | Cuándo cambiarlo |
+|---|---|---|---|
+| `--dir` | Directorio local que se sube. Obligatorio. | ninguno | Siempre. `--dir ./backups` genera nombres de objeto relativos a esa carpeta. |
+| `--bucket` | Bucket de destino, se crea si falta. Obligatorio. | ninguno | Los nombres de bucket son únicos en el namespace del tenancy. |
+| `--prefix` | Mete todos los objetos bajo una ruta, `backups/db1/data/2023/report.csv`. | vacío | Usa un prefijo por máquina o por tarea para que las ejecuciones no choquen en un bucket compartido. |
+| `--include` | Glob que un archivo debe cumplir, repetible. | todos los archivos | `--include '*.sql' --include '*.dump'` para solo volcados de base de datos. |
+| `--exclude` | Glob que se descarta, repetible. Se suma a la lista integrada. | `.git`, `node_modules`, `.venv`, `__pycache__`, `.DS_Store`, `*.pyc`, `*.swp` | Añade `.cache`, `*.tmp` o carpetas de medios. |
+| `--dry-run` | Muestra el plan, no abre conexión y no necesita credenciales. | apagado | Antes de cada primera subida a un bucket nuevo. |
+| `--overwrite` | Sube todos los archivos aunque el tamaño en el bucket coincida. | apagado | Solo cuando sabes que un archivo cambió sin cambiar de tamaño. |
+| `--compartment-id` | Compartment donde se crea el bucket. | ninguno | Solo la primera vez, cuando el bucket no existe todavía. |
+| `--profile` | Nombre de la sección dentro de `~/.oci/config`. | `DEFAULT` | Un segundo tenancy o un perfil de CI propio. |
+| `--instance-principal` | Se autentica como la VM en lugar de con un archivo. | apagado | En cualquier ejecución dentro de una instancia de OCI. |
+
+Ajustes dentro del script:
+
+| Ajuste | Qué hace | Por defecto | Cuándo cambiarlo |
+|---|---|---|---|
+| `DEFAULT_EXCLUDES` | Directorios y archivos que el recorrido nunca baja a mirar. | mira la fila de `--exclude` | Edita la lista al inicio del archivo. |
+| `PART_SIZE` | Tamaño de parte para `upload_file`. Los archivos más grandes suben como multipart, el resto en un solo PUT. | 128 MiB (el valor por defecto del SDK) | Súbelo para reducir peticiones en archivos enormes; el servicio limita una parte a 50 GiB y una subida multipart a 10.000 partes. |
+| `allow_multipart_uploads` | Permite al manager usar multipart. | `True` | Déjalo activado; sin él no se puede subir un archivo de más de 50 GiB. |
+| `allow_parallel_uploads` | Sube en paralelo las partes de una subida multipart. | `True` | Déjalo activado para archivos grandes; no afecta a los archivos que van en un solo PUT. |
+| `parallel_process_count` | Trabajadores en paralelo por subida multipart. | 3 en el SDK | Súbelo a 5 o 6 en un enlace rápido; más partes en paralelo abren más conexiones. |
+| `ATTEMPTS`, `BACKOFF_SECONDS` | Reintentos del script por archivo cuando el SDK se rinde, esperando 2 s, luego 4 s y luego 8 s. | 3, 2 | Sube `ATTEMPTS` en un enlace inestable. |
+| `oci.retry.DEFAULT_RETRY_STRATEGY` | Reintentos del SDK: 8 intentos en 600 s, backoff exponencial con jitter, ante timeouts, errores de conexión, 429 y 5xx salvo 501. | valor del SDK | Déjalo. El cliente ya reintenta, así que el script solo captura lo que sobrevive a eso. |
+| `timeout=(10, 60)` | Tiempo de espera de conexión y de lectura en segundos por petición. | 10 s de conexión, 60 s de lectura (valor del SDK) | Sube el de lectura en un enlace lento con PUT grandes. |
+| Política de overwrite | Sin `--overwrite`, un archivo cuyo objeto existe con el mismo tamaño se omite. | omitir idénticos | El valor por defecto es seguro y barato: repetir una ejecución no cuesta nada con archivos sin cambios. |
+
+Los nombres de objeto usan siempre barras y la ruta relativa a `--dir`, tanto en Linux como en macOS y Windows. Ese es el arreglo del bug de 2023.
+
+## Ejecución
+
+### Primero el dry run
+
+```bash
+python upload_dir.py --dir ./tree --bucket my-bucket --dry-run
+```
+
+Salida del árbol de prueba usado para este artículo (dos archivos llamados `report.csv` en carpetas distintas, un `notes.txt` y una carpeta `node_modules` que debe omitirse):
+
+```text
+Plan: 3 files, 13 bytes to upload to my-bucket
+would upload notes.txt (1 bytes)
+would upload data/2023/report.csv (6 bytes)
+would upload data/2024/report.csv (6 bytes)
+```
+
+Los dos `report.csv` reciben nombres de objeto distintos. El script antiguo habría impreso `Uploading .../report.csv` dos veces y escrito un solo objeto.
+
+Con un prefijo y un exclude adicional:
+
+```bash
+python upload_dir.py --dir ./tree --bucket my-bucket --prefix backups/db1 --exclude '*.txt' --dry-run
+```
+
+```text
+Plan: 2 files, 12 bytes to upload to my-bucket
+would upload backups/db1/data/2023/report.csv (6 bytes)
+would upload backups/db1/data/2024/report.csv (6 bytes)
+```
+
+### La subida real
+
+```bash
+python upload_dir.py \
+  --dir /var/backups/db1 \
+  --bucket company-backups \
+  --prefix db1 \
+  --compartment-id ocid1.compartment.oc1..aaaa...
+```
+
+Cada archivo imprime `ok`, `skip` o `FAIL`, y la ejecución termina con el resumen:
+
+```text
+------------------------------------------------------------
+uploaded 142 files (5318272 bytes) in 38.4s, skipped 0, failed 0
+verify: 142 local files, 142 objects in the bucket under the prefix
+```
+
+Ese bloque de resumen muestra la forma de la salida, no es una captura de un tenancy real. El código de salida es 0 solo cuando nada falló, nada falta y ningún tamaño difiere, así que la línea entra en cron y CI tal cual:
+
+```bash
+python upload_dir.py --dir /var/backups/db1 --bucket company-backups --prefix db1 \
+  || logger -t oci-upload "upload to company-backups failed"
+```
+
+## Verifica la subida
+
+El script ya lista el bucket después de subir y compara cada archivo local con un objeto del mismo nombre y tamaño. Dos comprobaciones independientes:
+
+```bash
+oci os object list --bucket-name company-backups --prefix db1/ --all --output table
+```
+
+Deberías ver el árbol bajo el prefijo, y el recuento debería coincidir con la línea `verify:`. Sin `--all` la CLI se detiene en 100 objetos. Una comprobación puntual de un objeto desde la CLI:
+
+```bash
+oci os object get --bucket-name company-backups --name db1/data/2023/report.csv --file /tmp/report.csv
+diff /tmp/report.csv /var/backups/db1/data/2023/report.csv
+```
+
+Que `diff` no imprima nada significa que el objeto coincide byte a byte con el archivo local. Comparar tamaños no detecta una corrupción del mismo tamaño. Para archivos por debajo de `PART_SIZE`, compara el campo `md5` en base64 (pídelo con `fields="name,size,md5"` en `list_objects`) con una suma de control local.
+
+## Errores frecuentes y su solución
+
+| Error o síntoma | Causa | Solución |
+|---|---|---|
+| `ConfigFileNotFound` | No existe `~/.oci/config` | Ejecuta `oci setup config` o escribe el archivo a mano. |
+| `InvalidConfig` seguido de una lista de claves `missing` | Al perfil le falta `user`, `fingerprint`, `key_file`, `tenancy` o `region` | Completa el perfil. |
+| `Authentication failed (...)` | `NotAuthenticated` o el servicio de metadatos de la instancia no responde | Sube la clave pública, o quita `--instance-principal` fuera de la VM. |
+| `Bucket ... does not exist. Pass --compartment-id` | El bucket no existe, está en otra región o tu política no lo cubre. `get_bucket` devuelve 404 `BucketNotFound` en los tres casos | Revisa la región del perfil y la política de arriba; añade `--compartment-id` una vez si el bucket es nuevo. |
+| `NotAuthorizedOrNotFound` en `create_bucket` | Sin política para el compartment, o un OCID de compartment equivocado | Añade la política de arriba y revisa el OCID. |
+| 409 `NotAuthorizedOrResourceAlreadyExists` en `create_bucket` | El nombre ya está ocupado en el namespace, o no tienes permiso para crearlo | Elige otro nombre; los nombres de bucket son únicos dentro del namespace. |
+| `429 TooManyRequests` en una línea de fallo | Límite de tasa del servicio, normalmente por muchos archivos pequeños | El SDK ya reintenta los 429; baja `parallel_process_count` o reparte las tareas de cron. |
+| `missing in bucket` en el bloque de verificación | Un archivo cambió o desapareció entre el recorrido y la subida, o falló una parte | Repite la ejecución; la política de omisión sube solo lo que difiere. |
+| `size differs` | El archivo se escribió durante la subida | Congela el origen (detén quien escribe o sube un volcado) y repite. |
+| Muy lento con miles de archivos pequeños | Un PUT por archivo, cada uno una petición HTTPS firmada | Con muchos archivos pequeños el problema es de peticiones, no de ancho de banda; empaquetalos antes en un tar. |
+
+## Rollback
+
+Una subida sobrescribe los objetos con el mismo nombre. Para que sea reversible, activa el versionado en el bucket antes de la primera ejecución:
+
+```bash
+oci os bucket update --bucket-name company-backups --versioning Enabled
+```
+
+Después, un overwrite convierte el objeto antiguo en una versión anterior, que se conserva hasta que una regla de ciclo de vida la borre. No puedes desactivar el versionado una vez activo, solo suspenderlo ([versionado de Object Storage](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usingversioning.htm)). Sin versionado, el rollback consiste en restaurar tu copia anterior, así que no apuntes esto a un bucket cuyo contenido actual no puedas reproducir.
+
+El script nunca borra un objeto que no existe en local, así que una ejecución interrumpida deja el bucket en su estado anterior más los archivos que ya subieron. Quitar una ejecución errónea es borrar el prefijo:
+
+```bash
+oci os object bulk-delete --bucket-name company-backups --prefix db1/ --force
+```
+
+Lee ese prefijo dos veces antes de pulsar Enter.
+
+## Costes y notas de operación
+
+Object Storage tiene tres niveles: Standard, Infrequent Access y Archive ([niveles de almacenamiento](https://docs.oracle.com/en-us/iaas/Content/Object/Concepts/understandingstoragetiers.htm)). El nivel por defecto del bucket, Standard o Archive, se elige al crearlo y no se puede cambiar después. El script crea buckets Standard.
+
+| Nivel | Coste de almacenamiento | Estancia mínima | Recuperación | Úsalo para |
+|---|---|---|---|---|
+| Standard | el más alto de los tres | ninguna | sin cargo de recuperación, inmediata | Copias de las que restauras este mismo mes |
+| Infrequent Access | menor que Standard | 31 días | cargo por GB recuperado | Volcados semanales o mensuales |
+| Archive | el más bajo, alrededor de una décima parte de Standard en la [lista de precios](https://www.oracle.com/cloud/storage/archive-storage/faq/) de Oracle | 90 días | sin cargo de recuperación, pero hay que restaurar antes (como máximo una hora hasta el primer byte) | Copias de cumplimiento |
+
+Reglas que importan para una tarea de copias:
+
+- La lista de precios de Oracle muestra los primeros 10 GB al mes gratis tanto en Standard como en Archive ([FAQ de Archive](https://www.oracle.com/cloud/storage/archive-storage/faq/)), así que un juego pequeño de copias puede quedarse dentro de lo gratuito.
+- Borrar o sobrescribir un objeto en Infrequent Access o Archive antes de terminar su estancia mínima factura el resto del periodo. Mantén las resubidas diarias de los mismos archivos en Standard, o en un bucket con versionado, donde un overwrite conserva la copia antigua como versión anterior.
+- Oracle factura las peticiones por bloques de 10.000. Un árbol de 100.000 archivos pequeños cuesta más en peticiones que un solo archivo comprimido con los mismos bytes.
+- Oracle factura como almacenamiento las subidas multipart fallidas o abandonadas hasta que alguien las cancela. El arreglo documentado es una regla de ciclo de vida que borre las subidas sin confirmar tras un número de días; el ejemplo de la documentación usa 5 ([gestión del ciclo de vida](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usinglifecyclepolicies.htm)).
+- El tráfico de entrada es gratis. El de salida tiene una franquicia mensual (10 TB en regiones de Norteamérica, Europa y Reino Unido) y después se cobra por GB ([precios de red](https://www.oracle.com/cloud/networking/pricing/)).
+
+En cuanto a operación, deja el archivo de clave con modo 600, no lo subas nunca al repositorio y prefiere el instance principal en todo lo que viva mucho tiempo dentro de OCI. Si el script corre en una VM ARM de Oracle, los [benchmarks de Hetzner vs Oracle ARM](/es/rendimiento-arm-hetzner-oracle/) tienen resultados de red y disco para esas máquinas. La [instalación de WordPress en ARM con CloudPanel](/es/instalar-wordpress-ubuntu-arm/) cubre una configuración en el nivel gratuito de Oracle. Si los datos salen de un servidor CloudPanel, las [copias de seguridad remotas de CloudPanel con Rclone](/es/copias-seguridad-remotas-cloudpanel/) son la ruta hacia OneDrive y Google Drive. Este script es la ruta directa a OCI para cualquier directorio.
+
+## Funciones de Object Storage que conviene conocer
+
+| Función | Qué hace | Cómo encaja con este script |
+|---|---|---|
+| [Versiones de objeto](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usingversioning.htm) | Cada overwrite o borrado conserva la copia anterior como versión | Actívalas para que `--overwrite` sea reversible; las versiones ocupan almacenamiento hasta que una regla de ciclo de vida las elimine |
+| [Peticiones preautenticadas](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usingpreauthenticatedrequests.htm) | Una URL que concede lectura, escritura o ambas sobre un objeto, un prefijo o un bucket, con caducidad | Comparte un archivo subido sin hacer público el bucket |
+| [Reglas de retención](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usingretentionrules.htm) | Regla a nivel de bucket que impide borrar o sobrescribir objetos durante un tiempo | Protege un bucket de copias de una máquina comprometida; una regla bloqueada no se puede acortar |
+| [Políticas de ciclo de vida](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/usinglifecyclepolicies.htm) | Hasta 1.000 reglas por bucket que mueven, borran o expiran objetos, versiones y subidas multipart fallidas | Borrar los objetos antiguos de `db1/daily/` a los 30 días, cancelar subidas sin confirmar |
+| Tipo de acceso público | `NoPublicAccess` (el valor que fija el script), `ObjectRead`, `ObjectReadWithoutList` | Mantén `NoPublicAccess` y comparte con peticiones preautenticadas |
+| API de compatibilidad S3 | Los mismos buckets a través del protocolo S3 con claves secretas de cliente | Permite que rclone y otras herramientas S3 escriban en el mismo bucket; mira [Pluton: copias autoalojadas con restic y rclone](/es/pluton-backup-autoalojado/) y [Zerobyte, una interfaz gráfica para restic](/es/zerobyte-interfaz-grafica-restic/) |
+
+Este script habla solo con la API de OCI. Para almacenamiento compatible con S3 como [Cloudflare R2 con Dokploy](/es/backups-dokploy-cloudflare-r2/), usa un cliente S3 como `boto3` con la misma regla de nombres de objeto. [Bunny Storage vs S3 vs Backblaze](/es/bunny-storage-vs-s3-vs-backblaze/) compara niveles y precios entre proveedores.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Qué debe contener el archivo ~/.oci/config?" group="faq">
+
+Una cabecera de perfil como `[DEFAULT]` y cinco entradas: `user`, `fingerprint`, `key_file`, `tenancy` y `region`, más una `pass_phrase` opcional si la clave está cifrada (Oracle marca esa entrada como obsoleta). `oci setup config` escribe las entradas y genera el par de claves. El script carga el perfil indicado por `--profile` y llama a `validate_config`, así que una entrada que falte detiene la ejecución antes de subir nada.
+
+</Accordion>
+
+<Accordion label="¿Necesita el script la CLI de OCI instalada?" group="faq">
+
+No. Importa el paquete de Python `oci`, que habla directamente con la API REST de Object Storage. La CLI solo es una comodidad para crear `~/.oci/config` una vez y para la comprobación con `oci os object list`. El script en sí necesita Python y `pip install oci==2.192.0`.
+
+</Accordion>
+
+<Accordion label="¿Cómo subo solo los archivos nuevos o modificados?" group="faq">
+
+Ejecútalo sin `--overwrite`. El script lista primero el bucket, omite cualquier archivo cuyo objeto ya exista con el mismo tamaño y lo imprime como `skip`. Añade `--overwrite` para forzar todos los archivos, por ejemplo tras una edición que no cambió el tamaño.
+
+</Accordion>
+
+<Accordion label="¿Cómo conserva el script la estructura de carpetas?" group="faq">
+
+El nombre de objeto es la ruta del archivo relativa a `--dir` con barras, más `--prefix` si se indica. `--dir ./tree --prefix backups/db1` convierte `./tree/data/2023/report.csv` en `backups/db1/data/2023/report.csv`. El script antiguo usaba solo el nombre base, así que los archivos con el mismo nombre se sobrescribían entre sí.
+
+</Accordion>
+
+<Accordion label="¿Cuánto puede pesar un archivo y cuándo empieza el multipart?" group="faq">
+
+Un objeto puede llegar a 10 TiB. Un PUT simple se queda en 50 GiB, así que todo lo que pese más tiene que ir como multipart, con partes de como máximo 50 GiB y como máximo 10.000 partes. `UploadManager` pasa a multipart cuando un archivo supera `part_size`, que es 128 MiB por defecto y en este script.
+
+</Accordion>
+
+<Accordion label="¿Qué política IAM necesita el script?" group="faq">
+
+`allow group backup-uploaders to manage object-family in compartment backups` cubre todo, incluida la creación del bucket. Para un bucket existente bastan `read buckets` más `manage objects`: `get_bucket` necesita `BUCKET_READ`, las llamadas multipart necesitan `manage objects` y la verificación necesita `OBJECT_INSPECT`. En una VM, crea un grupo dinámico y escribe la misma frase con `dynamic-group`.
+
+</Accordion>
+
+<Accordion label="¿Cómo ejecutarlo en una VM de OCI sin archivo de clave?" group="faq">
+
+Añade la instancia a un grupo dinámico, da esa política al grupo y ejecuta con `--instance-principal`. El SDK obtiene entonces un token de corta duración desde `169.254.169.254`, así que no se guarda ningún archivo y no hay nada que rotar. Solo funciona en una instancia de OCI. En cualquier otro sitio la llamada falla tras una espera.
+
+</Accordion>
+
+<Accordion label="¿Cuánto cuesta la subida?" group="faq">
+
+El tráfico de entrada es gratis. Pagas por almacenamiento, por cada 10.000 peticiones y por las recuperaciones desde Infrequent Access. Standard es el nivel más caro y Archive cuesta alrededor de una décima parte, y los primeros 10 GB al mes de cada uno son gratis en la lista de precios de Oracle. Vigila las estancias mínimas de 31 y 90 días de los niveles baratos y las subidas multipart abandonadas, que se facturan como almacenamiento hasta que alguien las cancela.
+
+</Accordion>

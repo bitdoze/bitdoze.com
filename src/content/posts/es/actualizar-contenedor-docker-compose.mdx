@@ -1,167 +1,368 @@
 ---
 date: 2023-05-11T5:00:00Z
+lastmod: 2026-11-23T00:00:00Z
 translationKey: "updating-container-docker-compose"
-title: "Cómo Actualizar un Contenedor con Docker Compose"
-description: "Cómo actualizar un contenedor con Docker Compose es un tutorial que te muestra cómo usar Docker Compose para actualizar la imagen y la configuración de un contenedor sin perder tus datos."
+title: "Cómo actualizar contenedores de Docker Compose (rollback)"
+meta_title: "Actualizar contenedores Docker Compose (rollback)"
+description: "Cómo actualizar una pila de Docker Compose sin perder datos: descargar imágenes, recrear contenedores, verificar, hacer rollback y limpiar. Salida real de v2."
 image: "@assets/images/23/05/docker-compose-update-containers.jpeg"
 categories: ["self-hosting"]
 authors: ["Dragos"]
-tags: ["docker"]
+tags: ["docker-compose", "docker"]
 canonical: "https://www.bitdoze.com/es/actualizar-contenedor-docker-compose/"
+quickAnswer: "docker compose pull && docker compose up -d --remove-orphans, y luego docker compose up -d --wait para confirmar que la pila está sana"
 ---
 
-import { Picture } from "astro:assets";
-import dockerpull from "@assets/images/23/05/docker-pull.png";
-import dockerup from "@assets/images/23/05/docker-up.jpeg";
+import Accordion from "@components/widgets/Accordion.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-Docker Compose es una herramienta que te permite definir y ejecutar varios contenedores como un solo servicio. Es ideal para desarrollar y probar aplicaciones que tienen múltiples componentes, como un servidor web, una base de datos y una caché. Te mostraré cómo actualizar un contenedor con Docker Compose en unos pocos pasos sencillos. Aprenderás a modificar el Dockerfile, reconstruir la imagen y reiniciar el contenedor con la nueva configuración.
+Actualizar un contenedor de Docker Compose se reduce a dos comandos: `docker compose pull` descarga la imagen nueva y `docker compose up -d` cambia el contenedor. La parte que suele doler es la segunda, porque ahí se decide qué pasa con tus datos y qué hacer cuando la versión nueva está rota.
 
-Tengo una instalación de [Plausible](https://plausible.io/) hecha con docker-compose que llevaba casi 1 año sin actualizar; se montó siguiendo el tutorial: [Instalar Plausible Google Analytics](https://www.wpdoze.com/how-to-install-plausible/) y tiene el siguiente archivo docker compose:
+Esta guía recorre la actualización completa con una pila pequeña de nginx. Cubre qué cambia cada comando, cómo hacer copia de los volúmenes antes, cómo verificar el resultado y cómo volver atrás. Cada bloque de salida es real, de Docker 29.2.1 y Compose v5.0.2, con el proyecto de prueba mostrado como `demo`.
+
+La versión anterior de este artículo usaba `docker-compose` v1 sobre una pila de Plausible. Ese binario v1 está retirado, así que mira [la referencia de comandos de Docker](/es/comandos-docker/) si todavía lo encuentras en tutoriales viejos. Para Plausible en concreto usa la [guía de instalación de Plausible](/es/instalar-plausible-analytics/).
+
+## ¿Qué hacen `docker compose pull` y `up -d`?
+
+`docker compose pull` descarga las imágenes nuevas y no toca ningún contenedor. `docker compose up -d` recrea cada contenedor cuya imagen o configuración cambió y deja en marcha el resto.
+
+`pull` descarga la imagen de cada línea `image:` del archivo Compose y ahí se queda. Nunca detiene, reinicia ni recrea un contenedor, así que puedes ejecutarlo en cualquier momento.
+
+`docker compose up -d` es el comando que aplica el cambio. Para cada servicio compara el contenedor en ejecución con la imagen y la configuración que tiene ahora. Si cualquiera de las dos cambió, Compose detiene el contenedor viejo, lo elimina y arranca uno nuevo desde la imagen nueva. Si nada cambió, el contenedor se queda como está, y por eso una pila con cinco servicios muestra una línea `Recreated` y cuatro `Running` después de una actualización.
+
+Una recreación sustituye el contenedor, no todo lo que lo rodea:
+
+![Diagrama de una recreación de Compose: el contenedor viejo se elimina, el nuevo se crea desde la imagen nueva, y el volumen con nombre, el bind mount, el volumen anónimo y la red se mantienen conectados](@assets/images/23/05/docker-compose-recreate-volumes.webp)
+
+*Una recreación cambia el contenedor. Los volúmenes con nombre, los bind mounts, la red y, por defecto, los volúmenes anónimos se conservan.*
+
+| Pieza | Tras una recreación | Dónde viven los datos |
+|---|---|---|
+| Volumen con nombre (`db-data:/var/lib/postgresql/data`) | Se conserva | `/var/lib/docker/volumes/<proyecto>_db-data/_data` en el host |
+| Bind mount (`./conf.d:/etc/nginx/conf.d`) | Se conserva | La carpeta del host que indicaste |
+| Volumen anónimo (sin nombre antes de los dos puntos) | Se conserva por defecto, nuevo y vacío con `--renew-anon-volumes` | `/var/lib/docker/volumes/<id aleatorio>/_data` |
+| Red | Se conserva | n/a |
+| Lo escrito dentro del contenedor fuera de un volumen | Se pierde | Estaba en la capa de escritura del contenedor |
+
+La fila del volumen anónimo es la que hay que leer dos veces. Compose copia los volúmenes anónimos del contenedor viejo al nuevo a menos que pases `-V`. Ese comportamiento por defecto te salva una vez y después te esconde los datos bajo un nombre aleatorio, así que ponle nombre a todo volumen que guarde algo que te importe.
+
+### Flags que usarás con `up`
+
+| Flag | Qué hace | Cuándo usarlo |
+|---|---|---|
+| `--pull always` | Descarga la imagen antes de arrancar, aunque exista una copia local | Cuando te saltas el paso `pull` aparte |
+| `--build` | Construye las imágenes de los servicios con sección `build:` antes de arrancar | Pilas que traen su propio Dockerfile |
+| `--wait` | Espera hasta que todos los servicios estén en ejecución o sanos, y sale | La comprobación de salud después de una actualización |
+| `--wait-timeout 60` | Fija los segundos máximos que bloquea `--wait` | Servicios que tardan en arrancar, para que el comando falle en vez de colgarse |
+| `--remove-orphans` | Elimina los contenedores de servicios que quitaste del archivo | Siempre, en una pila que editas a mano |
+| `--force-recreate` | Recrea contenedores aunque nada haya cambiado | Cuando parcheaste un contenedor a mano con `docker exec` y quieres uno limpio |
+| `--no-deps` | Arranca solo el servicio indicado, no los de `depends_on` | Para actualizar un servicio en una pila con base de datos compartida |
+| `--renew-anon-volumes` (`-V`) | Da al contenedor nuevo volúmenes anónimos recientes | Solo cuando la imagen debe arrancar con su volumen vacío |
+
+## Tags: `latest`, un tag fijado o un digest
+
+Tres formas de escribir la línea `image:`, tres caminos de actualización.
+
+| Estilo | Ejemplo | Qué hace `pull` | Rollback |
+|---|---|---|---|
+| Tag móvil | `nginx:latest` | Descarga lo que el tag apunte ahora | Difícil, porque el tag se movió. Apunta el ID de imagen o el digest antes de actualizar |
+| Tag fijado | `nginx:1.29-alpine` | Descarga builds nuevos de esa línea menor | Volver al tag anterior |
+| Digest | `nginx@sha256:5616...` | Nada, hasta que cambies el digest | Volver al digest anterior |
+
+Los tags fijados son mi valor por defecto. Tú decides cuándo moverte, y el tag viejo sigue existiendo cuando tienes que volver. Un digest es más estricto. Un tag se puede volver a publicar con otro contenido, un digest no. Para ver el digest de una imagen que ya ejecutas:
+
+```bash
+docker inspect --format '{{index .RepoDigests 0}}' nginx:1.29-alpine
+```
+
+```text
+nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+```
+
+Pega ese valor en el archivo Compose y la pila queda bloqueada a ese build exacto.
+
+<Notice type="warning" title="Nunca saltes de versión mayor en una base de datos cambiando el tag">
+Cambiar `postgres:16` por `postgres:17` y ejecutar `up -d` te deja un contenedor que se niega a arrancar sobre el directorio de datos viejo. Una actualización menor de Postgres deja el directorio de datos como está; una actualización mayor necesita un dump y restore o `pg_upgrade`, porque el formato en disco cambia. Lee las notas de la versión de cualquier base de datos antes de tocar su tag mayor, y haz antes la copia del volumen.
+</Notice>
+
+Las imágenes de Postgres 18 también movieron la ruta de datos a `/var/lib/postgresql`, algo que cubre la [guía de varias bases de datos Postgres](/es/multiples-bases-datos-postgres-docker/). Los métodos de actualización están en la [documentación de PostgreSQL](https://www.postgresql.org/docs/current/upgrading.html).
+
+El mismo cuidado vale para el archivo `.env` que acompaña al Compose. Casi siempre guarda contraseñas, y una actualización es un buen momento para pasarlas a [secretos de Docker Compose](/es/secretos-docker-compose/).
+
+## Antes de actualizar: copias y digests
+
+Tres cosas, dos minutos.
+
+1. Guarda el archivo Compose en git, o cópialo: `cp compose.yaml compose.yaml.bak`. Vas a querer los tags viejos exactos cuando algo se rompa.
+2. Apunta el ID de imagen que informa Compose y el digest detrás del tag:
+
+   ```bash
+   docker compose images
+   ```
+
+   ```text
+   CONTAINER                    REPOSITORY          TAG                 PLATFORM            IMAGE ID            SIZE                CREATED
+   demo-web-1                   nginx               1.28-alpine         linux/amd64         a8b39bd9cf0f        26MB                8 months ago
+   ```
+
+   ```bash
+   docker inspect --format '{{index .RepoDigests 0}}' nginx:1.28-alpine
+   ```
+
+   ```text
+   nginx@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+   ```
+
+3. Copia cada volumen con nombre a un tarball con un contenedor desechable. El volumen del ejemplo es `demo_html`:
+
+   ```bash
+   mkdir -p bak
+   docker run --rm -v demo_html:/data:ro -v "$PWD/bak:/backup" alpine tar czf /backup/html-vol.tgz -C /data .
+   ls -l bak
+   ```
+
+   ```text
+   -rw-r--r-- 1 root root 495 Nov 23 21:22 html-vol.tgz
+   ```
+
+El nombre del volumen empieza por el del proyecto. `docker volume ls` lista los reales de tu host. Para una base de datos, ejecuta antes del tar el dump que la propia base de datos ofrece (`pg_dump`, `mysqldump`), porque una copia de archivos de datos en uso no es una copia limpia. Para programar copias de `/var/lib/docker/volumes` fuera del servidor, mira [Pluton, una interfaz de backups con Restic autoalojada](/es/pluton-backup-autoalojado/).
+
+## Actualizar la pila
+
+Esta es la pila de ejemplo: nginx con un volumen con nombre para la raíz HTML, un bind mount para la configuración y un chequeo de salud. El puerto se enlaza a `127.0.0.1` porque, si no, Docker [lo publica saltándose tu firewall](/es/docker-evita-firewall/).
 
 ```yaml
-version: "3.3"
 services:
-  mail:
-    image: bytemark/smtp
-    restart: always
-
-  plausible_db:
-    image: postgres:12
-    restart: always
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_PASSWORD=postgres
-
-  plausible_events_db:
-    image: yandex/clickhouse-server:21.3.2.5
-    restart: always
-    volumes:
-      - event-data:/var/lib/clickhouse
-      - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
-      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-
-  plausible:
-    image: plausible/analytics:latest
-    restart: always
-    command: sh -c "sleep 10 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh db init-admin && /entrypoint.sh run"
-    depends_on:
-      - plausible_db
-      - plausible_events_db
-      - mail
+  web:
+    image: nginx:1.28-alpine
     ports:
-      - 8000:8000
-    env_file:
-      - plausible-conf.env
+      - "127.0.0.1:8088:80"
+    volumes:
+      - html:/usr/share/nginx/html:ro
+      - ./conf.d:/etc/nginx/conf.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
 volumes:
-  db-data:
-    driver: local
-  event-data:
-    driver: local
-  geoip:
-    driver: local
+  html:
 ```
 
-## Explicación del Docker Compose de Plausible
+La actualización sube el tag a `nginx:1.29-alpine` y sigue el flujo de abajo.
 
-Este es un archivo Docker Compose escrito en formato YAML, que describe una aplicación multi-contenedor compuesta por los servicios de Plausible: mail, plausible_db, plausible_events_db y plausible.
+![Diagrama del flujo de actualización: apuntar digests y copiar volúmenes, pull, up con remove-orphans, verificar, prune; una rama roja va desde una comprobación fallida al tag anterior y un nuevo up](@assets/images/23/05/docker-compose-update-flow.webp)
 
-El servicio mail usa la imagen bytemark/smtp para proporcionar un servidor SMTP (Simple Mail Transfer Protocol) para el envío de correos electrónicos.
+*El flujo de actualización, con la rama de rollback a la derecha.*
 
-El servicio plausible_db usa la imagen postgres:12 para proporcionar un servidor de base de datos PostgreSQL. Almacena sus datos en un volumen de Docker llamado db-data y establece la variable de entorno POSTGRES_PASSWORD en "postgres" para la autenticación.
-
-El servicio plausible_events_db usa la imagen yandex/clickhouse-server:21.3.2.5 para proporcionar un servidor de base de datos ClickHouse destinado a almacenar los datos de eventos. Guarda sus datos en un volumen de Docker llamado event-data y monta dos archivos de configuración desde el sistema de archivos local. También establece el ulimit nofile para permitir un mayor número de archivos abiertos.
-
-El servicio plausible usa la imagen plausible/analytics:latest para proporcionar una plataforma de analítica web. Depende de los servicios plausible_db, plausible_events_db y mail, y expone el puerto 8000 al host. También utiliza un archivo de entorno plausible-conf.env para establecer ciertas variables de configuración. Por último, ejecuta un comando para inicializar la base de datos, correr las migraciones, crear un usuario administrador e iniciar la aplicación.
-
-El archivo define tres volúmenes de Docker con nombre, db-data, event-data y geoip, que se pueden usar para persistir datos entre reinicios de los contenedores.
-
-Todos los servicios tienen la opción restart establecida en always, lo que garantiza que se reinicien automáticamente si fallan o si el demonio de Docker se reinicia.
-
-## Qué se Actualizará
-
-Si dejo el archivo Docker Compose intacto, el único contenedor que recibirá una actualización es el servicio plausible, que ejecuta la última versión de la imagen plausible/analytics. Esto es precisamente lo que llevaba tiempo esperando: una oportunidad de aprovechar todo el potencial de las últimas funciones y mejoras.
-
-Por supuesto, si quieres actualizar también los demás contenedores, ¡adelante! Solo asegúrate de descargar la imagen más reciente con el tag latest o de especificar la versión exacta de las imágenes **_postgres:12_** y **_yandex/clickhouse-server:21.3.2.5_**. Por suerte, en mi caso estas imágenes ya están fijadas a una versión concreta, así que el comando de Docker descargará exactamente la imagen que necesito para que todo funcione sin problemas.
-
-## Qué Pasará con los Datos
-
-Los datos de Plausible Analytics se guardan en volúmenes, así que si revisas el archivo yml verás:
-
-```yaml
-volumes:
-      - db-data:/var/lib/postgresql/data
-volumes:
-      - event-data:/var/lib/clickhouse
-      - ./clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
-      - ./clickhouse/clickhouse-user-config.xml:/etc/clickhouse-server/users.d/logging.xml:ro
-```
-
-Los datos reales no están en la imagen de Docker sino en la propia VM, así que simplemente se retomarán.
-
-## Ejecutar los Comandos de Actualización
-
-### Descargar las Últimas Imágenes de Docker
-
-En función de lo que hayas modificado, necesitas ejecutar:
+### Descargar las imágenes nuevas
 
 ```bash
- docker compose pull
+docker compose pull
 ```
 
-Este comando descargará las imágenes que están en el docker compose según sus tags; en mi caso solo actualizará **plausible/analytics:latest**
+```text
+ Image nginx:1.29-alpine Pulling
+ aee4e54b3865 Pulling fs layer
+ 4a8b0b2a5b19 Pulling fs layer
+ aee4e54b3865 Download complete
+ 612c0c1df4c5 Downloading [==========>                                        ]  4.194MB/20.25MB
+ ...
+ Image nginx:1.29-alpine Pulled
+```
 
-A continuación está la salida real:
+Las capas que cambiaron se descargan otra vez y el resto se salta, y por eso actualizar una imagen de 26MB tarda segundos. Después de esto la pila sigue con la imagen vieja; `pull` cambió el tag local, nada más.
 
-<Picture formats={["webp"]} fallbackFormat="webp"
-  src={dockerpull}
-  alt="Salida de Docker Pull"
-/>
-
-### Recrear las Imágenes de Docker
-
-Ahora que tienes las últimas imágenes de Docker descargadas, solo es cuestión de recrear los contenedores para usar las novedades. Para ello, simplemente ejecuta:
+### Recrear los contenedores que cambiaron
 
 ```bash
+docker compose up -d --remove-orphans
+```
+
+```text
+ Container demo-sidecar-1 Stopping
+ Container demo-sidecar-1 Stopped
+ Container demo-sidecar-1 Removing
+ Container demo-sidecar-1 Removed
+ Container demo-web-1 Recreate
+ Container demo-web-1 Recreated
+ Container demo-web-1 Starting
+ Container demo-web-1 Started
+```
+
+Las cuatro primeras líneas son un huérfano: un servicio `sidecar` que se quitó del archivo en la misma edición. Sin `--remove-orphans` sigue ejecutándose, con su imagen vieja, y nada en el archivo lo menciona ya.
+
+### Comprobar el estado
+
+```bash
+docker compose ps
+```
+
+```text
+NAME                         IMAGE               COMMAND                  SERVICE   CREATED                  STATUS                                     PORTS
+demo-web-1                   nginx:1.29-alpine   "/docker-entrypoint.…"   web       Less than a second ago   Up Less than a second (health: starting)   127.0.0.1:8088->80/tcp
+```
+
+La columna de imagen muestra el tag nuevo, y el estado dice `health: starting`, que es el momento en que `ps` solo no basta. Ejecuta el chequeo de salud y deja que Compose espere:
+
+```bash
+docker compose up -d --wait
+```
+
+```text
+ Container demo-web-1 Running
+ Container demo-web-1 Waiting
+ Container demo-web-1 Healthy
+```
+
+`--wait` sale con código 1 cuando un servicio no está sano o termina antes del timeout. Con un chequeo de salud que nunca pasa y `--wait-timeout 8`, Compose imprime `application not healthy after 8s` y sale con código 1. Eso convierte el comando en una puerta dentro de un script. Aquí no encuentra nada que recrear (`Running`), solo espera.
+
+Después mira los logs y pide el servicio desde fuera:
+
+```bash
+docker compose logs --tail 5 web
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/healthz
+curl -s http://127.0.0.1:8088/
+```
+
+```text
+web-1  | 2026/11/23 19:22:25 [notice] 1#1: start worker process 25
+web-1  | 2026/11/23 19:22:25 [notice] 1#1: start worker process 26
+web-1  | 2026/11/23 19:22:25 [notice] 1#1: start worker process 27
+web-1  | 2026/11/23 19:22:25 [notice] 1#1: start worker process 28
+web-1  | 127.0.0.1 - - [23/Nov/2026:19:22:30 +0000] "GET /healthz HTTP/1.1" 200 3 "-" "Wget" "-"
+200
+<h1>v1</h1>
+```
+
+La última línea es la prueba: la página sale del volumen con nombre, que el contenedor nuevo no tocó. Entra en la aplicación y abre un registro que escribieras antes de la actualización. Un puerto que responde dice que el proceso está arriba, no que tus datos llegaron.
+
+### Limpiar las capas viejas
+
+```bash
+docker image prune -f
+```
+
+```text
+Total reclaimed space: 0B
+```
+
+Cero aquí, y es lo esperado. `prune` a secas elimina solo las imágenes colgantes, las que no tienen ningún tag. La vieja `nginx:1.28-alpine` conserva su tag, así que se queda, que es justo lo que hace instantáneo el rollback de abajo. Cuando estés seguro de que no vas a volver, `docker image prune -a -f` elimina todas las imágenes que ningún contenedor usa. Eso incluye las imágenes de pilas que bajaste con `docker compose down`, así que revisa `docker image ls` antes. Para volúmenes, redes y caché de build, mira [cómo limpiar todas las imágenes, volúmenes y redes de Docker](/es/limpiar-docker-completo/). Si el disco sigue llenándose, la [guía de limpieza de overlay2](/es/limpiar-docker-overlay2/) es el siguiente paso.
+
+## ¿Cómo hago rollback de una actualización fallida?
+
+Vuelve a poner el tag o digest anterior en el archivo Compose y ejecuta `docker compose up -d`. Eso restaura la imagen. Los datos necesitan la copia solo si la versión nueva los cambió.
+
+Si el chequeo de salud falla, o la aplicación arranca y muestra un panel vacío, vuelve atrás primero en la imagen y después en los datos.
+
+1. Edita el archivo Compose de vuelta al tag o digest anterior: `image: nginx:1.28-alpine`.
+2. Recrea:
+
+   ```bash
+   docker compose up -d
+   ```
+
+   ```text
+   Container demo-web-1 Recreate
+   Container demo-web-1 Recreated
+   Container demo-web-1 Starting
+   Container demo-web-1 Started
+   ```
+
+3. Confirma con `docker compose ps`, que ahora muestra `1.28-alpine`, y con la misma comprobación con `curl`.
+
+Si la imagen vieja ya no está en el host, `up -d` la descarga otra vez por tag o digest, así que el rollback sigue funcionando mientras el registro la conserve. Una copia local hace el rollback instantáneo, y por eso `docker image prune -a` va al final de la actualización, después de las comprobaciones.
+
+Volver atrás con la imagen no vuelve atrás con los datos. Cuando la versión nueva ejecutó una migración de base de datos al arrancar, la versión vieja está ahora sobre un esquema más nuevo y puede fallar con errores que parecen no tener relación. Ese es el momento del tarball del paso de copia. Detén el servicio, vacía el volumen, restaura y arranca:
+
+```bash
+docker compose stop web
+docker run --rm -v demo_html:/data alpine find /data -mindepth 1 -delete
+docker run --rm -v demo_html:/data -v "$PWD/bak:/backup:ro" alpine tar xzf /backup/html-vol.tgz -C /data
+docker compose up -d --wait
+```
+
+En la pila de prueba esto devuelve la página `v1`. Con nginx sirviendo archivos estáticos el orden no importa. Con una base de datos, restaura desde el dump en lugar del tar, y nunca sobre un contenedor en ejecución.
+
+## Imágenes que construyes en local
+
+Un servicio con `build: .` no tiene ningún tag que descargar. Compose lo construye cuando se lo pides:
+
+```bash
+docker compose up -d --build
+```
+
+Compose reutiliza la caché de capas, así que una línea cambiada al final del Dockerfile reconstruye esa capa y las que vienen después. Un paso `COPY` se vuelve a ejecutar solo cuando los archivos copiados cambiaron, así que la mayoría de las ediciones no necesitan nada más.
+
+Dos casos necesitan una construcción sin caché: una capa `RUN apt-get update` que sigue en caché después de que los espejos de paquetes cambiaron, y una imagen base a la que le volvieron a publicar el tag. `docker compose build` acepta `--pull` y `--no-cache`:
+
+```bash
+docker compose build --pull --no-cache
 docker compose up -d
 ```
 
-Cuando ejecutas docker-compose up -d, Docker Compose creará e iniciará los contenedores de todos los servicios definidos en el archivo docker-compose.yml. También creará las redes y los volúmenes necesarios si están definidos en el archivo.
+`--pull` descarga una imagen base más nueva antes de construir. `--no-cache` vuelve a ejecutar todos los pasos de la construcción, así que tarda minutos en vez de segundos. Ejecútalo una vez para una construcción que se comporta raro y vuelve a `up -d --build`.
 
-El flag -d le indica a Docker Compose que ejecute los contenedores en modo detached, lo que significa que se ejecutarán en segundo plano y no estarán vinculados a la terminal. Esto te permite seguir usando la terminal para otras tareas mientras los contenedores están en marcha.
+## `docker compose restart` no es una actualización
 
-La salida será:
-
-<Picture formats={["webp"]} fallbackFormat="webp"
-  src={dockerup}
-  alt="Salida de Docker Up"
-/>
-
-### Verificar que los Contenedores Están en Ejecución
-
-Una vez iniciados los contenedores, puedes usar el comando docker-compose ps para comprobar su estado y verificar que se ejecutan como esperabas. También puedes usar otros comandos de Docker, como docker logs y docker exec, para interactuar con los contenedores y solucionar cualquier problema que pueda surgir.
+`docker compose restart` detiene y arranca el mismo contenedor. Conserva la imagen, el entorno, el comando y todo lo demás con lo que se creó el contenedor. La documentación lo dice sin rodeos: los cambios en el archivo Compose no se reflejan tras un restart.
 
 ```bash
-docker-compose ps
+docker compose restart
 ```
 
-Salida:
-
-```
-docker-compose ps
-             Name                            Command               State                    Ports
--------------------------------------------------------------------------------------------------------------------
-plausible-mail-1                  docker-entrypoint.sh exim  ...   Up      25/tcp
-plausible-plausible-1             /entrypoint.sh sh -c sleep ...   Up      0.0.0.0:8000->8000/tcp,:::8000->8000/tcp
-plausible-plausible_db-1          docker-entrypoint.sh postgres    Up      5432/tcp
-plausible-plausible_events_db-1   /entrypoint.sh                   Up      8123/tcp, 9000/tcp, 9009/tcp
+```text
+ Container demo-web-1 Restarting
+ Container demo-web-1 Started
 ```
 
-## Conclusiones
+Fíjate en lo que falta: no hay línea `Recreate`, solo un reinicio. Usa `restart` para un proceso atascado, `up -d` para cualquier cosa que hayas cambiado.
 
-Eso es todo lo que necesitas hacer para tener tus contenedores de docker-compose actualizados a la versión que necesites. Para ir sobre lo seguro, puedes hacer una copia de seguridad del servidor por si algo sale mal y así poder hacer un rollback.
+## ¿Por qué no ejecutar `docker compose down` primero?
+
+`docker compose down` detiene y elimina los contenedores y la red por defecto, así que el servicio queda caído hasta el siguiente `up`. `up -d` recrea solo los contenedores que cambiaron. Un `down` simple conserva los volúmenes con nombre, pero [`docker compose down -v`](https://docs.docker.com/reference/cli/docker/compose/down/) también elimina los volúmenes con nombre declarados en el archivo Compose y los volúmenes anónimos de los contenedores. Reserva `-v` para una pila que quieras borrar, nunca para una actualización.
+
+## Pilas que un panel gestiona por ti
+
+Si la pila corre bajo [Dokploy](/es/actualizar-docker-compose-dokploy/), el archivo Compose vive en la interfaz del proyecto y la acción Rebuild ejecuta la descarga y la recreación por ti. La trampa es la misma que en la línea de comandos. Un tag `latest` necesita el interruptor "Pull latest images on deploy" activado, o el rebuild reinicia la imagen vieja y lo llama un despliegue.
+
+Si prefieres no hacer las actualizaciones a mano, las [herramientas de autoactualización como Tugtainer](/es/tugtainer-autoactualizacion-docker/) comparan el digest que ejecuta cada contenedor con el registro y lo recrean según un horario. Trabajan solo sobre la imagen. Haz la copia de volúmenes de esta guía antes de activarlas.
+
+## Preguntas frecuentes
+
+<Accordion label="¿docker compose pull reinicia los contenedores?" group="faq">
+No. `docker compose pull` descarga las imágenes nombradas en el archivo Compose y ahí se queda. Los contenedores en ejecución conservan la imagen vieja hasta que `docker compose up -d` recrea los cuya imagen o configuración cambió.
+</Accordion>
+
+<Accordion label="¿docker compose restart coge una imagen nueva?" group="faq">
+No. `restart` detiene y arranca el mismo contenedor con la imagen desde la que se creó, y Compose ignora los cambios del archivo Compose. Ejecuta `docker compose up -d` después de `pull` para cambiar a la imagen nueva.
+</Accordion>
+
+<Accordion label="¿Se conservan mis volúmenes al recrear un contenedor?" group="faq">
+Sí. Los volúmenes con nombre, los bind mounts y, por defecto, los volúmenes anónimos pasan al contenedor nuevo. Solo se pierden los datos escritos dentro del contenedor fuera de un volumen, y los volúmenes anónimos empiezan vacíos únicamente si añades `--renew-anon-volumes`.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo solo un servicio?" group="faq">
+Nombra el servicio y sáltate sus dependencias: `docker compose pull web && docker compose up -d --no-deps web`. Sin `--no-deps`, Compose también arranca los servicios de `depends_on` y los recrea cuando su imagen o configuración cambió, que no es lo que quieres al lado de una base de datos.
+</Accordion>
+
+<Accordion label="¿Cómo hago rollback de una actualización de Compose?" group="faq">
+Vuelve a poner el tag o digest anterior en el archivo Compose y ejecuta `docker compose up -d`. Compose descarga otra vez la imagen vieja si falta, pero una copia local hace el rollback instantáneo, así que ejecuta `docker image prune -a` solo después de que pasen las comprobaciones. Si la versión nueva migró los datos, restaura también el volumen desde el tar de la copia.
+</Accordion>
+
+<Accordion label="¿Debo ejecutar docker compose down antes de actualizar?" group="faq">
+No. `up -d` recrea solo los contenedores que cambiaron, con menos tiempo de caída. `down` elimina todos los contenedores, y `down -v` también borra los volúmenes con nombre declarados en el archivo Compose, así que puede borrar tus datos.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo una imagen construida desde un Dockerfile?" group="faq">
+Ejecuta `docker compose up -d --build`. Compose reconstruye con la caché de capas, así que solo tardan las capas que cambiaron. Para una caché obsoleta ejecuta `docker compose build --pull --no-cache` una vez y después `up -d`.
+</Accordion>
+
+<Accordion label="¿Por qué el contenedor sigue con la imagen vieja después de pull?" group="faq">
+Porque `pull` solo actualiza la imagen local. El contenedor se creó desde la vieja y se queda en ella hasta que `docker compose up -d` lo recrea. `docker compose ps` muestra el tag que ejecuta cada contenedor, así que compara esa columna con el archivo.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo Postgres a una versión mayor en Compose?" group="faq">
+No editando el tag. Una versión mayor cambia el formato en disco, y el contenedor nuevo rechaza el directorio de datos viejo. Haz el dump con `pg_dump` desde el contenedor viejo, arranca la versión mayor nueva sobre un volumen vacío, restaura el dump y reorienta la aplicación.
+</Accordion>

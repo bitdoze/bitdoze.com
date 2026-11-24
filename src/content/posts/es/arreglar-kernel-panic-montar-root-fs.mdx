@@ -1,122 +1,272 @@
 ---
 date: 2023-05-11T6:00:00Z
 translationKey: "fix-kernel-panic-unable-mount-root-fs"
-title: "Solucionar «Kernel Panic - Not Syncing: VFS: Unable to Mount Root FS on Unknown-Block(0,0)»"
-meta_title: "Solucionar «Kernel Panic - Not Syncing: VFS: Unable to Mount Root»"
-description: "Aprende a solucionar el común error de Ubuntu «Kernel Panic - Not Syncing: VFS: Unable to Mount Root FS on Unknown-Block(0,0)» con nuestra guía paso a paso."
+lastmod: 2026-11-23T00:00:00Z
+title: "Solucionar Kernel Panic: VFS Unable to Mount Root FS"
+meta_title: "Solucionar Kernel Panic: VFS Unable to Mount Root FS"
+description: "Soluciona el kernel panic unknown-block(0,0) en Ubuntu y Debian: tabla de diagnóstico, chroot, update-initramfs, update-grub y rollback del kernel."
 image: "@assets/images/23/05/fix-kernel-panic.jpeg"
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["kernel-panic", "grub", "initramfs"]
 canonical: "https://www.bitdoze.com/es/arreglar-kernel-panic-montar-root-fs/"
 ---
 
 import { Picture } from "astro:assets";
-import ubuntukernal from "@assets/images/23/05/ubuntu-boot.jpeg";
-import dockerup from "@assets/images/23/05/docker-up.jpeg";
+import imgBootMenu from "@assets/images/23/05/ubuntu-boot.jpeg";
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-*Divulgación: esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.*
+<Notice type="info" title="Divulgación de afiliados">Esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.</Notice>
 
-Tengo un Ubuntu 22.04 en un [VPS de Hetzner](https://go.bitdoze.com/hetzner) y en un [VPS de Hostinger](https://go.bitdoze.com/hostinger-vps), y actualicé los paquetes a la última versión. Durante la actualización, el kernel de Ubuntu también se actualizó a la última versión, que era: **_5.15.0-71-generic_**
+Este pánico significa que el kernel no encontró ningún sistema de archivos raíz que montar, por ejemplo porque un kernel nuevo no tiene initrd. Arranca un kernel anterior desde GRUB, ejecuta `update-initramfs -c -k <version>` y `update-grub`, y reinicia.
 
-_Los precios de los VPS se dispararon en 2026 — si estás reconsiderando un servidor alquilado, echa un vistazo a [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
-
-Todo fue bien y reinicié el servidor, pero nunca volvió a levantar. Entré en la consola y vi que se quedaba atascado durante el arranque con el error:
+En mayo de 2023 ejecuté `apt upgrade` en un servidor Ubuntu 22.04 alojado en un [VPS de Hetzner](https://go.bitdoze.com/hetzner) (los mismos pasos valen para mi [VPS de Hostinger](https://go.bitdoze.com/hostinger-vps)). La actualización instaló el kernel **5.15.0-71-generic**. Terminó bien, reinicié y el servidor no volvió a levantar. La consola del proveedor se quedaba parada en:
 
 ```
-Kernel Panic - Not Syncing: VFS: Unable to Mount Root FS on Unknown-Block(0,0)
+Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
 ```
 
-Kernel Panic - Not Syncing: VFS: Unable to Mount Root FS on Unknown-Block(0,0) es un error común que puede ocurrir en Ubuntu cuando el sistema no puede montar el sistema de archivos raíz durante el arranque. Este mensaje de error indica que el kernel no puede encontrar el sistema de archivos raíz, que es necesario para que el sistema operativo arranque correctamente.
+En mi caso la causa fue un initrd que no correspondía al kernel nuevo. Arrancar con el kernel anterior, hacer chroot al sistema y ejecutar `update-initramfs` más `update-grub` lo arregló. Es una de siete causas del mismo pánico, así que esta guía cubre todas para Ubuntu y Debian. Explica qué significa el mensaje, cómo distinguir las causas antes de tocar nada, la solución de cada una y cómo hacer rollback.
 
-## Cómo solucionar el Kernel Panic en Ubuntu
+_Los precios de los VPS se dispararon en 2026. Si estás reconsiderando un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
 
-Los pasos siguientes me ayudaron a superar el error y conseguir un arranque limpio al final. Los detallo para que puedas seguirlos y resolver tu problema de forma efectiva.
+## ¿Qué significa el kernel panic unknown-block(0,0)?
 
-### Inicia sesión en la consola y elige Advanced options for Ubuntu
+Significa que el kernel necesitaba un sistema de archivos raíz y no tenía ningún dispositivo desde el que montarlo. El dispositivo se llama `unknown-block(0,0)` porque mayor 0 y menor 0 no es un disco real.
 
-Si no estás en un portátil y usas un servidor VPS, el proveedor debe ofrecer una consola que te permita ver lo que ocurre durante el arranque. Elige **Advanced options for Ubuntu**; ahí verás los kernels más recientes entre los que puedes elegir y debes seleccionar uno que no sea el último, como en la imagen de abajo:
+El pánico llega en el paso 5 de una cadena de seis. El firmware (UEFI o BIOS) arranca GRUB. GRUB lee `/boot/grub/grub.cfg` y carga el kernel junto con su initrd. El kernel descomprime el initrd en RAM y lo ejecuta como una raíz temporal pequeña (el initramfs). El initramfs carga los controladores de almacenamiento y busca el dispositivo indicado en `root=` en la línea de comandos del kernel. Solo cuando ese dispositivo está montado se pasa el control a systemd. Según la [documentación del kernel](https://docs.kernel.org/filesystems/ramfs-rootfs-initramfs.html), localizar y montar la raíz real es tarea del initramfs.
+
+![Cadena de arranque desde el firmware hasta systemd, con el kernel panic saliendo del paso de montar la raíz y cuatro causas listadas debajo](@assets/images/23/05/kernel-panic-boot-chain.webp)
+
+*La cadena de arranque. El pánico viene del paso de montar la raíz, así que todo lo anterior funcionó.*
+
+En [init/do_mounts.c](https://github.com/torvalds/linux/blob/master/init/do_mounts.c) el kernel llama a `panic("VFS: Unable to mount root fs on %s", ...)` cuando todos los tipos de sistema de archivos que probó han fallado en el dispositivo raíz. Cuando no se carga ningún initrd, el kernel resuelve `root=` por su cuenta y puede acabar en este pánico.
+
+Con un initrd presente, initramfs-tools suele parar antes. Espera al dispositivo de `root=`, imprime `ALERT! UUID=... does not exist. Dropping to a shell!` y te deja en un prompt `(initramfs)` (mira `scripts/local` en [initramfs-tools](https://salsa.debian.org/kernel-team/initramfs-tools/-/blob/master/scripts/local)). Trata ese prompt como la misma familia de problemas. Las soluciones de abajo valen para ambos.
+
+El kernel imprime una variante más larga de la queja cuando no puede abrir un dispositivo con nombre. Dice `VFS: Cannot open root device ... Please append a correct "root=" boot option`.
+
+Nada en esta cadena escribe en tu sistema de archivos raíz. Tus datos siguen en el disco.
+
+## Causas y el síntoma que identifica cada una
+
+| Causa | Síntoma que ves | Solución |
+|---|---|---|
+| El kernel nuevo no tiene initrd (actualización interrumpida o `/boot` lleno) | `vmlinuz-X` en `/boot`, sin `initrd.img-X` | `update-initramfs -c -k X` o reinstalar el kernel |
+| `root=` ya no coincide con el UUID del disco (disco movido, restauración desde imagen, cambio de particiones) | El UUID de `grub.cfg` no está en `blkid` | Corregir `fstab`, ejecutar `update-grub` |
+| Falta un controlador de almacenamiento en el initramfs (virtio, RAID, NVMe, LVM, cifrado) | `lsblk -f` desde el rescate ve el disco, `lsinitramfs` no tiene el módulo | Añadir el módulo a `/etc/initramfs-tools/modules`, regenerar |
+| El sistema de archivos necesita `fsck` | El arranque cae a initramfs, `dmesg` muestra errores ext4 | `fsck -f -y` desde un sistema live o de rescate |
+| Partición `/boot` llena | `df -h /boot` al 100%, initrd vacío o truncado | Quitar kernels antiguos, regenerar el initrd |
+| Configuración de GRUB dañada | `grub.cfg` sin línea `initrd`, o una línea `linux` que apunta a un archivo que no existe | `update-grub`; `grub-install` solo si GRUB no está |
+| Paquete del kernel eliminado (purga manual o `apt autoremove`) | `dpkg -l 'linux-image*'` lista menos kernels que antes | Reinstalar `linux-image-generic` (Ubuntu) o `linux-image-amd64` (Debian) |
+
+## Diagnostica antes de cambiar nada
+
+Resiste la tentación de reinstalar GRUB primero. El mismo pánico sale de al menos siete causas, y cada solución tarda un par de minutos cuando ya sabes cuál tienes. Sigue el bucle de abajo. Entra con un kernel anterior, reúne los datos, lee la tabla y aplica una sola solución.
+
+![Bucle de recuperación: arrancar un kernel anterior, diagnosticar, arreglar, regenerar el initramfs y GRUB, reiniciar; si sigue fallando vuelve a diagnosticar, con una salida de rollback](@assets/images/23/05/kernel-panic-recovery-flow.webp)
+
+*El bucle de recuperación. El reinicio es la prueba. Un segundo fallo te devuelve al diagnóstico, no a otra suposición.*
+
+<ListCheck>
+<ul>
+  <li>No formatees ni reinstales nada todavía. Todas las causas de abajo se reparan in situ.</li>
+  <li>Apunta la versión del kernel que falla y la que arranca.</li>
+  <li>Haz un snapshot o una copia de seguridad si el proveedor todavía te lo permite. Lo querrás antes de `fsck`.</li>
+</ul>
+</ListCheck>
+
+### Arranca con un kernel anterior
+
+En un VPS, abre la consola del proveedor (VNC en el panel) en lugar de SSH, porque SSH está caído. En BIOS, mantén pulsado `Shift` justo después de la pantalla del firmware. En UEFI, pulsa `Escape`. Haz una de las dos cosas hasta que aparezca el menú de GRUB y elige **Advanced options for Ubuntu** (en Debian la entrada es **Advanced options for Debian GNU/Linux**). Escoge una entrada que no sea el kernel más reciente. Salta la entrada `(recovery mode)` salvo que las normales también den pánico. La [página del modo recovery de Ubuntu](https://wiki.ubuntu.com/RecoveryMode) describe el mismo menú.
 
 <Picture formats={["webp"]} fallbackFormat="webp"
-  src={ubuntukernal}
+  src={imgBootMenu}
   widths={[200, 400, 900]}
   sizes="(max-width: 900px) 100vw, 900px"
-  alt="Opciones de arranque de Ubuntu"
+  alt="Menú de GRUB con Advanced options for Ubuntu y varias versiones del kernel"
 />
 
-Esto permitirá que tu sistema arranque.
+*El menú de GRUB en mi VPS de Hetzner de 2023. Elige un kernel anterior al que da pánico.*
 
-### Comprueba el sistema de archivos
+Si un kernel anterior arranca, entra por SSH o por la consola y continúa abajo. Si todas las entradas dan pánico, o no hay menú, salta a [Sin menú GRUB: modo rescue o ISO live](#sin-menú-grub-modo-rescue-o-iso-live) y vuelve aquí desde la shell de rescate.
 
-Inicia sesión en tu VPS y ejecuta el siguiente comando:
+### Reúne los datos
 
-```bash
-sudo fdisk -l
-```
-
-Salida:
+Ejecuta esto desde el kernel anterior arrancado, o desde el chroot más adelante. La referencia completa de cada comando está en mi [lista de comandos Linux](/es/comandos-linux/).
 
 ```bash
-sudo fdisk -l
-Disk /dev/sda: 76.3 GiB, 81923145728 bytes, 160006144 sectors
-Disk model: QEMU HARDDISK
-Units: sectors of 1 * 512 = 512 bytes
-Sector size (logical/physical): 512 bytes / 512 bytes
-I/O size (minimum/optimal): 512 bytes / 512 bytes
-Disklabel type: gpt
-Disk identifier: 6288F8C3-0B08-4091-9A39-F8940D8E5D62
-
-Device      Start       End   Sectors  Size Type
-/dev/sda1  528384 160006110 159477727   76G Linux filesystem
-/dev/sda14   2048      4095      2048    1M BIOS boot
-/dev/sda15   4096    528383    524288  256M EFI System
-
-Partition table entries are not in disk order.
+uname -r
+ls -lh /boot
+df -h /boot
+lsblk -f
+blkid
+grep -E "^\s*(linux|initrd)\s" /boot/grub/grub.cfg
+dpkg -l 'linux-image*' | grep '^ii'
 ```
 
-Aquí verás el dispositivo del sistema de archivos Linux; en mi caso es **_/dev/sda1_**
+Esto es lo que hay que mirar, con un ejemplo de disposición (raíz en `/dev/sda1`, EFI en `/dev/sda15`, como en mi servidor de 2023):
 
-### Actualiza el sistema de archivos raíz
+```text
+$ ls -lh /boot
+initrd.img-5.15.0-56-generic
+initrd.img-5.15.0-71-generic
+vmlinuz-5.15.0-56-generic
+vmlinuz-5.15.0-71-generic
 
-A continuación, debes montar y actualizar el sistema de archivos:
+$ blkid
+/dev/sda1: UUID="11111111-2222-3333-4444-555555555555" BLOCK_SIZE="4096" TYPE="ext4" PARTUUID="0e489e3f-01"
+/dev/sda15: UUID="ABCD-EFGH" BLOCK_SIZE="512" TYPE="vfat" PARTUUID="0e489e3f-0f"
+
+$ grep -E "^\s*(linux|initrd)\s" /boot/grub/grub.cfg
+linux	/vmlinuz-5.15.0-71-generic root=UUID=11111111-2222-3333-4444-555555555555 ro quiet
+initrd	/initrd.img-5.15.0-71-generic
+```
+
+Cada kernel necesita un archivo `vmlinuz-` y un `initrd.img-`. El `root=UUID=` de la línea `linux` tiene que ser el UUID que `blkid` imprime para tu partición raíz. Los UUID de arriba son marcadores de posición. En LVM, GRUB escribe la ruta del dispositivo (`root=/dev/mapper/<vg>-<lv>`) en lugar de un UUID.
+
+### Relaciona cada hallazgo con su causa
+
+| Hallazgo | Causa |
+|---|---|
+| Existe `vmlinuz-X`, falta `initrd.img-X` o pesa 0 bytes, `/boot` no está lleno | Falta el initrd: regenerarlo |
+| `df -h /boot` muestra 0 disponibles, o `Use%` al 100 | `/boot` lleno: liberarlo y regenerar |
+| El `root=UUID=...` de `grub.cfg` no aparece en la salida de `blkid` | UUID de `root=` incorrecto |
+| `blkid` ve el disco pero al initramfs le falta el controlador (`lsinitramfs /boot/initrd.img-X \| grep -i virtio`) | Controlador ausente del initramfs |
+| El registro de arranque muestra `EXT4-fs error` o cae a `(initramfs)` | El sistema de archivos necesita `fsck` |
+| No hay línea `initrd` bajo una línea `linux`, o el archivo nombrado no existe | Configuración de GRUB dañada |
+| Solo está instalado el kernel roto, los antiguos ya no están en `dpkg -l` | Paquete del kernel eliminado |
+
+## Soluciona cada causa
+
+La mayoría de las soluciones se ejecutan dentro de un chroot del sistema instalado. Prepáralo una vez y luego aplica la sección que coincida con tu hallazgo.
+
+### Haz chroot al sistema instalado
+
+Ejecuta esto desde el kernel anterior, desde el modo recovery con red activada, o desde el sistema de rescate. Sustituye `sda1` por tu partición raíz de `lsblk -f`. Si la raíz es un volumen lógico LVM, el dispositivo es `/dev/mapper/<vg>-<lv>`. Mi [guía para añadir un disco LVM](/es/anadir-disco-lvm/) explica el nombre.
 
 ```bash
 sudo mount /dev/sda1 /mnt
-sudo mount --bind /dev /mnt/dev
-sudo mount --bind /dev/pts /mnt/dev/pts
-sudo mount --bind /proc /mnt/proc
-sudo mount --bind /sys /mnt/sys
+for d in dev dev/pts proc sys run; do sudo mount --bind /$d /mnt/$d; done
+sudo mount /dev/sda15 /mnt/boot/efi   # only when lsblk shows an EFI partition
 sudo chroot /mnt
 ```
 
-### Actualiza el sistema de archivos temporal
-
-Ahora ejecuta el siguiente comando:
+El bucle enlaza `/run`, que la [página de chroot del Arch Wiki](https://wiki.archlinux.org/title/Chroot) lista entre los montajes que necesita un chroot. Sal del chroot con `exit` y desmonta en orden inverso:
 
 ```bash
-root@cloud:/# update-initramfs -u -k 5.15.0-71-generic
-output:
+exit
+sudo umount /mnt/boot/efi
+for d in run sys proc dev/pts dev; do sudo umount /mnt/$d; done
+sudo umount /mnt
+```
+
+Los comandos `apt` de abajo necesitan red dentro del chroot. Si no resuelven nombres, ejecútalos desde el kernel anterior arrancado. `update-grub` detecta el dispositivo raíz a partir de lo que está montado en `/`, así que ejecútalo solo dentro de un chroot correcto o en el sistema arrancado.
+
+<Notice type="warning" title="Los nombres de dispositivo cambian en modo rescue">En un sistema de rescate tu disco puede ser `sdb` o `vda`. Usa `blkid` y `lsblk -f` allí, nunca el nombre que recuerdas del arranque antiguo.</Notice>
+
+### Falta el initrd del kernel nuevo
+
+Si falta `/boot/initrd.img-<version>`, créalo. Si existe, actualízalo. Esta es la solución de mi caso de 2023:
+
+```bash
+update-initramfs -c -k 5.15.0-71-generic   # create when the file is missing
+update-initramfs -u -k 5.15.0-71-generic   # update when the file exists
+```
+
+Salida cuando funciona:
+
+```text
 update-initramfs: Generating /boot/initrd.img-5.15.0-71-generic
 ```
 
-En mi caso el problema estaba en el kernel **_5.15.0-71-generic_** que se instaló con la actualización; tú debes usar tu kernel, que debería aparecer en las opciones avanzadas de Ubuntu.
+`-k` recibe la versión del kernel que falla, no la del que has arrancado. En un chroot desde un sistema live, toma la versión de los nombres de archivo de `/boot`, porque allí `uname -r` muestra el kernel del live. Con `-u`, `-k all` regenera todos los kernels instalados que ya tienen initramfs. Con `-c`, crea uno para cada kernel instalado (`man update-initramfs`, [página man de Ubuntu](https://manpages.ubuntu.com/manpages/noble/en/man8/update-initramfs.8.html)).
 
-El comando update-initramfs -u -k 5.15.0-71-generic se usa para actualizar el sistema de archivos RAM inicial (initramfs) de la versión del kernel 5.15.0-71-generic en Ubuntu.
+Si el initrd no se genera, el paquete del kernel probablemente quedó a medias por la actualización interrumpida. Deja que apt termine el trabajo:
 
-El initramfs es un sistema de archivos temporal que se carga en memoria durante el proceso de arranque, antes de que se monte el sistema de archivos raíz. Contiene los archivos y drivers necesarios para inicializar el hardware y cargar el sistema de archivos raíz.
+```bash
+dpkg --configure -a
+apt-get -f install
+apt install --reinstall linux-image-5.15.0-71-generic
+update-initramfs -c -k all
+update-grub
+```
 
-Al ejecutar este comando, actualizas el initramfs de la versión del kernel especificada y te aseguras de que los archivos y drivers necesarios estén disponibles durante el proceso de arranque. Esto puede ser útil si has instalado hardware nuevo o has hecho cambios en el sistema que requieren drivers actualizados.
+### El argumento root= ya no coincide con el disco
 
-La opción -u indica al comando que actualice el initramfs, y la opción -k especifica la versión del kernel a actualizar. La parte 5.15.0-71-generic del comando indica la versión concreta del kernel que se va a actualizar.
+Compara el valor de `root=UUID=` en la línea `linux` de `grub.cfg` con `blkid`. Difieren después de restaurar una imagen en un disco nuevo, de redimensionar particiones o de mover la máquina entre hosts. Revisa también `/etc/fstab`, porque monta la raíz con el mismo UUID:
 
-### Actualiza tu GRUB
+```bash
+cat /etc/fstab
+blkid
+```
 
-Ahora ejecuta:
+Pon el UUID de `blkid` en la línea de `/` de `/etc/fstab` y regenera la configuración para que las líneas `linux` lo tomen:
 
-```sh
-root@cloud:/# update-grub
+```bash
+update-grub
+grep root=UUID /boot/grub/grub.cfg
+```
 
-Output:
+El `grep` tiene que imprimir el UUID de `blkid`. Si el valor antiguo sigue ahí, busca un `root=` escrito a mano en `GRUB_CMDLINE_LINUX` de `/etc/default/grub` o en los archivos de `/etc/default/grub.d/`, bórralo y ejecuta `update-grub` otra vez.
+
+### Falta un controlador de almacenamiento en el initramfs
+
+El sistema de rescate ve el disco pero el initramfs no. Lista lo que contiene la imagen y busca el controlador que necesita tu disco (`virtio_blk`, `virtio_scsi`, `nvme`, `megaraid_sas`, `dm_mod` para LVM):
+
+```bash
+lsinitramfs /boot/initrd.img-5.15.0-71-generic | grep -iE "virtio|nvme|dm-mod"
+```
+
+Ubuntu y Debian usan por defecto `MODULES=most` en `/etc/initramfs-tools/initramfs.conf`, que empaqueta la mayoría de los controladores ([initramfs.conf(5)](https://manpages.ubuntu.com/manpages/noble/en/man5/initramfs.conf.5.html)). Dos cosas lo rompen. Alguien pudo poner `MODULES=dep` en un `/boot` pequeño, o la máquina pasó de discos virtio a NVMe o a una controladora RAID. Fuerza el módulo:
+
+```bash
+echo "virtio_blk" >> /etc/initramfs-tools/modules
+update-initramfs -u -k all
+update-grub
+```
+
+La [página InitramfsDebug de Debian](https://wiki.debian.org/InitramfsDebug) tiene el procedimiento a fondo. Arranca con `break=premount` en la línea del kernel para obtener una shell busybox dentro del initramfs y revisa `cat /proc/cmdline` y `cat /proc/modules`.
+
+### El sistema de archivos necesita una comprobación
+
+Cuando la raíz ext4 está sucia o dañada, el montaje falla y el arranque cae a `(initramfs)` o da pánico. Nunca ejecutes `fsck` sobre un sistema de archivos montado en lectura y escritura. La página man de `e2fsck` solo permite `-n` en uno montado, y aun así sus resultados no son válidos. Usa la ISO live o el sistema de rescate, con la raíz desmontada:
+
+```bash
+fsck -N /dev/sda1        # show what would be done, change nothing
+fsck -f -y /dev/sda1     # force a full check and answer yes to repairs
+```
+
+Haz un snapshot antes de `-y`. Las reparaciones pueden borrar archivos rotos.
+
+### Una partición /boot llena
+
+Con `/boot` lleno, el paquete del kernel instala el `vmlinuz` y luego falla al escribir el initrd. Comprueba el tamaño y quita kernels antiguos con apt para que la base de datos de paquetes siga siendo coherente. Conserva el kernel en uso y uno anterior:
+
+```bash
+df -h /boot
+dpkg -l 'linux-image-*' | grep '^ii'
+apt remove --purge linux-image-5.15.0-41-generic linux-headers-5.15.0-41-generic
+apt autoremove --purge
+update-initramfs -u -k all
+update-grub
+```
+
+Nunca borres archivos de `/boot` con `rm`. Quita los kernels con apt para que la base de datos de paquetes y el disco sigan en sintonía.
+
+### Configuración de GRUB dañada
+
+`update-grub` es un atajo de `grub-mkconfig -o /boot/grub/grub.cfg` (`man update-grub`, [página man de Ubuntu](https://manpages.ubuntu.com/manpages/noble/en/man8/update-grub.8.html)). Vuelve a escanear `/boot` y reescribe todas las líneas `linux` e `initrd`. El valor de `root=` sale del dispositivo raíz que detecta (`/etc/grub.d/10_linux`), más `GRUB_CMDLINE_LINUX` de `/etc/default/grub`. La [página linux del manual de GRUB](https://www.gnu.org/software/grub/manual/grub/html_node/linux.html) dice que el resto de la línea pasa tal cual como línea de comandos del kernel, así que un `root=` incorrecto llega al kernel sin cambios:
+
+```bash
+update-grub
+```
+
+Salida en mi servidor de 2023 cuando el initrd volvió (acortada):
+
+```text
 Sourcing file `/etc/default/grub'
 Sourcing file `/etc/default/grub.d/init-select.cfg'
 Generating grub configuration file ...
@@ -124,22 +274,117 @@ Found linux image: /boot/vmlinuz-5.15.0-71-generic
 Found initrd image: /boot/initrd.img-5.15.0-71-generic
 Found linux image: /boot/vmlinuz-5.15.0-56-generic
 Found initrd image: /boot/initrd.img-5.15.0-56-generic
-Found linux image: /boot/vmlinuz-5.15.0-53-generic
-Found initrd image: /boot/initrd.img-5.15.0-53-generic
-Found linux image: /boot/vmlinuz-5.15.0-46-generic
-Found initrd image: /boot/initrd.img-5.15.0-46-generic
-Found linux image: /boot/vmlinuz-5.15.0-41-generic
-Found initrd image: /boot/initrd.img-5.15.0-41-generic
 Warning: os-prober will not be executed to detect other bootable partitions.
-Systems on them will not be added to the GRUB boot configuration.
-Check GRUB_DISABLE_OS_PROBER documentation entry.
 done
 ```
 
-El comando update-grub se usa para actualizar la configuración del gestor de arranque GRUB en Ubuntu.
+Cada `Found linux image` necesita su `Found initrd image`. Reinstala el gestor de arranque en sí solo cuando GRUB no arranca: sin menú, con un prompt `grub rescue>`, o con un firmware que no encuentra ninguna entrada de arranque. Dentro del chroot:
 
-GRUB (Grand Unified Bootloader) es un gestor de arranque que se usa para cargar el kernel de Linux e iniciar el proceso de arranque de Ubuntu. El archivo de configuración de GRUB se encuentra en /boot/grub/grub.cfg y contiene información sobre los kernels disponibles y las opciones de arranque.
+```bash
+grub-install /dev/sda                          # BIOS
+grub-install --target=x86_64-efi --efi-directory=/boot/efi /dev/sda   # UEFI
+update-grub
+```
 
-Cuando ejecutas el comando update-grub, este escanea tu sistema y detecta cualquier cambio en los kernels disponibles y las opciones de arranque. Después actualiza el archivo de configuración de GRUB con la nueva información.
+La opción EFI indica dónde está montada la partición EFI (`man grub-install`).
 
-Ahora puedes reiniciar tu servidor y debería arrancar correctamente.
+### Se eliminó el paquete del kernel
+
+Por defecto `apt autoremove` conserva el kernel en uso y el más reciente ([apt.conf(5)](https://manpages.ubuntu.com/manpages/noble/en/man5/apt.conf.5.html)). Un `apt purge linux-image-*` manual, o quitar el metapaquete y limpiar después, aún pueden dejarte sin un kernel que funcione. Vuelve a instalar el metapaquete, que trae un kernel y su initrd:
+
+```bash
+apt install linux-image-generic
+apt install linux-headers-generic
+update-initramfs -u -k all
+update-grub
+```
+
+En Debian el metapaquete es `linux-image-amd64` ([página del paquete](https://packages.debian.org/stable/linux-image-amd64)). En una imagen de VPS el metapaquete de Ubuntu puede ser `linux-image-virtual` o `linux-image-kvm`. Compruébalo con `dpkg -l 'linux-image-*'` e instala el que había antes.
+
+### Sin menú GRUB: modo rescue o ISO live
+
+Cuando no hay consola, o todas las entradas dan pánico antes de que aparezca el menú, arranca otro sistema que pueda montar el disco:
+
+1. Sistema de rescate del proveedor: Hetzner y OVH documentan un modo rescue que arranca un Linux temporal por red, como describen la [documentación de rescue de Hetzner](https://docs.hetzner.com/cloud/servers/getting-started/rescue-system/) y la [guía de rescue de OVHcloud](https://help.ovhcloud.com/csm/en-vps-rescue). En Hetzner activas rescue en la Console, reinicias el servidor y entras por SSH como root. Ejecuta `lsblk -f` y sigue los pasos del chroot de arriba.
+2. ISO live: la imagen live de Ubuntu o Debian en una máquina física o por consola KVM. Elige "Try Ubuntu", abre un terminal y sigue los mismos pasos del chroot.
+3. Entrada de modo recovery: cuando el menú existe pero las entradas normales fallan, la entrada `(recovery mode)` arranca el mismo kernel con menos servicios y ofrece "Drop to root shell prompt". La partición raíz se monta allí en solo lectura, como indica la página del modo recovery de Ubuntu.
+
+Mi [análisis de Hetzner Cloud](/es/hetzner-cloud-resena/) cubre el resto de la Console de Hetzner.
+
+## Comprueba después del reinicio
+
+<ListCheck>
+<ul>
+  <li>`uname -r` imprime el kernel que fallaba.</li>
+  <li>`ls -lh /boot` muestra `initrd.img-<version>` para esa versión, con un tamaño mayor que 0 bytes.</li>
+  <li>`grep -E "^\s*(linux|initrd)\s" /boot/grub/grub.cfg` muestra una línea `linux` y una `initrd` para esa versión, y `root=UUID=` coincide con `blkid`.</li>
+  <li>Reinicia una segunda vez y confirma que el servidor vuelve solo, sin que elijas una entrada del menú.</li>
+  <li>`systemd-analyze blame | head` se ejecuta desde el sistema arrancado, lo que demuestra que systemd se inició.</li>
+</ul>
+</ListCheck>
+
+Una solución fallida se ve así: el menú muestra el kernel nuevo pero el arranque vuelve a pararse en `unknown-block(0,0)`. Vuelve a la tabla de hallazgos. Has arreglado una causa distinta de la que tienes.
+
+## Rollback: arranca el kernel anterior y retén el paquete
+
+Si el kernel nuevo sigue dando pánico después de regenerar su initrd y comprobar el UUID, deja el servidor con el kernel anterior e impide que apt vuelva a instalar el nuevo:
+
+```bash
+uname -r                                   # confirm you are on the older kernel
+apt-mark hold linux-image-5.15.0-71-generic
+apt-mark showhold
+```
+
+Retén también el metapaquete (`linux-image-generic`) si quieres detener todas las actualizaciones del kernel, y libéralo más adelante con `apt-mark unhold` ([apt-mark(8)](https://manpages.ubuntu.com/manpages/noble/en/man8/apt-mark.8.html)). Para borrar el kernel malo y que el menú tenga una forma menos de fallar:
+
+```bash
+apt remove --purge linux-image-5.15.0-71-generic linux-headers-5.15.0-71-generic
+update-grub
+```
+
+## Prevención
+
+<ListCheck>
+<ul>
+  <li>Conserva al menos dos kernels instalados: el que está en uso y el anterior. `apt autoremove` mantiene el kernel en uso y el más reciente, así que no borres la entrada anterior a mano.</li>
+  <li>Vigila `/boot`. Un kernel genérico 6.8.0-149 en un servidor Ubuntu 24.04 ocupa unos 55 MB: 15 MB de `vmlinuz`, 31 MB de initrd, 9 MB de `System.map` y 0,3 MB de `config`. Un `/boot` separado de 256 MB aguanta unos cuatro, así que comprueba `df -h /boot` antes de cada actualización.</li>
+  <li>Haz un snapshot del VPS o una copia de seguridad antes de actualizar el kernel. Yo uso Restic hacia S3, mira [Pluton, copias de seguridad autoalojadas](/es/pluton-backup-autoalojado/). En bare metal, también sirve una [imagen de disco con dd](/es/guia-comando-dd-linux/) tomada desde un sistema live.</li>
+  <li>Alerta sobre el uso de disco. Una [pila de monitorización](/es/monitorizar-servidor/) solo detecta un `/boot` que se llena si vigila ese punto de montaje, así que compruébalo.</li>
+  <li>Lee la salida de la actualización. `update-initramfs` imprime un aviso o un error cuando no puede escribir en `/boot`, por ejemplo `W: /boot is ro mounted`. Esa línea es tu última oportunidad de arreglarlo antes del reinicio.</li>
+  <li>Nunca canceles `apt upgrade` ni `apt full-upgrade` mientras se configura un paquete del kernel. Si la sesión SSH se corta, ejecuta `dpkg --configure -a` antes de reiniciar.</li>
+</ul>
+</ListCheck>
+
+## Preguntas frecuentes
+
+<Accordion label="¿He perdido mis datos con este kernel panic?" group="faq">
+No. El pánico en sí no escribe nada en el sistema de archivos raíz. La única solución de aquí que puede cambiar tus archivos es `fsck -y`, así que haz un snapshot antes. Monta el disco desde un sistema de rescate con `mount /dev/sda1 /mnt` y tus datos están ahí.
+</Accordion>
+
+<Accordion label="¿Qué significa unknown-block(0,0)?" group="faq">
+Es el dispositivo que el kernel intentó usar como raíz: número mayor 0 y número menor 0, lo que significa que no se resolvió ningún dispositivo de bloques. Ningún dispositivo coincidió con el valor `root=UUID=...` de la línea del kernel. Ejecuta `blkid` y compara su salida con el valor de `root=` en `/boot/grub/grub.cfg`.
+</Accordion>
+
+<Accordion label="¿Por qué ocurre justo después de un apt upgrade?" group="faq">
+La actualización instala un `vmlinuz` nuevo y luego genera su initrd con `update-initramfs`. Si ese paso falla porque `/boot` está lleno o se cortó la sesión, el kernel nuevo se queda sin `initrd.img-<version>` y falla en el siguiente arranque. Arranca con el kernel anterior, ejecuta `dpkg --configure -a`, luego `update-initramfs -c -k <version>` y `update-grub`.
+</Accordion>
+
+<Accordion label="¿Puedo arreglar un VPS con este error sin consola?" group="faq">
+No solo con SSH, porque SSH se inicia después de montar la raíz y el servidor nunca llega a ese punto. Necesitas la consola web del proveedor para elegir un kernel anterior en GRUB, o su sistema de rescate, que arranca un Linux aparte y te devuelve SSH. Hetzner y OVH documentan un modo rescue. Una reinstalación o restaurar un snapshot es la alternativa cuando no hay ninguno de los dos.
+</Accordion>
+
+<Accordion label="¿Cómo arranco con un kernel anterior?" group="faq">
+Mantén `Shift` después de la pantalla del firmware en BIOS o pulsa `Escape` en UEFI para obtener el menú de GRUB, abre **Advanced options for Ubuntu** y elige la segunda entrada, que es el kernel anterior. Funciona cuando `ls /boot` todavía muestra una pareja `vmlinuz-` e `initrd.img-` para esa versión. Si el menú nunca aparece, usa el sistema de rescate del proveedor.
+</Accordion>
+
+<Accordion label="¿Es seguro ejecutar update-initramfs -u -k all?" group="faq">
+Sí. Con `-u` solo regenera los initrd que ya existen, uno por cada kernel instalado, y no toca el kernel que está en memoria. Tarda más que una ejecución de un solo kernel porque se regeneran todas las imágenes. Si uno de los kernels instalados es el roto y le falta el initrd, usa antes `-c -k <version>` para él, porque `-u` salta los kernels que aún no tienen imagen.
+</Accordion>
+
+<Accordion label="¿Cómo evito que el kernel roto vuelva después de reiniciar?" group="faq">
+Reténlo con `apt-mark hold linux-image-<version>` y confírmalo con `apt-mark showhold`. Después deja el kernel anterior como predeterminado. En GRUB siempre arranca primero el kernel más reciente, así que o purgas el paquete roto con `apt remove --purge linux-image-<version>` seguido de `update-grub`, o retienes también el metapaquete. Libéralo con `apt-mark unhold` cuando un kernel más nuevo corrija el problema.
+</Accordion>
+
+<Accordion label="¿Cuánto espacio necesita /boot?" group="faq">
+Reserva unos 55 MB por kernel. En Ubuntu 24.04 el kernel genérico 6.8.0-149 usa 15 MB para `vmlinuz`, 31 MB para su initrd, 9 MB para `System.map` y 0,3 MB para `config`. Una partición `/boot` separada de 256 MB aguanta unos cuatro kernels. Comprueba `df -h /boot` antes de cada actualización y quita los kernels antiguos con `apt remove --purge`, nunca borrando archivos.
+</Accordion>
