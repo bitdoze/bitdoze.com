@@ -469,7 +469,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 217 | [How to Benchmark Cloud Servers (VPS) in 2026: YABS & More](../src/content/posts/benchmark-cloud-servers.mdx) | 2025-03-07 * | 2026-09-25 | updated | 2026-09-25 | n/a |
 | 218 | [Composio MCP Guide: Connect Codex, Claude Code & Mastra to 1,500+ Apps](../src/content/posts/composio-mcp-guide.mdx) | 2026-09-25 | 2026-09-25 | not updated | not updated (file 2026-10-19) | n/a |
 | 219 | [Executor.sh: Self-Hosted Open-Source Composio Alternative](../src/content/posts/executor-sh-vs-composio.mdx) | 2026-07-15 | 2026-09-25 | updated | 2026-09-25 | n/a |
-| 220 | [Fish Audio Review 2026: Voice Cloning, Free API & Pricing Tested](../src/content/posts/fish-audio-review.mdx) | 2026-07-02 | 2026-09-25 | updated | 2026-07-24 | 2026-09-25 |
+| 220 | [Fish Audio Review: Free Tier, Pricing & Voice Cloning Tested](../src/content/posts/fish-audio-review.mdx) | 2026-07-02 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
 | 221 | [How to Embed YouTube Videos in Gatsby (MDX + Markdown)](../src/content/posts/embed-youtube-videos-to-gatsby.mdx) | 2025-03-07 * | 2026-09-26 | updated | 2026-09-26 | n/a |
 | 222 | [Best Gatsby.js Online Courses in 2026 (Still Worth Taking?)](../src/content/posts/gatsby-js-online-courses.mdx) | 2025-03-07 * | 2026-09-26 | updated | 2026-09-26 | n/a |
 | 223 | [How To Install CloudPanel and Host Node.js Apps (2026)](../src/content/posts/install-cloudpanel-host-nodejs.mdx) | 2025-03-07 * | 2026-09-27 | updated | 2026-09-27 | n/a |
@@ -679,3 +679,11 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 427 | [Best OpenAI Whisper Alternatives: APIs & Local Tested](../src/content/posts/openai-whisper-alternatives.mdx) | 2026-11-23 | 2026-11-23 | not updated | not updated (file 2026-11-23) | not updated (file 2026-11-23) |
 | 428 | [How to Self-Host Traceway as a Free Datadog Alternative](../src/content/posts/traceway-self-host-guide.mdx) | 2026-05-13 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 429 | [Transcribe a YouTube Video to Text and SRT with AssemblyAI](../src/content/posts/transcribe-youtube-video-srt-assemblyai.mdx) | 2026-11-23 | 2026-11-23 | not updated | not updated (file 2026-11-23) | not updated (file 2026-11-23) |
+| 430 | [Fish Audio API Tutorial: TTS, Voice Cloning & Streaming](../src/content/posts/fish-audio-api.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 431 | [Komodo Docker Compose Install: Core, Periphery, MongoDB](../src/content/posts/komodo-docker-install.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 432 | [Crafty Controller Docker Install: Minecraft Panel Guide](../src/content/posts/crafty-controller-docker-install.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 433 | [Ghostty Themes: Setup, Best Picks, Custom Files & Shaders](../src/content/posts/ghostty-themes.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 434 | [Ghostty vs Kitty vs Wezterm vs Alacritty: Which in 2026?](../src/content/posts/ghostty-vs-kitty.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 435 | [Best Open-Source TTS Engines in 2026 for Self-Hosting](../src/content/posts/best-open-source-tts.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 436 | [Pterodactyl vs Pelican Panel: Which Game Panel in 2026?](../src/content/posts/pterodactyl-vs-pelican.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 437 | [Pterodactyl Panel Docker Install: Panel, Wings, First Server](../src/content/posts/pterodactyl-docker-install.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |

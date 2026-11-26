@@ -1,0 +1,388 @@
+---
+date: 2026-11-26T08:00:00Z
+translationKey: "crafty-controller-docker-install"
+title: "Crafty Controller mit Docker installieren: Minecraft-Panel"
+meta_title: "Crafty Controller mit Docker installieren: Minecraft-Panel"
+description: "Crafty Controller 4.11 mit Docker installieren: Compose-Setup, Ports, Standard-Zugangsdaten, Paper-Minecraft-Server, Backups, Zeitpläne und Reverse Proxy."
+image: "@assets/images/26/11/crafty-controller-docker-install-cover.webp"
+imageAlt: "Crafty-Controller-Docker-Titelbild mit den Logos von Crafty Controller, Docker-Wal und Minecraft-Block auf einem hellen Raster"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["crafty-controller", "minecraft", "docker"]
+canonical: "https://www.bitdoze.com/de/crafty-controller-docker-installation/"
+related: ["de/pterodactyl-docker-installation", "de/pterodactyl-vs-pelican", "de/docker-container-homeserver"]
+quickAnswer: "Führe docker compose up -d mit der Compose-Datei unten aus, warte in docker logs auf 'Crafty has fully started and is now ready for use!', öffne https://HOST:8443 und melde dich als admin mit dem Passwort aus config/default-creds.txt an."
+timeToComplete: "25 Min."
+---
+
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+
+Crafty Controller ist ein kostenloses, selbst gehostetes Web-Panel für Minecraft-Server (Java, Bedrock und jetzt Hytale) mit Benutzerrollen, Zeitplänen, Backups und Webhooks. Ein Docker-Container enthält das Panel und jeden Spielserver. Diese Anleitung installiert Crafty Controller 4.11.1 mit Docker Compose unter Linux und führt dich komplett durch das Anlegen eines Paper-Servers. Ich habe beim Schreiben jeden Schritt unten in einem Wegwerf-Container ausgeführt.
+
+## Was ist Crafty Controller?
+
+Crafty ist ein auf Python basierendes Control-Panel für Minecraft-Server. Es startet jeden Server als Kindprozess im Container und liefert dir eine Web-UI für Konsole, Dateien, Spieler, Backups und Automatisierung. Stell es dir als schlankere Alternative zu [Pterodactyl](/de/pterodactyl-docker-installation/) mit einem Container, ohne separaten Daemon und ohne externe Datenbank vor.
+
+Das unterstützt Crafty, abgeglichen mit dem [GitLab-Repo](https://gitlab.com/crafty-controller/crafty-4) (258 Sterne, 280 Forks am 26. November 2026), dem [Changelog](https://gitlab.com/crafty-controller/crafty-4/-/raw/master/CHANGELOG.md) und den Docs (v4.11.1, veröffentlicht am 18. November 2026):
+
+<ListCheck>
+<ul>
+<li>**Minecraft-Java-Server**: Vanilla, Paper, Purpur, Fabric, Folia, Forge und NeoForge sowie Velocity- und BungeeCord-Proxys. Der Einrichtungsassistent lädt die jar-Datei für dich herunter.</li>
+<li>Dedizierte Server für **Minecraft Bedrock**, mit eigenem Tab im Assistenten.</li>
+<li>**Hytale-Server**, hinzugefügt in 4.9.0 (24. Januar 2026).</li>
+<li>**SteamCMD-Spiele** als experimentelle Alpha seit 4.10.0 (2. März 2026), nur auf amd64-Images. Crafty bleibt zuerst ein Minecraft-Panel. Wenn du über 100 Spieltypen brauchst, schau dir Pterodactyl an oder lies meinen Vergleich [Pterodactyl vs. Pelican](/de/pterodactyl-vs-pelican/).</li>
+<li>Pro-Server-Terminal, Dateimanager, Konfigurationseditor, Spielerverwaltung und Metriken.</li>
+<li>Einen [Task-Scheduler](https://docs.craftycontrol.com/pages/user-guide/task-scheduler) mit Cron und verketteten Aufgaben sowie einen Backup-Manager mit Aufbewahrungsregeln.</li>
+<li>[Webhooks](https://docs.craftycontrol.com/pages/user-guide/webhooks) für Discord, Slack, Mattermost und Teams.</li>
+<li>Benutzerkonten mit Rollen, MFA (TOTP und [Passkeys](https://docs.craftycontrol.com/pages/user-guide/user-authentication/passkey-configuration/)), eine [öffentliche Statusseite](https://docs.craftycontrol.com/pages/getting-started/public-status-page) unter `/status` und eine REST-API (v2).</li>
+</ul>
+</ListCheck>
+
+![Crafty-Controller-Architektur: Spieler und Browser verbinden sich mit dem Docker-Host, auf dem ein einzelner Container das Panel und die Spielserver-Prozesse ausführt](@assets/images/26/11/crafty-controller-architecture.webp)
+
+*Crafty startet jeden Spielserver als Kindprozess direkt im Crafty-Container, daher musst du nichts vom Docker-Daemon mounten.*
+
+Diese Architekturentscheidung zählt für die Sicherheit. Anders als Pterodactyls Wings oder die meisten Docker-Panels läuft Crafty ohne gemountetes `/var/run/docker.sock`. Die offizielle Compose-Datei lässt den Socket-Mount weg. Ich habe in `app/classes/shared/server.py` im 4.11.1-Image bestätigt, dass Crafty Spielserver per `subprocess.Popen` startet. Ein kompromittiertes Panel hat daher keinen Weg zum Docker-Daemon des Hosts und begrenzt die Angriffsfläche auf den Container und seine Bind-Mounts.
+
+## Für wen ist Crafty Controller gedacht?
+
+Crafty passt zu Familien und Homelabbern, die ein paar Minecraft-Server betreiben, statt zu Hosting-Firmen, die Gameserver-Slots weiterverkaufen. Es harmoniert gut mit einem sparsamen Homeserver oder NAS (sieh dir meine Empfehlungen für den [besten Mini-PC als Homeserver](/de/bester-mini-pc-homeserver/) und das [beste NAS für Docker-Homelabs](/de/bestes-nas-homelab-docker-proxmox/) an). Es steht auch regelmäßig in meinem Guide zu [Docker-Containern für den Homeserver](/de/docker-container-homeserver/).
+
+Es läuft auch auf einem VPS, wenn Freunde mitspielen sollen, ohne dass du deine Heim-IP freigibst. Ein VPS mit 2 vCPUs und 4 GB RAM ist ein sinnvoller Startpunkt für Crafty plus ein oder zwei kleine Paper-Server.
+
+## Voraussetzungen
+
+<ListCheck>
+<ul>
+<li>Ein Linux-Host mit installiertem Docker und Compose-Plugin. Die offiziellen Images erscheinen für amd64 und arm64, also funktionieren auch ein Raspberry Pi oder ein ARM-VPS.</li>
+<li>RAM: Auf meiner Testmaschine lag ein frischer Container ohne Server im Leerlauf bei etwa 80 bis 110 MiB in `docker stats`. Plane zusätzlich 1-2 GB pro kleinem Vanilla- oder Paper-Server ein (meine Faustregel), bei Modpacks mehr.</li>
+<li>Speicherplatz: rund 2,7 GB für das Image auf der Platte, ein frischer Paper-Server braucht nach der Weltgenerierung etwa 300-500 MB, plus deine Backups.</li>
+<li>Firewall: Docker veröffentlicht Ports an UFW vorbei, lies also [warum Docker deine Firewall umgeht](/docker-bypasses-firewall/), bevor du 8443 und den Serverbereich auf einem VPS freigibst.</li>
+</ul>
+</ListCheck>
+
+<Notice type="warning" title="Nicht unter Docker für Windows oder WSL2 betreiben">
+Die [Crafty-Docs](https://docs.craftycontrol.com/pages/getting-started/installation/docker/) warnen davor, dieses Image unter Docker für Windows auszuführen. Unter Docker Desktop oder WSL2 unter Windows 11 verursacht ein bekannter Berechtigungsfehler bei Volumes mit 90% Wahrscheinlichkeit irreparable Chunk-Schäden beim Stoppen oder Neustarten eines Servers. Betreibe den Container nur unter Linux, oder nutze unter Windows den nativen portablen Build von der [Crafty-Releases-Seite](https://gitlab.com/crafty-controller/crafty-4/-/releases).
+</Notice>
+
+## Ist Crafty Controller kostenlos?
+
+Ja. Crafty ist kostenlos und Open Source unter der [GPL-3.0-Lizenz](https://gitlab.com/crafty-controller/crafty-4/-/raw/master/LICENSE), passend zur LICENSE-Datei im Repo und Container-Image. Die Mitmachen-Seite akzeptiert optionale Spenden über Ko-fi und Patreon (mit Early-Access-Vorteilen für Abonnenten). Die Docs nennen auch eine E-Mail-Adresse für kommerziellen Support. Du zahlst nur für deine eigene Hardware oder deinen VPS.
+
+## Crafty Controller mit Docker Compose installieren
+
+Wähle Docker Compose oder ein einfaches `docker run`. Beide starten denselben Container mit identischen Ports und Bind-Mounts. Ich nutze Compose, weil sich die Datei leicht in Git verwalten und bearbeiten lässt.
+
+<Tabs>
+<Tab name="Docker Compose">
+
+Erstelle ein Verzeichnis und die Compose-Datei:
+
+```bash
+mkdir -p ~/crafty && cd ~/crafty
+vim docker-compose.yml
+```
+
+```yaml
+services:
+  crafty:
+    container_name: crafty_container
+    image: registry.gitlab.com/crafty-controller/crafty-4:4.11.1
+    restart: always
+    environment:
+      - TZ=Etc/UTC
+    ports:
+      - "8443:8443" # HTTPS panel
+      - "8123:8123" # Dynmap (optional)
+      - "19132:19132/udp" # Bedrock
+      - "25500-25600:25500-25600" # Minecraft Java servers
+    volumes:
+      - ./backups:/crafty/backups
+      - ./logs:/crafty/logs
+      - ./servers:/crafty/servers
+      - ./config:/crafty/app/config
+      - ./import:/crafty/import
+```
+
+Starte den Container und verfolge die Logs:
+
+```bash
+docker compose up -d
+docker logs crafty_container -f
+```
+
+</Tab>
+<Tab name="docker run">
+
+Derselbe Container als einzelner Befehl. Ich habe genau diesen Befehl mit dem 4.11.1-Image ausgeführt, und das Panel antwortete auf 8443:
+
+```bash
+mkdir -p ~/crafty && cd ~/crafty
+docker run \
+  --name crafty_container \
+  --detach \
+  --restart always \
+  -p 8443:8443 \
+  -p 8123:8123 \
+  -p 19132:19132/udp \
+  -p 25500-25600:25500-25600 \
+  -e TZ=Etc/UTC \
+  -v "$(pwd)/backups:/crafty/backups" \
+  -v "$(pwd)/logs:/crafty/logs" \
+  -v "$(pwd)/servers:/crafty/servers" \
+  -v "$(pwd)/config:/crafty/app/config" \
+  -v "$(pwd)/import:/crafty/import" \
+  registry.gitlab.com/crafty-controller/crafty-4:4.11.1
+docker logs crafty_container -f
+```
+
+</Tab>
+</Tabs>
+
+<Notice type="success" title="Was du sehen solltest">
+Warte auf `Crafty has fully started and is now ready for use!` in den Logs. Auf meinem Testsystem dauerte das ab `docker run` etwa 20 bis 30 Sekunden, da der erste Start ein Schlüsselpaar und ein selbstsigniertes TLS-Zertifikat erzeugt.
+</Notice>
+
+Hinweise zu dieser Datei:
+
+- **Festgepinnte Version.** Ich pinne `4.11.1` statt `latest`, damit Updates bewusst erfolgen. Dasselbe Image liegt auf Docker Hub als `arcadiatechnology/crafty-4:4.11.1`, falls die GitLab-Registry bei dir langsam ist. Beide Registries stehen in der [Docker-Installationsanleitung](https://docs.craftycontrol.com/pages/getting-started/installation/docker/). Auf Docker Hub wiegt das Image komprimiert 660-680 MB (678 MB amd64, 663 MB arm64) und belegt entpackt 2,67 GB. Es ist so groß, weil es mehrere JDKs bündelt. Ein `ls /usr/lib/jvm` zeigt Java 8, 11, 17, 21 und 25 im Image, mit 25 als Standard.
+- **Der Bereich 25500-25600.** Jeder Minecraft-Server in Crafty braucht seinen eigenen TCP-Port. Dieser Bereich gibt dir 100 Stück. Die Docs warnen davor, dass deutlich größere Bereiche Dockers Netzwerk ausbremsen können, also erweitere ihn nicht viel. Wenn du ohnehin nur zwei Server betreibst, reicht `"25565-25566:25565-25566"` auch aus, solange deine Crafty-Server im veröffentlichten Bereich bleiben.
+- **19132/udp** ist der Standard-Port für Bedrock. Lass ihn weg, wenn du nur Java-Server betreibst.
+- **Hytale.** Das Compose-Beispiel im Repo-README veröffentlicht auch `5520-5550/udp` für Hytale-Server. Füge diese Zeile nur hinzu, wenn du einen starten willst.
+- **8123** ist für die Web-Karte des Dynmap-Plugins gedacht. Optional.
+- **Volume-Struktur.** `servers/` enthält Server-Verzeichnisse und `config/` speichert `config/db/crafty.sqlite` samt Zugangsdaten. `backups/` sichert automatische Archive, und `import/` nimmt ZIP-Dateien bestehender Server auf.
+
+## Erster Login und das Standard-Passwort
+
+Öffne `https://DEINE_HOST_IP:8443` im Browser. Es muss `https` sein, und dein Browser warnt vor dem selbstsignierten Zertifikat. Das ist normal; laut der [Zugriffsdokumentation](https://docs.craftycontrol.com/pages/getting-started/access/) fährst du trotzdem fort.
+
+![Crafty-Controller-Login-Bildschirm mit Eingabefeldern für Benutzername, Passwort und MFA](@assets/images/26/11/crafty-controller-login.webp)
+
+*Der Login-Bildschirm mit einem Feld für den Authenticator-Code bei aktiviertem MFA und einer Schaltfläche für "Forgot Password".*
+
+Crafty generiert die Admin-Standardzugangsdaten pro Installation beim ersten Start zufällig und legt sie im Config-Volume ab:
+
+```bash
+cat ~/crafty/config/default-creds.txt
+```
+
+```json
+{
+    "username": "admin",
+    "password": "<64 random characters>",
+    "info": "This is NOT where you change your password. This file is only a means to give you a default password."
+}
+```
+
+In einem frischen 4.11.1-Container enthält diese Datei ein 64-stelliges Passwort mit `600`-Rechten. Falls `cat` auf dem Host mit "permission denied" scheitert, lies sie stattdessen über Docker mit `docker exec crafty_container cat /crafty/app/config/default-creds.txt` aus.
+
+Melde dich als `admin` mit dieser Zeichenfolge an, klicke oben rechts auf deinen Benutzernamen für das Profil und ändere das Passwort sofort. Aktiviere dort direkt TOTP, da Crafty Konsolen- und Dateizugriff auf Spielserver-Prozesse bietet.
+
+Du kannst deine eigenen Admin-Zugangsdaten auch vor dem ersten Start festlegen. In den Docs steht, man solle `default.json.example` in `default.json` umbenennen. Das 4.11.1-Docker-Image hat keine `.example`-Datei, daher lege ich unter Docker vor dem ersten Start selbst `config/default.json` an:
+
+```bash
+mkdir -p ~/crafty/config
+echo '{"username": "myadmin", "password": "a-long-password-here"}' > ~/crafty/config/default.json
+```
+
+Das Passwort braucht mindestens 8 Zeichen, sonst ignoriert Crafty es und nutzt laut `app/classes/shared/main_models.py` das generierte Passwort. Unter 4.11.1 klappte der Login mit dem vorab gesetzten Benutzernamen und Passwort sauber, während `admin` mit dem Beispielpasswort scheiterte. Ein Haken ist, dass der First-Start-Wrapper Standardkonfigurationen nur in einen leeren `config/`-Ordner kopiert. Durch das Vorab-Erstellen von `default.json` fehlten in meinem Testlauf `logging.json`, `motd_format.json` und `credits.json`. Crafty startete und erlaubte Logins trotzdem, aber das generierte Passwort zu behalten und in der UI zu ändern ist sauberer.
+
+<Notice type="info" title="Ausgesperrt?">
+Klicke auf **Forgot Password** auf dem Login-Bildschirm. Laut der [Crafty-FAQ](https://docs.craftycontrol.com/pages/user-guide/faq) aktiviert das für eine Stunde ein Anti-Lockout-Konto. Seine Zugangsdaten erscheinen im Crafty-Terminal, also unter Docker per `docker logs crafty_container`. Setze das echte Passwort zurück, melde dich vom Anti-Lockout-Konto ab und logge dich wieder normal ein.
+</Notice>
+
+## Einen Paper-Minecraft-Server erstellen
+
+Klicke auf dem Dashboard auf **Create New Server**. Der Assistent hat oben drei Tabs: Minecraft-Java, Minecraft-Bedrock und Hytale.
+
+![Crafty-Controller-Server-Erstellungsassistent mit ausgewähltem Paper 1.21.11 sowie ausgefüllten Speicher- und Port-Feldern](@assets/images/26/11/crafty-controller-create-server.webp)
+
+*Der Erstellungsassistent. Typ und Version wählen, Namen vergeben sowie Speicher und Port festlegen.*
+
+Für einen Paper-Server:
+
+1. **Server Type:** Minecraft servers (der Eintrag proxies ist für Velocity und BungeeCord).
+2. **Server Select:** paper. Fabric, Forge, NeoForge, Purpur, Folia und vanilla stehen im selben Dropdown.
+3. **Server Version:** Wähle die Version, die deine Spieler nutzen. Ich habe für diesen Test 1.21.11 gewählt. Die Versionsliste stammt aus Craftys jar-Index, den das Panel alle 12 Stunden aktualisiert, sodass du aktuelle Releases siehst.
+4. **Server Name:** beliebig, zum Beispiel `survival`.
+5. **Memory:** Minimum 1 GB, Maximum 2 GB für eine kleine Survival-Welt. Modded-Server wollen 4-8 GB Maximum.
+6. **Server port:** 25565 für den ersten Server. Er muss innerhalb deines veröffentlichten Bereichs liegen.
+
+Klicke auf **Build Server**. Crafty lädt die Paper-jar herunter und richtet alles ein; das Dashboard zeigt den Server einige Sekunden lang als importing an.
+
+![Crafty-Controller-Dashboard mit einem angelegten Server und der Ressourcennutzung des Hosts](@assets/images/26/11/crafty-controller-dashboard.webp)
+
+*Das Dashboard mit dem erstellten Server. CPU- und RAM-Auslastung des Hosts bleiben oben immer sichtbar.*
+
+Öffne die Server-Seite und klicke auf **Start**. Beim ersten Start erscheint der EULA-Dialog:
+
+![Minecraft-EULA-Bestätigungsdialog in Crafty Controller beim ersten Serverstart](@assets/images/26/11/crafty-controller-eula.webp)
+
+*Crafty fragt dich beim ersten Start ausdrücklich nach der Zustimmung zur Minecraft-EULA, statt sie stillschweigend abzunicken.*
+
+Klicke auf Yes und beobachte das Terminal. Paper lädt die Vanilla-jar herunter, wendet Patches an, führt das Remapping durch und generiert die Welt. In meinem Test dauerte der komplette Vorgang vom Klick auf Start bis `Done (19.655s)!` auf einem kleinen Server rund eine halbe Minute.
+
+![Crafty-Controller-Serverkonsole mit einem Paper-1.21.11-Server am Ende des Startvorgangs](@assets/images/26/11/crafty-controller-console.webp)
+
+*Ein laufender Paper-Server im Crafty-Terminal. Unten im Eingabefeld kannst du direkt Befehle absetzen.*
+
+Jede Server-Ansicht bietet Tabs für Terminal, Logs, Schedule, Backup, Files, Config, Player Management, Metrics und Webhooks. Es gibt auch ein Update Center, das neuere Server-Builds mit einem Klick lädt.
+
+## Mit einem Minecraft-Client verbinden
+
+Gehe im Minecraft-Java-Client auf Mehrspieler, klicke auf Server hinzufügen und gib `DEINE_HOST_IP:25565` ein. In einem Heimnetzwerk leitest du Port 25565 TCP (plus 19132 UDP für Minecraft Bedrock) im Router an den Host weiter. Du kannst dich auch privat über ein Mesh-VPN wie Tailscale verbinden, wie in [Netbird vs. Headscale vs. Tailscale](/de/netbird-vs-headscale-vs-tailscale/) beschrieben.
+
+Zwei Port-Regeln sorgen häufig für Stolpersteine:
+
+- Jeder Server braucht einen **eindeutigen** Port innerhalb des veröffentlichten Bereichs 25500-25600. Der zweite Server bekommt 25566, der dritte 25567 und so weiter.
+- Spieler verbinden sich immer mit der **Host-IP und dem Host-seitigen Port**, niemals mit der Container-IP. Wenn du den Bereich in Compose umgeleitet hast (`"35500-35600:25500-25600"`), nutzen Spieler die Zahl auf der linken Seite, während Crafty weiterhin die interne anzeigt.
+
+## Backups, Zeitpläne und Benutzer
+
+### Backups
+
+Der Backup-Tab verwaltet Zeitpläne pro Server, wie in der [Backup-Manager-Dokumentation](https://docs.craftycontrol.com/pages/user-guide/backup-manager) beschrieben. Der Standard-Backup-Job läuft vor jedem Server-Update und lässt sich nicht entfernen. Du kannst eigene Jobs mit separaten Speicherpfaden, Aufbewahrungslimits (**Max Backups**, wobei 0 unbegrenzt bedeutet) und Dateiausschlüssen anlegen. Jeder Job kann den Server während des Kopierens stoppen und Befehle vor oder nach dem Backup ausführen.
+
+Behalte zwei Warnungen aus den Docs im Kopf. Crafty kopiert Dateien live auf der Platte, daher verhindert ein Shutdown während des Backups Datenkorruption durch Schreibvorgänge beim Kopieren. Kompression ist optional und birgt laut Docs Chunk-Korruptionsrisiken, was das Herunterfahren beim Backup ohne Kompression zur sichersten Standardeinstellung macht. Da Archive in `backups/` landen und Crafty kein eigenes Panel-Backup hat, sichere alle Panel-Volumes in deinem Host-Backup.
+
+![Crafty-Controller-Backup-Manager mit einer Standard-Backup-Konfiguration](@assets/images/26/11/crafty-controller-backups.webp)
+
+*Der Backup-Manager. Jeder Server bekommt eine Standard-Konfiguration, die du erweitern kannst.*
+
+### Zeitpläne
+
+Der Tab Schedule automatisiert alles: Start, Stopp, Neustart, Backup oder beliebige Konsolenbefehle. Drei Modi:
+
+- **Basic:** Wähle eine Aktion, ein Intervall und eine Uhrzeit.
+- **Cron:** Ein roher Cron-Ausdruck für volle Kontrolle. Die [Scheduler-Docs](https://docs.craftycontrol.com/pages/user-guide/task-scheduler) warnen, dass Crafty den Wochentags-Index um eins verschiebt, sodass `0` Montag statt Sonntag ist. Abkürzungen wie MON-FRI funktionieren weiterhin normal.
+- **Chain reaction:** Läuft nach Abschluss eines übergeordneten Zeitplans mit einer Verzögerung. Die typische Kette sendet eine Warnung, wartet zwei Minuten und startet dann neu.
+
+![Erstellung eines Zeitplans in Crafty Controller mit Aktionstypen und Intervalleinstellungen](@assets/images/26/11/crafty-controller-schedules.webp)
+
+*Anlegen eines Zeitplans. Die Aktionen decken Server-Lebenszyklus, Backups und eigene Befehle ab.*
+
+Ein guter Basis-Zeitplan startet nachts um 4 Uhr ein Backup und fünf Minuten später einen verketteten Server-Neustart.
+
+### Benutzer und Rollen
+
+Panel Settings verwaltet Benutzerkonten mit Rollen pro Server. Berechtigungen teilen sich feingranular auf Konsolenzugriff, Dateiverwaltung, Backups, Zeitpläne und Spieleraktionen auf. So gibst du einem Freund Konsolenzugriff auf eine Welt, ohne das Host-Panel preiszugeben. Superuser behalten globalen Zugriff auf alle Einstellungen.
+
+Webhooks pro Server senden Ereignisse wie Serverstart, Stopp und Absturz an Discord, Slack, Mattermost oder Teams. Jeder Webhook hat einen Test-Button und eine Nachrichtenvorlage für Jinja2-Variablen wie `server_name` und `event_type`, wie in den [Webhook-Docs](https://docs.craftycontrol.com/pages/user-guide/webhooks) beschrieben.
+
+## Mehrere Server betreiben und Port-Planung
+
+Crafty kann viele Server über ein Panel betreiben; die Grenzen setzen RAM und Port-Buchführung. Die Tabelle unten ist meine Schätzung, kein Benchmark:
+
+| Server | RAM für Panel + Server (Schätzung) | Genutzte Ports |
+|---|---|---|
+| 1-2 kleine Paper | 4 GB gesamt | 25565, 25566 |
+| 3-4 gemischt | 8 GB gesamt | 25565-25568 |
+| Modded-Netzwerk | 16 GB+ | einen Port pro Server plus Proxy einplanen |
+
+Wenn du den Netzwerk-Weg gehst, betreibe einen Velocity-Proxy auf 25565 und belasse Backend-Server auf höheren Ports. Spieler brauchen nur den Proxy-Port offen.
+
+Minecraft Bedrock und Java können nebeneinander laufen, weil Bedrock standardmäßig `19132/udp` nutzt und Java-Server TCP-Ports belegen.
+
+## Crafty hinter einen Reverse Proxy setzen
+
+Das Panel verwendet Websockets (WSS), weshalb eine zu simple Reverse-Proxy-Konfiguration die Live-Ansicht im Terminal kaputtmacht. Die [offiziellen Proxy-Beispiele](https://docs.craftycontrol.com/pages/getting-started/proxies) decken nginx, Apache, Nginx Proxy Manager, SWAG und Traefik ab. Hier ist der nginx-Location-Block aus den Docs und aus `config_examples/nginx.conf.example` im Image, in einem minimalen Server-Block:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name panel.example.com;
+
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location / {
+        proxy_http_version 1.1;
+        proxy_redirect off;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+
+        proxy_pass https://localhost:8443;
+
+        proxy_buffering off;
+        client_max_body_size 0;
+        proxy_connect_timeout 3600s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
+    }
+}
+```
+
+Beachte, dass der Upstream `https` statt `http` lautet, weil Crafty nur per TLS ausliefert. Die Header `Upgrade` und `Connection` sind Pflicht; die Docs sagen, Crafty funktioniert ohne sie nicht richtig. `client_max_body_size 0` entfernt das Standard-Upload-Limit von nginx, was zählt, wenn du Server-ZIPs über das Panel hochlädst. Die Docs merken auch an, dass manche Werbeblocker WSS-Verbindungen blockieren, teste also in einem sauberen Browserprofil, falls das Terminal leer bleibt.
+
+Ich betreibe [Traefik als meinen Reverse Proxy in Docker](/traefik-proxy-docker/). Das Traefik-Beispiel in den Crafty-Docs setzt `--serversTransport.insecureSkipVerify=true`, da das Panel-Zertifikat selbstsigniert ist. Es richtet den Service mit `loadbalancer.server.scheme=https` auf Port 8443 und ergänzt eine Middleware für den Header `X-Forwarded-Proto`. Ich habe das Traefik-Setup selbst nicht getestet.
+
+Nur das Panel läuft über den Proxy. Minecraft-Traffic ist reines TCP/UDP und verbindet sich direkt mit den Host-Ports. Hier läuft nichts über einen Web-Proxy, außer du betreibst einen Minecraft-Proxy wie Velocity.
+
+## Crafty aktualisieren
+
+Das Image hält keinen Zustand, daher bestehen Updates aus Pull und Neuerstellung. Sichere vorher deine Volume-Mounts, wie es die [Docker-Docs](https://docs.craftycontrol.com/pages/getting-started/installation/docker/) sagen:
+
+```bash
+cd ~/crafty
+# edit docker-compose.yml to the new version tag
+docker compose pull
+docker compose up -d
+```
+
+Falls du `docker run` genutzt hast, stoppe und entferne den Container mit `docker stop crafty_container` und `docker rm crafty_container`, ziehe das neue Tag und starte den Befehl erneut. Deine Welten bleiben in den Bind-Mounts erhalten.
+
+Crafty führt Datenbankmigrationen automatisch beim Start aus. Lies vor größeren Versionssprüngen die [GitLab-Release-Notes](https://gitlab.com/crafty-controller/crafty-4/-/releases) und folge Upgrade-Hinweisen des Teams bei Breaking Changes. Verfolge auf einem Panel, das deine Welten verwaltet, niemals das `latest`-Tag.
+
+## Wo Crafty an Grenzen stößt
+
+- **Kein Docker unter Windows, Punkt.** Es gibt eine native portable Windows-Installation, aber der Container-Pfad ist laut ausdrücklicher Upstream-Warnung Linux-exklusiv.
+- **Kein Game-Panel.** SteamCMD-Support ist Stand 4.11.1 eine experimentelle Alpha und läuft nur auf amd64-Images. Wenn dein Schwerpunkt auf CS2, Valheim, ARK oder Rust liegt, decken [Pterodactyl](/de/pterodactyl-docker-installation/) oder Pelican das über Eggs ab.
+- **Einzelner Host.** Crafty startet Server als lokale Kindprozesse, eine Instanz verwaltet also die Maschine, auf der sie läuft. Es gibt kein Gegenstück zu Pterodactyls Wings-Nodes.
+- **Kein HA.** Es ist ein einzelner Python-Prozess mit einer SQLite-Datenbank (`config/db/crafty.sqlite`). Für ein Homelab gut, für ein Hosting-Unternehmen nicht.
+- **Kein eingebautes Panel-Backup.** Du sicherst die Volumes selbst, was bei Docker üblich ist, aber ausgesprochen gehört.
+- **Bedrock hat einen eigenen Ablauf.** Es gibt einen separaten Assistenten-Tab, der den aktuellen Bedrock-Server herunterlädt. Der Import eines bestehenden Bedrock-Servers läuft über den ZIP-Import, und diesen Weg habe ich nicht getestet.
+
+Keine dieser Grenzen stört die eigentliche Zielgruppe. Für ein Homelab mit ein paar Minecraft-Servern ist Crafty das unkomplizierteste Panel, das ich bisher genutzt habe. Es packt alles in einen reproduzierbaren Compose-Stack, ganz ohne Docker-Socket-Mount.
+
+## FAQ
+
+<Accordion label="Wie lauten die Standard-Zugangsdaten von Crafty Controller?" group="faq">
+Der Benutzername ist `admin` und das Passwort eine beim ersten Start zufällig erzeugte 64-Zeichen-Folge in `config/default-creds.txt` im Config-Volume. Lies sie auf dem Host mit `cat ~/crafty/config/default-creds.txt` aus, oder per `docker exec crafty_container cat /crafty/app/config/default-creds.txt`, falls Dateiberechtigungen dich blockieren. Ändere das Passwort direkt nach dem Login auf der Profilseite.
+</Accordion>
+
+<Accordion label="Wie setze ich ein vergessenes Crafty-Controller-Passwort zurück?" group="faq">
+Klicke auf dem Login-Bildschirm auf **Forgot Password**. Das aktiviert für eine Stunde ein temporäres Anti-Lockout-Konto und schreibt dessen Zugangsdaten in die Crafty-Logs. Lies sie mit `docker logs crafty_container` aus, melde dich mit dem temporären Konto an, setze das echte Passwort zurück, melde dich ab und logge dich wieder ein.
+</Accordion>
+
+<Accordion label="Warum meldet mein Minecraft-Server, dass der Port bereits belegt ist?" group="faq">
+Jeder Server braucht einen eindeutigen TCP-Port innerhalb des Bereichs, den du in Compose freigegeben hast (standardmäßig 25500-25600). Wenn Server eins auf 25565 läuft, lege den nächsten auf 25566 an. Welche Ports auf dem Host belegt sind, kannst du mit `ss -ltn | grep 255` prüfen.
+</Accordion>
+
+<Accordion label="Muss für Crafty Controller der Docker-Socket gemountet werden?" group="faq">
+Nein. Die offiziellen Compose- und `docker run`-Beispiele haben keinen Socket-Mount, und Crafty startet Spielserver als Kindprozesse im eigenen Container. Das ist ein echter Sicherheitsvorteil gegenüber Panels, die `/var/run/docker.sock` einbinden, da ein kompromittiertes Panel keinen Socket zur Steuerung anderer Host-Container hat.
+</Accordion>
+
+<Accordion label="Kann ich einen bestehenden Minecraft-Server in Crafty importieren?" group="faq">
+Ja. Packe den bestehenden Server-Ordner als ZIP und lege ihn im `import/`-Volume ab, oder lade ihn über den Assistenten hoch. Wähle danach auf dem Erstellungsbildschirm "Import" und gib das Stammverzeichnis sowie die Server-jar an. Für Forge und NeoForge empfiehlt die [Crafty-FAQ](https://docs.craftycontrol.com/pages/user-guide/faq), stattdessen einen frischen Server mit dem Builder anzulegen. Falls du trotzdem einen importierst, passe den Startbefehl auf das in der FAQ dokumentierte Format `@libraries/.../unix_args.txt` an.
+</Accordion>
+
+<Accordion label="Wie viel RAM verbraucht Crafty Controller?" group="faq">
+Ein frischer Container ohne Server lag auf meinem Testsystem in `docker stats` im Leerlauf bei etwa 80 bis 110 MiB. Mit einem laufenden Paper-1.21.11-Server und null Spielern verbrauchte der Container insgesamt rund 1,5 GB, wobei der Server auf 2 GB Heap begrenzt war. Plane zusätzlich zum Panel 1-2 GB pro kleinem Vanilla- oder Paper-Server ein (meine Faustregel) und 4-8 GB für Modded-Server.
+</Accordion>
+
+<Accordion label="Kann ich Crafty Controller auf einem Raspberry Pi oder ARM-Server betreiben?" group="faq">
+Ja. Das Docker-Hub-Image hat sowohl amd64- als auch arm64-Manifeste, und laut der [Docker-Installationsanleitung](https://docs.craftycontrol.com/pages/getting-started/installation/docker/) unterstützen die Arcadia-Images beide direkt. Das Startskript im Image meldet, dass SteamCMD nur unter amd64 läuft, daher schaltet es SteamCMD-Funktionen auf ARM ab. Ein Pi 5 oder ein ARM-VPS dürfte ein paar kleine Minecraft-Server packen; selbst habe ich ARM nicht getestet.
+</Accordion>
+
+<Accordion label="Wie aktualisiere ich Crafty Controller in Docker?" group="faq">
+Ändere das Versions-Tag in `docker-compose.yml` und führe `docker compose pull && docker compose up -d` aus. Migrationen laufen beim Start durch. Sichere deine Volume-Mounts vor dem Update und prüfe die GitLab-Release-Notes vor einem Major-Versionssprung auf Breaking Changes.
+</Accordion>

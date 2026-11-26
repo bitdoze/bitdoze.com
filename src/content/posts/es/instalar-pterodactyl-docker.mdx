@@ -1,0 +1,378 @@
+---
+date: 2026-11-26T08:00:00Z
+translationKey: "pterodactyl-docker-install"
+title: "Instalar Pterodactyl Panel con Docker: Panel, Wings y primer servidor"
+meta_title: "Guía para instalar Pterodactyl Panel con Docker y Wings"
+description: "Instala Pterodactyl Panel con Docker Compose y ejecuta Wings como servicio systemd en un VPS: configurar nodo, puertos y primer servidor Paper de Minecraft."
+image: "@assets/images/26/11/pterodactyl-docker-install-cover.webp"
+imageAlt: "Portada de la guía de Pterodactyl en Docker con las mascotas de Pterodactyl y la ballena de Docker conectadas sobre un fondo claro"
+categories: ["self-hosting"]
+authors: ["Dragos"]
+tags: ["pterodactyl", "game-server", "docker"]
+canonical: "https://www.bitdoze.com/es/instalar-pterodactyl-docker/"
+related: ["es/instalar-crafty-controller-docker", "es/pterodactyl-vs-pelican", "es/contenedores-docker-servidor-casa"]
+quickAnswer: "Ejecuta `docker compose up -d` para el panel, entra en 127.0.0.1:8081, crea un nodo e inicia Wings en :8080. Resultado: servidor Paper de Minecraft en línea en el puerto 25565."
+timeToComplete: "45 min"
+---
+
+import Notice from "@components/widgets/Notice.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Tabs from "@components/widgets/Tabs.astro";
+import Tab from "@components/widgets/Tab.astro";
+import Accordion from "@components/widgets/Accordion.astro";
+
+Instala Pterodactyl ejecutando el panel, MariaDB y Redis en Docker Compose. Luego instala el [daemon Wings](https://docs.pterodactyl.io/v1/wings/installing) como servicio systemd en la misma máquina. El panel es tu interfaz web y API; Wings es el agente que arranca los servidores de juegos en contenedores Docker. Un único VPS de 4 GB mueve ambos sin problemas para unos cuantos servidores.
+
+Probé cada paso de abajo en un host en vivo con panel v1.15.2 y Wings v1.13.5. Inicié sesión, registré un nodo, asigné puertos y arranqué un servidor Paper de Minecraft desde la consola del panel.
+
+## Qué es Pterodactyl
+
+Pterodactyl es un panel gratuito y de código abierto para gestionar servidores de juegos. Lo hacen funcionar dos piezas de software separadas, y confundirlas es la primera fuente de problemas al instalarlo:
+
+- **Panel**: una aplicación web en PHP/Laravel. Inicias sesión en ella, creas servidores, gestionas archivos y lo configuras todo. Necesita MariaDB y Redis.
+- **Wings**: un pequeño daemon en Go que corre en cada máquina que aloja servidores de juegos. Wings lee un token que genera el panel, habla directamente con Docker y arranca un contenedor por cada servidor de juegos.
+
+Cuatro términos importan antes de empezar. Un **node** (nodo) ejecuta Wings y un **nest** agrupa una familia de juegos (Minecraft, Rust, Source Engine). Un **egg** guarda el script de instalación de un tipo de servidor (Paper, Forge, Vanilla), mientras que un **server** se vincula a una asignación (**allocation**) de puerto en un nodo.
+
+![Arquitectura de Pterodactyl: navegador, pila Compose del panel, daemon Wings y contenedores de juego](@assets/images/26/11/pterodactyl-docker-install-architecture.webp)
+*Las dos mitades de Pterodactyl: la pila del panel en Compose y Wings controlando los contenedores de juegos en el nodo.*
+
+Esa separación explica por qué ejecutar ambas mitades en contenedores resulta incómodo. Wings espera control directo sobre el socket de Docker del host, así que contenerizar Wings introduce Docker anidado o discrepancias en las rutas que rompen los montajes de volúmenes. En un único VPS, ejecuta **el panel en Docker y Wings como servicio systemd en el host**.
+
+## Requisitos previos
+
+<ListCheck>
+<ul>
+<li>Un VPS o servidor doméstico con **virtualización KVM**. Los [requisitos de Wings](https://docs.pterodactyl.io/v1/wings/installing) indican que OpenVZ, Virtuozzo y LXC probablemente no funcionarán y que KVM está garantizado. Compruébalo con `systemd-detect-virt`: `kvm` o `none` sirven.</li>
+<li>**4 GB de RAM** es un mínimo cómodo para el panel más uno o dos servidores de juegos. Minecraft por sí solo pide entre 2 y 4 GB. Si estás buscando hardware, los mini PC de mi [comparativa para servidor doméstico](/es/mejor-mini-pc-servidor-casa/) mueven esta pila con soltura.</li>
+<li>Docker instalado: `curl -sSL https://get.docker.com/ | CHANNEL=stable bash` y luego `sudo systemctl enable --now docker`.</li>
+<li>Docker Compose v2 (incluido en las instalaciones actuales de Docker; compruébalo con `docker compose version`).</li>
+<li>Un dominio apuntando al VPS, como `panel.example.com`, si quieres HTTPS. Puedes hacer pruebas solo con una IP sin dominio.</li>
+<li>Los puertos incluyen **80/443** para tu proxy inverso, **2022** para el SFTP de Wings, **8080** para la API entre el panel y Wings, y **25565+** para Minecraft.</li>
+</ul>
+</ListCheck>
+
+Activa swap si alojas servidores para otras personas, porque los servidores de juegos en Java disparan rápido al OOM killer de Linux. El kernel Linux 6.1 y posteriores activan la contabilidad de swap por defecto. En kernels anteriores donde `docker info` muestra `WARNING: No swap limit support`, añade `swapaccount=1` a `GRUB_CMDLINE_LINUX_DEFAULT`, ejecuta `sudo update-grub` y reinicia.
+
+## Desplegar el panel con Docker Compose
+
+La imagen oficial `ghcr.io/pterodactyl/panel` reúne nginx, PHP 8.3, el worker de colas y una entrada cron para el planificador en un solo contenedor. Tú aportas MariaDB y Redis. El archivo compose siguiente sigue el [docker-compose.example.yml](https://github.com/pterodactyl/panel/blob/1.0-develop/docker-compose.example.yml) del proyecto. Fijé la etiqueta de la imagen, publiqué el panel solo en localhost y quité el bloque de correo. Crea un directorio de proyecto y este archivo compose:
+
+```yaml title="compose.yaml"
+x-common:
+  database:
+    &db-environment
+    # Do not remove the "&db-password" from the end of the line below, it is important
+    # for Panel functionality.
+    MYSQL_PASSWORD: &db-password "CHANGE_ME"
+    MYSQL_ROOT_PASSWORD: "CHANGE_ME_TOO"
+  panel:
+    &panel-environment
+    APP_URL: "https://panel.example.com"
+    APP_TIMEZONE: "UTC"
+    APP_SERVICE_AUTHOR: "noreply@example.com"
+
+services:
+  database:
+    image: mariadb:11
+    restart: always
+    command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - "/srv/pterodactyl/database:/var/lib/mysql"
+    environment:
+      <<: *db-environment
+      MYSQL_DATABASE: "panel"
+      MYSQL_USER: "pterodactyl"
+  cache:
+    image: redis:7-alpine
+    restart: always
+  panel:
+    image: ghcr.io/pterodactyl/panel:v1.15.2
+    restart: always
+    ports:
+      - "127.0.0.1:8081:80"
+    links:
+      - database
+      - cache
+    volumes:
+      - "/srv/pterodactyl/var/:/app/var/"
+      - "/srv/pterodactyl/nginx/:/etc/nginx/http.d/"
+      - "/srv/pterodactyl/certs/:/etc/letsencrypt/"
+      - "/srv/pterodactyl/logs/:/app/storage/logs"
+    environment:
+      <<: *panel-environment
+      DB_PASSWORD: *db-password
+      APP_ENV: "production"
+      APP_ENVIRONMENT_ONLY: "false"
+      CACHE_DRIVER: "redis"
+      SESSION_DRIVER: "redis"
+      QUEUE_DRIVER: "redis"
+      REDIS_HOST: "cache"
+      DB_HOST: "database"
+      DB_PORT: "3306"
+      HASHIDS_LENGTH: 8
+```
+
+Tres cosas que debes editar antes de arrancar nada:
+
+1. Cambia ambas contraseñas por valores aleatorios reales.
+2. Configura `APP_URL` con tu URL definitiva, incluyendo `https://` si vas a usar TLS. Cambiarla después implica editar `.env` y reconfigurar, así que decídelo ahora.
+3. Publico el panel en `127.0.0.1:8081` y coloco delante un proxy inverso para TLS. Si prefieres el soporte integrado de Let's Encrypt del contenedor, revisa las pestañas de TLS más abajo.
+
+Ahora arranca primero la base de datos y la caché, después ejecuta las migraciones y crea tu usuario administrador:
+
+```bash
+docker compose up -d database cache
+docker compose run --rm panel php artisan migrate --seed --force --no-interaction
+docker compose run --rm panel php artisan p:user:make \
+  --email=you@example.com --username=admin \
+  --name-first=Admin --name-last=User \
+  --password='PickSomethingStrong123' --admin=1 --no-interaction
+docker compose up -d panel
+```
+
+La migración carga todos los nests y eggs por defecto (Minecraft, Source Engine, Rust, Voice Servers) y tarda bastante menos de un minuto en un VPS pequeño. La creación del usuario imprime una tabla con tu cuenta de administrador.
+
+Comprueba que el panel responde:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8081/auth/login
+# 200
+```
+
+![Pantalla de inicio de sesión de Pterodactyl tras el primer arranque](@assets/images/26/11/pterodactyl-docker-install-login.webp)
+*Ver la pantalla de inicio de sesión significa que el panel, la base de datos y Redis están funcionando.*
+
+<Notice type="warning" title="Haz copia de seguridad de APP_KEY de inmediato">
+En el primer arranque el contenedor escribe `/srv/pterodactyl/var/.env` con un `APP_KEY` y un `HASHIDS_SALT` generados automáticamente. Cada secreto cifrado de la base de datos (claves de API, tokens de nodos) se cifra con esta clave. Si la pierdes, ni una copia perfecta de la base de datos te servirá. Guarda todo el archivo `.env` en tu gestor de contraseñas o sistema de copias de seguridad hoy mismo.
+</Notice>
+
+<Notice type="info" title="reCAPTCHA puede bloquear la página de acceso">
+La imagen del panel trae reCAPTCHA activado (`RECAPTCHA_ENABLED` vale `true` por defecto en `config/recaptcha.php`). Usa las claves pública y secreta propias de Pterodactyl, así que cada acceso consulta a Google. Si un navegador o red bloquea Google, o Google pide su paso de verificación móvil ([issue #5632](https://github.com/pterodactyl/panel/issues/5632)), no podrás iniciar sesión. Añade `RECAPTCHA_ENABLED: "false"` al entorno del panel y recrea el contenedor, o pon tus propias `RECAPTCHA_WEBSITE_KEY` y `RECAPTCHA_SECRET_KEY`. Desactivarlo elimina la protección contra fuerza bruta en el formulario de acceso, así que hazlo solo en un panel privado.
+</Notice>
+
+## Configurar TLS para el panel
+
+<Tabs>
+<Tab name="Proxy inverso">
+
+Publica el panel en `127.0.0.1:8081` (como en el archivo compose de arriba) y apunta hacia él tu terminación TLS. Si ya usas [Traefik](/es/traefik-proxy-docker/) o Nginx Proxy Manager, el panel es un upstream más. Dos requisitos:
+
+- El proxy debe enviar `X-Forwarded-Proto` y `X-Forwarded-For` correctamente, o todas las sesiones de inicio de sesión fallarán.
+- Configura `TRUSTED_PROXIES` en el entorno del panel con la IP de tu proxy, o `*` para una prueba rápida. El archivo `config/trustedproxy.php` de la imagen lee esta variable, y sin ella no confía en las cabeceras reenviadas, por lo que las URL salen mal.
+
+</Tab>
+<Tab name="Let's Encrypt integrado">
+
+Cambia el mapeo de puertos a `"80:80"` y `"443:443"`, pon en `APP_URL` tu dirección `https://` y añade `LE_EMAIL: "you@example.com"` al entorno del panel. Esta es la opción que documenta el [docker-compose.example.yml oficial](https://github.com/pterodactyl/panel/blob/1.0-develop/docker-compose.example.yml) ("pon un valor no vacío si quieres usar Let's Encrypt"). Los puertos 80 y 443 deben estar libres en el host y el dominio ya debe apuntar a él.
+
+</Tab>
+</Tabs>
+
+Si usas [Dokploy](/es/instalar-dokploy/) para el resto de tus aplicaciones, resiste la tentación de importar allí esta pila. Dokploy va genial para aplicaciones web sin estado, pero Wings necesita control a nivel de host que ningún gestor tipo PaaS te da. Ejecuta este proyecto compose directamente.
+
+## Instalar Wings en el host
+
+Wings es un único binario en Go. Estos son los comandos de la [guía oficial de instalación de Wings](https://docs.pterodactyl.io/v1/wings/installing). Wings es solo para Linux y la guía indica que no funciona en Windows:
+
+```bash
+sudo mkdir -p /etc/pterodactyl
+curl -L -o /usr/local/bin/wings \
+  "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$([[ "$(uname -m)" == "x86_64" ]] && echo "amd64" || echo "arm64")"
+sudo chmod u+x /usr/local/bin/wings
+```
+
+Wings no sirve de nada sin su `config.yml`, y ese archivo no se escribe a mano. El panel lo genera cuando creas un nodo.
+
+## Crear el nodo y las asignaciones en el panel
+
+Inicia sesión en el panel con tu usuario administrador y abre el área de administración (el icono del engranaje, o añade `/admin` a la URL). Verás el resumen administrativo con el bloque de información del sistema, que debería indicar que la versión de tu panel está al día.
+
+![Resumen de administración de Pterodactyl mostrando la versión del panel](@assets/images/26/11/pterodactyl-docker-install-admin.webp)
+*Resumen de administración. El bloque de versión te muestra de un vistazo si vas retrasado.*
+
+Primero crea una **ubicación** en **Locations**. Una ubicación es solo una etiqueta de agrupación ("home", "frankfurt", "oracle-free-tier"); necesitas al menos una. Luego abre **Nodes** y pulsa **Create New**:
+
+- **Name**: cualquier nombre, por ejemplo `Home node`.
+- **Location**: la que acabas de crear.
+- **FQDN**: el nombre de host o la IP que usan los jugadores y el panel para alcanzar este nodo. Si elegiste HTTP en lugar de SSL para el nodo, se permite una IP. En producción, usa un nombre de host real y SSL.
+- **Communicate over SSL**: usa SSL en producción. Wings necesita su propio certificado TLS para el FQDN del nodo. Según la [guía de Wings](https://docs.pterodactyl.io/v1/wings/installing), debes crear ese certificado antes de arrancar el daemon. Para un laboratorio solo en LAN, HTTP basta.
+- **Total memory / disk**: cuánta memoria y disco de la máquina puede repartir el nodo, en MB. En la sobreasignación de memoria, `-1` significa ilimitado; `0` significa sin sobreasignación.
+- **Daemon port**: `8080` es el predeterminado; cámbialo si el 8080 ya está ocupado en tu host.
+- **Daemon SFTP port**: `2022`, casi nunca merece la pena cambiarlo.
+
+![Creación de un nodo en el área de administración de Pterodactyl](@assets/images/26/11/pterodactyl-docker-install-node.webp)
+*El formulario del nodo. Memoria y disco van en MB; los puertos del daemon deben estar libres en el host.*
+
+Después de guardar, abre la pestaña **Allocation** del nodo y crea las asignaciones de puertos. Escribe la IP del nodo en el campo IP y un rango como `25565-25575` en el campo de puertos. Cada servidor de Minecraft consume una asignación; cada servidor de Rust consume dos o tres. Rangos de 10 puertos por tipo de juego son un buen valor por defecto.
+
+![Asignaciones de puertos creadas para el nodo](@assets/images/26/11/pterodactyl-docker-install-allocations.webp)
+*Once asignaciones, cada una para un futuro servidor de juegos.*
+
+## Generar la configuración de Wings e iniciar el daemon
+
+Sin salir del nodo, abre la pestaña **Configuration**. El panel muestra el archivo `config.yml` completo para Wings, incluidos el UUID y el token del nodo. Copia todo el bloque y pégalo en `/etc/pterodactyl/config.yml` dentro de la máquina del nodo. También hay un botón Generate Token que muestra un comando `wings configure` de una línea; el método de copiar y pegar se revisa mejor.
+
+![Configuración de Wings generada en la pestaña Configuration del nodo](@assets/images/26/11/pterodactyl-docker-install-wings-config.webp)
+*El config.yml que genera el panel. El token es un secreto; trátalo como una contraseña.*
+
+La clave `remote` de ese archivo es cómo Wings llega al panel. Si el panel corre en el mismo host dentro de Docker, `http://127.0.0.1:8081` funciona. Si Wings corre en otra máquina, debe ser la URL HTTPS pública del panel. Prueba primero el daemon en primer plano:
+
+```bash
+sudo wings --debug
+```
+
+Un arranque sano termina con líneas como `configuring internal webserver host_port=8080` y `sftp server listening for connections listen=0.0.0.0:2022`. Si ves `bind: address already in use`, otro proceso ocupa el puerto 8080. Me topé con ese conflicto en pruebas porque un servicio de desarrollo local ocupaba el puerto, y cambié `daemonListen` en el nodo y en la configuración de Wings. Detén el proceso con Ctrl+C y ejecútalo como daemon:
+
+```ini title="/etc/systemd/system/wings.service"
+[Unit]
+Description=Pterodactyl Wings Daemon
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=root
+WorkingDirectory=/etc/pterodactyl
+LimitNOFILE=4096
+PIDFile=/var/run/wings/daemon.pid
+ExecStart=/usr/local/bin/wings
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now wings
+```
+
+Comprueba que el panel llega a Wings abriendo el nodo en el área de administración. La pestaña **About** muestra un corazón verde cuando el daemon es accesible. También puedes comprobarlo desde dentro del contenedor del panel. El `wget` de BusyBox que incluye la imagen sale con código distinto de cero ante cualquier error HTTP, así que `|| echo unreachable` también saltaría ante un 401 sano. Imprime en su lugar la línea de estado:
+
+```bash
+docker compose exec panel wget -S -O /dev/null http://<node-ip>:8080/api/system 2>&1 | grep HTTP/
+# HTTP/1.1 401 Unauthorized  <- the daemon answers, you just have no token
+```
+
+Probé esto contra un servidor HTTP temporal que devolvía 401 desde dentro del contenedor `ghcr.io/pterodactyl/panel:v1.15.2`. Un puerto cerrado no imprime ninguna línea `HTTP/` y `wget` devuelve `can't connect to remote host`. El cuerpo de respuesta real de la API de Wings puede variar, pero una línea de estado demuestra que el daemon respondió.
+
+## Crear tu primer servidor de Minecraft
+
+Ve a **Servers**, **Create New**. El formulario es largo pero cada campo importa:
+
+- **Name**: lo que ven los jugadores en su lista, por ejemplo `Survival SMP`.
+- **Owner**: el usuario que controla el servidor en el día a día. De momento eres tú.
+- **Node**: tu nodo. **Default allocation**: elige `25565`.
+- **Resource limits**: para Paper, 2 CPU (200%), 4096 MB de RAM y 10 GB de disco son un punto de partida sensato. En memoria, `0` significa ilimitada, pero entonces el OOM killer elige sus víctimas por ti.
+- **Nest**: Minecraft, **egg**: Paper. Paper es el fork de alto rendimiento del Minecraft vanilla; para configuraciones con mods usa Forge o Fabric en su lugar.
+- **Start server when installed**: déjalo marcado.
+
+![Formulario de creación de servidor relleno para un servidor Paper de Minecraft](@assets/images/26/11/pterodactyl-docker-install-server.webp)
+*Un formulario con todo lo que necesita el egg: propietario, asignación, recursos e imagen Docker.*
+
+Pulsa **Create Server** y observa cómo el nodo ejecuta la instalación. Wings descarga el contenedor instalador del egg, baja el jar de Paper y escribe los archivos en `/var/lib/pterodactyl/volumes/<uuid>/`. En mi prueba la instalación tardó menos de un minuto en un VPS tranquilo.
+
+## Por qué Minecraft falla en el primer arranque (EULA)
+
+Un servidor de Minecraft recién creado se detiene en el primer arranque, siempre, porque el EULA de Mojang viene por defecto en `eula=false`. Esa es la queja número uno de "Pterodactyl está roto", y no tiene nada que ver con Pterodactyl. Abre la pestaña **Files** del servidor en el panel, edita `eula.txt`, cámbialo a `eula=true`, guarda y pulsa **Start** otra vez.
+
+![Gestor de archivos dentro del panel mostrando los archivos del servidor](@assets/images/26/11/pterodactyl-docker-install-files.webp)
+*El gestor de archivos: no hace falta cliente FTP para ediciones rápidas como el EULA.*
+
+En menos de un minuto la consola muestra el mundo generándose y `Done (22.173s)! For help, type "help"`, mientras la barra lateral se llena con estadísticas en vivo de CPU, memoria, disco y red:
+
+![Consola de Pterodactyl con un servidor Paper en ejecución mostrando uso de recursos en directo](@assets/images/26/11/pterodactyl-docker-install-console.webp)
+*Un servidor Paper real arrancando en la consola del panel, con estadísticas en vivo a la derecha.*
+
+Los jugadores se conectan a la dirección asignada, por ejemplo `tu-ip-del-servidor:25565`. La entrada de consola de abajo acepta cualquier comando vanilla o de Paper (`op tunombre` suele ser el primero).
+
+## Ejecutar varios juegos y gestionar puertos
+
+Cada servidor adicional sigue el mismo flujo: asignar más puertos en el nodo, crear un servidor y elegir la siguiente asignación libre. Un par de reglas prácticas:
+
+- Una asignación por servidor, siempre. Dos servidores de Minecraft no pueden compartir el 25565.
+- Cada tipo de juego pide rangos distintos. Rust pide el 28015 más los puertos de consulta y RCON alrededor; CS2 y otros juegos Source usan el 27015 por defecto. Mantén los rangos separados por juego para poder abrirlos en el firewall por grupos.
+- El panel nunca comprueba si el firewall del host u otro proceso está usando un puerto. Las asignaciones son solo contabilidad. Comprueba conflictos por tu cuenta con `ss -ltn`.
+- Vigila los límites totales de memoria y disco del nodo, porque el panel bloquea nuevos arranques en cuanto los alcanzas. Esa protección cuida las máquinas pequeñas.
+
+Si compartes la máquina con otros contenedores, mi lista de [contenedores Docker para servidor doméstico](/es/contenedores-docker-servidor-casa/) cubre buenos acompañantes. Sin embargo, deja el nodo de juegos dedicado si alojas partidas para amigos, porque los picos del recolector de basura de Java degradan los servicios cercanos.
+
+## Copias de seguridad y actualizaciones
+
+Hay que respaldar dos cosas distintas:
+
+1. **Estado del panel**: la base de datos MariaDB más `/srv/pterodactyl/var/.env`. Un `mariadb-dump` nocturno hacia tu sistema de copias junto con el archivo `.env` basta para reconstruir el panel donde sea.
+2. **Datos de los servidores de juegos**: viven en el nodo dentro de `/var/lib/pterodactyl/volumes/<uuid>/`. El panel incluye copias de seguridad integradas (pestaña **Backups** en cada servidor) que archivan en disco local o almacenamiento compatible con S3. Configura S3 en los ajustes de administración y apúntalo al almacenamiento de objetos que ya uses; si autoalojas uno, [RustFS](/es/rustfs-autoalojado/) funciona con él.
+
+Actualizar el panel consiste en subir la etiqueta de la imagen y ejecutar la migración:
+
+```bash
+docker compose pull panel
+docker compose up -d panel
+docker compose exec panel php artisan migrate --force
+docker compose exec panel php artisan up
+```
+
+Actualizar Wings consiste en sustituir el binario por la nueva versión y ejecutar `sudo systemctl restart wings`. Ambos proyectos publican buenas notas de lanzamiento. Léelas, porque las versiones de Wings y del panel tienen un contrato de compatibilidad laxo y los saltos grandes a veces requieren migrar la configuración.
+
+## Notas de seguridad que no debes saltarte
+
+<Notice type="warning" title="Wings se ejecuta como root: protege el puerto 8080 en el firewall">
+Wings tiene que ejecutarse como root porque gestiona Docker. Permite el puerto de la API de Wings (8080 por defecto) únicamente desde la IP del panel y no lo expongas nunca a todo internet.
+</Notice>
+
+- **El token del nodo equivale a acceso root.** Cualquiera que lo tenga puede hablar con el daemon haciéndose pasar por el panel. Vive en `/etc/pterodactyl/config.yml`; mantén ese archivo legible solo por root.
+- **Usa SSL en todas partes en producción.** HTTP entre el panel y Wings significa que los tokens y los datos del servidor viajan en texto plano. La configuración de laboratorio aquí lo omite a propósito; internet no perdona eso.
+- **SFTP en el 2022 es el canal de acceso a archivos** para tus usuarios, autenticado con las credenciales del panel. Expón ese puerto, pero espera ruido de fuerza bruta; limitar la tasa en el firewall ayuda.
+- Los servidores de juegos corren como usuarios sin privilegios dentro de sus contenedores, pero los propios contenedores comparten tu kernel. No des propiedad de un servidor a nadie en quien no confiarías con un script de shell.
+
+## Dónde se queda corto Pterodactyl
+
+Pterodactyl es gratuito y de código abierto bajo una licencia MIT simple. Su [LICENSE.md](https://github.com/pterodactyl/panel/blob/1.0-develop/LICENSE.md) cita a Dane Everitt y colaboradores sin cláusulas restrictivas, lo que solo hace que GitHub muestre "other" en lugar de MIT. No hay plan de pago ni funciones bloqueadas. Tu coste operativo son las copias de seguridad, la base de datos, el TLS y la depuración.
+
+Los puntos honestos a tener en cuenta tras usarlo:
+
+- **No hay soporte para Windows.** Wings es solo para Linux, punto. Los servidores de juegos de Windows deben correr dentro de contenedores Linux o en otra máquina con una herramienta distinta.
+- **El ritmo de lanzamientos ha sido irregular.** Las largas pausas en el desarrollo de 1.x durante 2023 y 2024 llevaron a parte de la comunidad a crear el fork [Pelican Panel](https://pelican.dev). La actividad volvió con el [panel v1.15.2](https://github.com/pterodactyl/panel/releases) el 21 de octubre de 2026 por parches de PHP y [Wings v1.13.5](https://github.com/pterodactyl/wings/releases) el 11 de noviembre de 2026. También hay una reescritura 2.0 desde cero en beta (v2.0.0-beta.3 el 18 de noviembre de 2026), así que revisa el ritmo de lanzamientos antes de decidirte.
+- **Los eggs los mantiene la comunidad.** Los juegos populares están bien cubiertos, pero los títulos de nicho o recién salidos a veces tienen eggs rotos o desactualizados. Tarde o temprano acabarás editando scripts de instalación de eggs.
+- **La interfaz de administración está anticuada.** Funciona, pero es una interfaz PHP renderizada en servidor a la que se le notan los años frente a cualquier alternativa moderna.
+
+Si esos compromisos pesan demasiado, lee mi comparativa completa de [Pterodactyl vs Pelican](/es/pterodactyl-vs-pelican/) sobre en qué diverge el fork. Para montajes más simples solo con Minecraft, [Crafty Controller](/es/instalar-crafty-controller-docker/) funciona en un único contenedor, y mi [comparativa de paneles autoalojados para servidores](/es/mejores-paneles-autoalojados/) cubre otras opciones.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Pterodactyl Panel es gratis?" group="faq">
+Sí, por completo. El panel tiene [licencia MIT](https://github.com/pterodactyl/panel/blob/1.0-develop/LICENSE.md), Wings también tiene licencia MIT, y no existe plan de pago ni funciones bloqueadas. Tu único gasto es el VPS (una máquina de 4 GB mueve el panel y dos servidores) y almacenamiento de objetos opcional para copias.
+</Accordion>
+
+<Accordion label="¿Pterodactyl está muerto o sin mantenimiento?" group="faq">
+No, aunque la preocupación tiene historia real detrás. Los periodos sin actividad en 2023 y 2024 llevaron a colaboradores a crear el fork Pelican Panel. El mantenimiento se retomó con el panel [v1.15.2](https://github.com/pterodactyl/panel/releases) (21 de octubre de 2026), [Wings v1.13.5](https://github.com/pterodactyl/wings/releases) (11 de noviembre de 2026) y una beta 2.0 (v2.0.0-beta.3, 18 de noviembre de 2026). Con unas 9,5 mil estrellas y commits escasos en 1.x (21 de octubre y 18 de noviembre de 2026), espera parches de seguridad más que nuevas funciones rápidas.
+</Accordion>
+
+<Accordion label="¿Cuál es la diferencia entre Pterodactyl Panel y Wings?" group="faq">
+El panel es la aplicación web PHP donde gestionas usuarios, servidores, archivos y ajustes, respaldada por MariaDB y Redis. Wings es el daemon en Go instalado en cada host de juegos que recibe órdenes del panel y ejecuta contenedores de juegos. Despliega el panel una vez e instala Wings en cada nodo de juegos.
+</Accordion>
+
+<Accordion label="¿Funciona Pterodactyl en Windows?" group="faq">
+No. Wings es solo para Linux porque depende del motor Docker de Linux, cgroups y espacios de nombres (namespaces). Los servidores de juegos de Windows corren dentro de contenedores Linux mediante Wine o compilaciones nativas que gestiona el sistema de eggs. Si no, necesitas otro panel distinto.
+</Accordion>
+
+<Accordion label="¿Por qué no puedo conectarme a mi servidor de Minecraft?" group="faq">
+Comprueba tres cosas en orden. Primero, lee la consola para ver el aviso del EULA, cambia `eula.txt` a `eula=true` y reinicia. Después, verifica que la asignación del servidor enlaza la IP y el puerto a los que te conectas (se muestran en la barra lateral como `203.0.113.10:25565`). Por último, ejecuta `sudo ss -ltn | grep 25565` en el nodo y comprueba que UFW en el host o el firewall de tu VPS permiten el tráfico entrante.
+</Accordion>
+
+<Accordion label="¿Pueden ejecutarse el panel y Wings en la misma máquina?" group="faq">
+Sí, ejecutar el panel en Docker junto con Wings como servicio systemd en el host es la disposición estándar en un único VPS, comunicándose por la IP del nodo. El consumo en reposo antes de arrancar cualquier servidor de juegos es bajo. Una prueba en reposo de esta pila compose (panel v1.15.2, MariaDB 11, Redis 7) usó unos 103 MiB para el panel. MariaDB consumió 101 MiB y Redis 3 MiB, situando el uso en reposo cerca de 210 MiB. Espera un consumo mucho mayor cuando arranquen los juegos.
+</Accordion>
+
+<Accordion label="¿Cuánta RAM necesito para Pterodactyl?" group="faq">
+Como la pila del panel rondó los 210 MiB en reposo durante las pruebas, 1 GB es un mínimo práctico solo para el panel (estimación propia, no una especificación oficial). Suma las asignaciones por juego encima, como 2 a 4 GB para Paper Minecraft u 8 GB+ para Rust. Un VPS de 4 GB sirve para el panel y uno o dos mundos ligeros, mientras que 16 GB encajan para una comunidad pequeña.
+</Accordion>
+
+<Accordion label="¿Cómo actualizo Pterodactyl sin romperlo?" group="faq">
+Haz siempre primero copia de seguridad de la base de datos y de `/srv/pterodactyl/var/.env`. Luego actualiza la etiqueta de la imagen en `compose.yaml`, ejecuta `docker compose pull panel && docker compose up -d panel` y termina con `docker compose exec panel php artisan migrate --force`. Para Wings, descarga el binario nuevo sobre `/usr/local/bin/wings` y reinicia el servicio. No generes nunca un `APP_KEY` nuevo sobre una base de datos existente.
+</Accordion>
