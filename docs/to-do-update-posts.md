@@ -251,7 +251,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | # | Post | Published | Last updated | Status | ES | DE |
 |---:|---|---|---|---|---|
 | 1 | [Plausible Analytics Review: Features, Pricing, Self-Hosting](../src/content/posts/plausible-tool.mdx) | 2023-03-17 | 2026-11-23 | updated | 2026-11-23 | n/a |
-| 2 | [Screen Studio Review: Is It Worth It for Mac Demos?](../src/content/posts/screen-studio-review.mdx) | 2023-04-04 | 2026-11-23 | updated | 2026-11-23 | not updated (file 2026-11-16) |
+| 2 | [Screen Studio Review: Is It Worth It for Mac Demos?](../src/content/posts/screen-studio-review.mdx) | 2023-04-04 | 2026-11-23 | updated | 2026-11-23 | 2026-11-23 |
 | 3 | [Upload a Directory Tree to an OCI Bucket With Python](../src/content/posts/upload-directory-oci-bucket-python.mdx) | 2023-04-26 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 4 | [Fix Kernel Panic: VFS Unable to Mount Root FS on Ubuntu](../src/content/posts/fix-kernel-panic-unable-mount-root-fs.mdx) | 2023-05-11 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 5 | [How to Update Docker Compose Containers (With Rollback)](../src/content/posts/updating-container-docker-compose.mdx) | 2023-05-11 | 2026-11-23 | updated | 2026-11-23 | n/a |
@@ -270,9 +270,9 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 18 | [CloudPanel Varnish Cache for WordPress: Setup Guide](../src/content/posts/cloudpanel-varnish-cache.mdx) | 2026-02-26 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 19 | [Pangolin: Deploy a Self-Hosted Alternative to Cloudflare Tunnels](../src/content/posts/pangolin-cloudflare-tunnels-alternative.mdx) | 2026-05-20 | 2026-05-20 | not updated | not updated (file 2026-10-19) | n/a |
 | 20 | [Coolify vs Dokploy vs Kamal 2: Picking the Right Self-Hosted PaaS](../src/content/posts/coolify-vs-dokploy-vs-kamal-2.mdx) | 2026-05-25 | 2026-05-25 | not updated | 2026-11-13 | n/a |
-| 21 | [Cheapest AI Models for Hermes Agent in 2026 (Under $1/M Tokens)](../src/content/posts/best-cheap-models-hermes-agent.mdx) | 2026-04-30 | 2026-06-12 | updated | not updated (file 2026-04-30) | 2026-06-12 |
+| 21 | [Cheapest AI Models for Hermes Agent in 2026 (Under $1/M Tokens)](../src/content/posts/best-cheap-models-hermes-agent.mdx) | 2026-04-30 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 22 | [How to Use the Codex App with Any Model: GLM 5.2, MiniMax M3, MiMo V2.5 Pro, OpenCode Go](../src/content/posts/codex-app-any-model.mdx) | 2026-06-12 | 2026-06-12 | not updated | not updated (file 2026-10-19) | n/a |
-| 23 | [Hermes Agent Dashboard Setup: SSH, Caddy, Docker & Security (2026)](../src/content/posts/hermes-dashboard-guide.mdx) | 2026-04-14 | 2026-06-12 | updated | 2026-06-12 | 2026-06-12 |
+| 23 | [Hermes Agent Dashboard Setup: SSH, Caddy, Docker & Security (2026)](../src/content/posts/hermes-dashboard-guide.mdx) | 2026-04-14 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 24 | [Mount an S3 Bucket as a Filesystem on a VPS with ZeroFS & JuiceFS](../src/content/posts/s3-bucket-filesystem-vps.mdx) | 2026-06-16 | 2026-06-16 | not updated | not updated (file 2026-06-16) | n/a |
 | 25 | [Manifest V3 Broke Your Ad Blocker? Block Ads Everywhere with NextDNS](../src/content/posts/block-ads-manifest-v3-nextdns.mdx) | 2026-06-17 | 2026-06-17 | not updated | not updated (file 2026-10-19) | n/a |
 | 26 | [Build a Todo App with TanStack Start, Bunny Database & Drizzle ORM](../src/content/posts/tanstack-start-bunny-database-drizzle.mdx) | 2026-06-18 | 2026-06-18 | not updated | not updated (file 2026-10-19) | n/a |
@@ -280,7 +280,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 28 | [Build Your First Durable AI Agent with Vercel Eve (Beginner's Guide)](../src/content/posts/vercel-eve-ai-agent.mdx) | 2026-06-19 | 2026-06-19 | not updated | not updated (file 2026-10-19) | n/a |
 | 29 | [Monitor CPU Usage and Send Email Alerts in Linux](../src/content/posts/monitor-cpu-usage-and-send-email-alerts-in-linux.mdx) | 2022-09-14 | 2026-06-26 | updated | 2026-06-26 | n/a |
 | 30 | [How to Install Node.js using NVM on MacOS and Ubuntu](../src/content/posts/install-nodejs-using-nvm-macos-ubuntu.mdx) | 2022-10-07 | 2026-06-27 | updated | 2026-06-27 | n/a |
-| 31 | [TinyFish: The Best Free Firecrawl Alternative for AI Agents in 2026](../src/content/posts/tinyfish-free-firecrawl-alternative.mdx) | 2026-06-27 | 2026-06-27 | not updated | not updated (file 2026-10-19) | n/a |
+| 31 | [TinyFish: The Best Free Firecrawl Alternative for AI Agents in 2026](../src/content/posts/tinyfish-free-firecrawl-alternative.mdx) | 2026-06-27 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 32 | [Best Astro.js Online Courses/Tutorials](../src/content/posts/best-astrojs-online-courses.mdx) | 2022-10-12 | 2026-06-28 | updated | 2026-06-28 | n/a |
 | 33 | [How To Deploy An Astro.JS Blog On Cloudflare](../src/content/posts/deploy-astrojs-cloudflare.mdx) | 2022-10-18 | 2026-06-28 | updated | 2026-06-28 | n/a |
 | 34 | [Link GitHub with A SSH Key to MacOS or Linux](../src/content/posts/link-github-with-ssh-maco-linux.mdx) | 2022-10-07 | 2026-06-28 | updated | 2026-06-28 | n/a |
@@ -300,8 +300,8 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 48 | [Launch a Self-Hosted Newsletter with Keila and Docker](../src/content/posts/keila-setup.mdx) | 2023-11-28 | 2026-07-13 | updated | 2026-07-13 | n/a |
 | 49 | [Mail.Baby Review 2026: Cheap SMTP Service Pros & Cons](../src/content/posts/mail-baby-review.mdx) | 2023-11-27 | 2026-07-13 | updated | 2026-07-13 | n/a |
 | 50 | [Plausible Analytics for Astro with Cloudflare Workers](../src/content/posts/astro-plausible-cloudflare-workers.mdx) | 2023-12-07 | 2026-07-14 | updated | 2026-07-14 | n/a |
-| 51 | [Best Hermes Agent Dashboards & Mobile Apps (2026 Guide)](../src/content/posts/best-hermes-dashboards.mdx) | 2026-04-22 | 2026-07-14 | updated | 2026-07-14 | 2026-07-14 |
-| 52 | [Hermes Agent Setup Guide (2026): Self-Improving AI on Your Server](../src/content/posts/hermes-agent-setup-guide.mdx) | 2026-03-20 | 2026-07-14 | updated | not updated (file 2026-03-20) | n/a |
+| 51 | [Best Hermes Agent Dashboards & Mobile Apps (2026 Guide)](../src/content/posts/best-hermes-dashboards.mdx) | 2026-04-22 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
+| 52 | [Hermes Agent Setup Guide (2026): Self-Improving AI on Your Server](../src/content/posts/hermes-agent-setup-guide.mdx) | 2026-03-20 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 53 | [How to Update All Node.js Dependencies to Latest Version](../src/content/posts/nodejs-update-dependencies.mdx) | 2023-12-06 | 2026-07-14 | updated | 2026-07-14 | n/a |
 | 54 | [Add a Contact Form to Any Static Website](../src/content/posts/add-contact-form-static-websites.mdx) | 2024-01-10 | 2026-07-15 | updated | 2026-07-15 | n/a |
 | 55 | [How to Add a Custom Domain to Carrd (Step-by-Step Guide)](../src/content/posts/carrd-add-domain.mdx) | 2024-01-16 | 2026-07-15 | updated | 2026-07-15 | 2026-07-15 |
@@ -328,7 +328,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 76 | [How to Create a Carrd Mobile Responsive Navbar (3 Methods)](../src/content/posts/carrd-mobile-navbar.mdx) | 2024-02-14 | 2026-07-23 | updated | 2026-07-23 | 2026-07-23 |
 | 77 | [CloudPanel as Reverse Proxy: Docker & Dockge Setup Guide](../src/content/posts/cloudpanel-setup-dockge.mdx) | 2024-02-13 | 2026-07-23 | updated | 2026-07-23 | n/a |
 | 78 | [30+ Best Python Web Frameworks for 2026 (Compared)](../src/content/posts/best-python-web-frameworks.mdx) | 2024-02-16 | 2026-07-24 | updated | 2026-07-24 | n/a |
-| 79 | [Build Your Own AI Agent with Mastra (Files, Web, Browser)](../src/content/posts/build-ai-agent-mastra.mdx) | 2026-06-22 | 2026-07-24 | updated | 2026-07-24 | n/a |
+| 79 | [Build Your Own AI Agent with Mastra (Files, Web, Browser)](../src/content/posts/build-ai-agent-mastra.mdx) | 2026-06-22 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 80 | [Bunny.net Review 2026: Honest Take After 1 Year (Cheaper Than Cloudflare)](../src/content/posts/bunny-net-review.mdx) | 2026-04-08 | 2026-07-24 | updated | 2026-07-24 | n/a |
 | 81 | [Clone Your Voice with Fish Audio in 2 Minutes (2026 Guide)](../src/content/posts/fish-audio-clone-voice.mdx) | 2026-07-02 | 2026-07-24 | updated | 2026-07-24 | 2026-07-24 |
 | 82 | [Fish Audio vs ElevenLabs 2026: I Switched and Saved $84/Year](../src/content/posts/fish-audio-vs-elevenlabs.mdx) | 2026-07-02 | 2026-07-24 | updated | 2026-07-24 | n/a |
@@ -521,10 +521,10 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 269 | [Freebuff Review 2026: 30h/Day Free AI Coding Agent Tested (CLI & Desktop)](../src/content/posts/freebuff-free-ai-coding-agent.mdx) | 2026-07-01 | 2026-10-16 | updated | 2026-10-18 | 2026-10-16 |
 | 270 | [Google ADK OpenRouter: Use Any Model in Your AI Agent](../src/content/posts/google-adk-openrouter-models.mdx) | 2025-04-10 | 2026-10-16 | updated | 2026-10-18 | n/a |
 | 271 | [Hetzner Cloud Review 2026: Still Worth It After Price Hike?](../src/content/posts/hetzner-cloud-review.mdx) | 2025-07-10 | 2026-10-16 | updated | 2026-10-18 | n/a |
-| 272 | [Extend Muse AI With Custom MCPs: TinyFish, Composio & Fish Audio](../src/content/posts/muse-tinyfish-search-fetch.mdx) | 2026-10-16 | 2026-10-16 | not updated | 2026-10-18 | n/a |
-| 273 | [OpenCode Go Plan Review (2026): $10 vs $40 Go Plus, Limits & Models](../src/content/posts/opencode-go-plan.mdx) | 2026-05-21 | 2026-10-16 | updated | 2026-10-16 | 2026-10-16 |
-| 274 | [TinyFish Review: Free Web Search and Fetch API for AI Coding Agents](../src/content/posts/tinyfish-ai-agents-web-search.mdx) | 2026-05-13 | 2026-10-16 | updated | 2026-10-16 | n/a |
-| 275 | [Free Web Search for AI Coding Agents: TinyFish Search + Fetch Setup Guide](../src/content/posts/tinyfish-free-search-coding-agents.mdx) | 2026-07-10 | 2026-10-16 | updated | 2026-10-18 | n/a |
+| 272 | [Extend Muse AI With Custom MCPs: TinyFish, Composio & Fish Audio](../src/content/posts/muse-tinyfish-search-fetch.mdx) | 2026-10-16 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 273 | [OpenCode Go Plan Review (2026): $10 vs $40 Go Plus, Limits & Models](../src/content/posts/opencode-go-plan.mdx) | 2026-05-21 | 2026-11-27 | updated | 2026-10-16 | 2026-11-27 |
+| 274 | [TinyFish Review: Free Web Search and Fetch API for AI Coding Agents](../src/content/posts/tinyfish-ai-agents-web-search.mdx) | 2026-05-13 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 275 | [Free Web Search for AI Coding Agents: TinyFish Search + Fetch Setup Guide](../src/content/posts/tinyfish-free-search-coding-agents.mdx) | 2026-07-10 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 276 | [Best Thunderbolt 5 Docks 2026: CalDigit vs Anker vs Budget](../src/content/posts/best-thunderbolt-5-docks-guide.mdx) | 2025-09-29 | 2026-10-17 | updated | 2026-10-18 | 2026-10-17 |
 | 277 | [Hetzner Cloud Pricing & Cost-Optimized Plans (2026): CX23, CPX & Alternatives](../src/content/posts/hetzner-cloud-cost-optimized-plans.mdx) | 2025-10-16 | 2026-10-20 | updated | 2026-10-20 | 2026-10-20 |
 | 278 | [Tern: Stencil's Rust-Native Terminal Is a Whole Dev Workspace](../src/content/posts/tern-terminal.mdx) | 2026-10-20 | 2026-10-20 | not updated | 2026-10-20 | 2026-10-20 |
@@ -570,7 +570,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 318 | [How to Set Up Starship Prompt with Fish Shell (2026)](../src/content/posts/fish-shell-starship-prompt.mdx) | 2026-02-24 | 2026-11-01 | updated | 2026-11-05 | n/a |
 | 319 | [Fish Shell vs Zsh in 2026: Which Should You Choose?](../src/content/posts/fish-shell-vs-zsh.mdx) | 2026-02-24 | 2026-11-01 | updated | 2026-11-05 | n/a |
 | 320 | [Best Fish Shell Plugins for Fish 4 (Fisher, Oh My Fish)](../src/content/posts/best-fish-shell-plugins.mdx) | 2026-02-24 | 2026-11-04 | updated | 2026-11-05 | 2026-11-04 |
-| 321 | [Best Open Source Grok Bot Alternatives (2026)](../src/content/posts/best-open-source-grok-bot-alternatives.mdx) | 2026-10-23 | 2026-11-04 | updated | 2026-11-05 | 2026-11-04 |
+| 321 | [Best Open Source Grok Bot Alternatives (2026)](../src/content/posts/best-open-source-grok-bot-alternatives.mdx) | 2026-10-23 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 322 | [Best Terminal Multiplexers (2026): tmux, Zellij & Rex](../src/content/posts/best-terminal-multiplexers.mdx) | 2026-10-29 | 2026-11-04 | updated | 2026-11-05 | 2026-11-04 |
 | 323 | [Fish Shell History: Search, Delete & Sync (2026 Guide)](../src/content/posts/fish-shell-history-persistence.mdx) | 2026-02-24 | 2026-11-04 | updated | 2026-11-05 | n/a |
 | 324 | [NanoClaw v2 Deploy Guide: Claude Agent in Docker on Your VPS](../src/content/posts/nanoclaw-deploy-guide.mdx) | 2026-02-22 | 2026-11-04 | updated | 2026-11-05 | n/a |
@@ -596,8 +596,8 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 344 | [Breakdance Builder Review: Is It Still Worth It in 2026?](../src/content/posts/breakdance-builder-review.mdx) | 2026-02-26 | 2026-11-10 | updated | not updated (file 2026-10-24) | n/a |
 | 345 | [Breakdance Static WordPress Site: Deploy Free on Sevalla](../src/content/posts/breakdance-kinsta-static-site.mdx) | 2026-02-26 | 2026-11-10 | updated | not updated (file 2026-10-24) | n/a |
 | 346 | [Oh My Fish (OMF): Install Themes & Plugins (2026 Update)](../src/content/posts/oh-my-fish-install-themes-plugins.mdx) | 2026-02-24 | 2026-11-10 | updated | 2026-11-13 | n/a |
-| 347 | [31 Self-Hosted Apps That Run Entirely on Cloudflare Workers](../src/content/posts/self-hosted-apps-cloudflare-workers.mdx) | 2026-08-21 | 2026-11-10 | updated | 2026-11-10 | 2026-11-10 |
-| 348 | [Stop Wasting Time: Free AI Tools You Didn't Know Existed](../src/content/posts/stop-wasting-time-free-ai-tools.mdx) | 2026-11-10 | 2026-11-10 | not updated | 2026-11-10 | 2026-11-10 |
+| 347 | [31 Self-Hosted Apps That Run Entirely on Cloudflare Workers](../src/content/posts/self-hosted-apps-cloudflare-workers.mdx) | 2026-08-21 | 2026-11-25 | updated | 2026-11-25 | 2026-11-25 |
+| 348 | [Stop Wasting Time: Free AI Tools You Didn't Know Existed](../src/content/posts/stop-wasting-time-free-ai-tools.mdx) | 2026-11-10 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 349 | [Best Cameras for Frigate & Home Assistant (2026)](../src/content/posts/best-cameras-frigate-home-assistant.mdx) | 2026-11-11 | 2026-11-11 | not updated | 2026-11-11 | n/a |
 | 350 | [Best PoE Video Doorbell for Home Assistant (2026)](../src/content/posts/best-poe-doorbell-home-assistant.mdx) | 2026-11-11 | 2026-11-11 | not updated | 2026-11-11 | n/a |
 | 351 | [Best Zigbee Sensors for Home Assistant (2026)](../src/content/posts/best-zigbee-sensors-home-assistant.mdx) | 2026-11-11 | 2026-11-11 | not updated | 2026-11-11 | n/a |
@@ -617,7 +617,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 365 | [How To Install Uptime Kuma Self Hosted Monitoring Tool](../src/content/posts/install-uptime-kuma.mdx) | 2026-02-26 | 2026-11-13 | updated | 2026-11-13 | n/a |
 | 366 | [16GB Raspberry Pi 5 ($385) vs Mini PCs: Homelab Math](../src/content/posts/raspberry-pi-5-vs-mini-pc.mdx) | 2026-11-13 | 2026-11-13 | not updated | not updated (file 2026-11-13) | n/a |
 | 367 | [ServerOS Panel Review: Multi-VPS Panel With MCP Server](../src/content/posts/serveros-panel-review.mdx) | 2026-11-13 | 2026-11-13 | not updated | not updated (file 2026-11-13) | n/a |
-| 368 | [ZCode AI Review 2026: Free AI Coding Agent vs Cursor](../src/content/posts/zcode-ai-review.mdx) | 2026-02-12 | 2026-11-13 | updated | 2026-11-13 | n/a |
+| 368 | [ZCode AI Review 2026: Free AI Coding Agent vs Cursor](../src/content/posts/zcode-ai-review.mdx) | 2026-02-12 | 2026-11-27 | updated | 2026-11-13 | n/a |
 | 369 | [How to Install WordPress on Ubuntu ARM with CloudPanel](../src/content/posts/install-wordpress-on-ubuntu-arm.mdx) | 2026-02-26 | 2026-11-14 | updated | not updated (file 2026-10-24) | n/a |
 | 370 | [OpenOrange: Run Cloudflare Workers on Your Own Servers](../src/content/posts/open-orange-cloudflare-workers.mdx) | 2026-11-14 | 2026-11-14 | not updated | 2026-11-14 | n/a |
 | 371 | [How to Safely Update CloudPanel: Snapshot First (2026)](../src/content/posts/safely-update-cloudpanel.mdx) | 2026-02-26 | 2026-11-14 | updated | 2026-11-14 | n/a |
@@ -637,7 +637,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 385 | [HyperFrames Studio Review: Free AI Agent Video Editor Tested](../src/content/posts/hyperframes-studio-review.mdx) | 2026-11-16 | 2026-11-16 | not updated | not updated (file 2026-11-16) | not updated (file 2026-11-16) |
 | 386 | [How To Deploy Memoh AI Agent Platform with Docker Compose](../src/content/posts/memoh-ai-agent-deploy.mdx) | 2026-03-05 | 2026-11-16 | updated | 2026-11-16 | 2026-11-16 |
 | 387 | [Bunny Stream: How to Host Videos Without Vimeo or YouTube](../src/content/posts/bunny-stream-guide.mdx) | 2026-04-08 | 2026-11-17 | updated | 2026-11-17 | n/a |
-| 388 | [How to Use Hermes Agent with Free Models on the Nous Portal](../src/content/posts/hermes-agent-mimo-v2-pro.mdx) | 2026-04-08 | 2026-11-17 | updated | 2026-11-17 | n/a |
+| 388 | [How to Use Hermes Agent with Free Models on the Nous Portal](../src/content/posts/hermes-agent-mimo-v2-pro.mdx) | 2026-04-08 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 389 | [Best Desk Setup Gadgets 2027: 12 Upgrades That Actually Matter](../src/content/posts/best-desk-setup-gadgets-2027.mdx) | 2026-11-18 | 2026-11-18 | not updated | 2026-11-18 | 2026-11-18 |
 | 390 | [Best Hard Drives for NAS (2026): IronWolf vs WD Red](../src/content/posts/best-hard-drives-for-nas.mdx) | 2026-11-11 | 2026-11-18 | updated | 2026-11-18 | 2026-11-18 |
 | 391 | [Best NAS for Docker & Proxmox Homelabs 2026](../src/content/posts/best-nas-homelab-docker-proxmox.mdx) | 2026-09-21 | 2026-11-18 | updated | 2026-11-18 | 2026-11-18 |
@@ -654,7 +654,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 402 | [Tailscale Setup Guide: MagicDNS, Subnets & Exit Nodes](../src/content/posts/tailscale-setup-guide.mdx) | 2026-11-19 | 2026-11-19 | not updated | not updated (file 2026-11-19) | not updated (file 2026-11-19) |
 | 403 | [VPS Setup for AI Coding Agents: Secure & Ready to Code](../src/content/posts/vps-ai-coding-setup.mdx) | 2026-04-20 | 2026-11-19 | updated | not updated (file 2026-10-19) | n/a |
 | 404 | [Best Docker Desktop Alternatives 2026: OrbStack, Colima, Kiri](../src/content/posts/best-docker-desktop-alternatives.mdx) | 2026-11-20 | 2026-11-20 | not updated | not updated (file 2026-11-20) | not updated (file 2026-11-20) |
-| 405 | [Black Friday Home Server & Homelab Deals 2026](../src/content/posts/black-friday-home-server-deals.mdx) | 2026-09-21 | 2026-11-20 | updated | 2026-11-20 | 2026-11-20 |
+| 405 | [Black Friday Home Server & Homelab Deals 2026](../src/content/posts/black-friday-home-server-deals.mdx) | 2026-09-21 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 406 | [How to block ads, malware, and ISP tracking with encrypted DNS](../src/content/posts/block-ads-malware-dns-protection.mdx) | 2026-01-12 | 2026-11-20 | updated | 2026-11-20 | 2026-11-20 |
 | 407 | [Forgejo vs Gitea (2026): Differences & Actions Runner Guide](../src/content/posts/forgejo-vs-gitea-self-hosted.mdx) | 2026-11-20 | 2026-11-20 | not updated | not updated (file 2026-11-20) | not updated (file 2026-11-20) |
 | 408 | [GitHub Copilot Alternatives: 5 Cheaper Picks for 2026](../src/content/posts/github-copilot-alternatives-2026.mdx) | 2026-04-30 | 2026-11-20 | updated | 2026-11-20 | 2026-11-20 |
@@ -668,7 +668,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 416 | [Control AI agents from your phone: Herdr Mobile & Moshi](../src/content/posts/control-ai-agents-from-phone-moshi-herdr.mdx) | 2026-09-28 | 2026-11-21 | updated | 2026-11-21 | 2026-11-21 |
 | 417 | [Herdr review (2026): open-source runtime for AI coding agents](../src/content/posts/herdr-agent-multiplexer.mdx) | 2026-07-10 | 2026-11-21 | updated | 2026-11-21 | 2026-11-21 |
 | 418 | [Herdr Desktop App layouts and mods: 312+ workspace gallery](../src/content/posts/herdr-app-layouts-mods.mdx) | 2026-11-08 | 2026-11-21 | updated | 2026-11-21 | 2026-11-21 |
-| 419 | [Hermes Kanban Setup Guide: Multi-Agent Task Boards (2026)](../src/content/posts/hermes-kanban-setup-guide.mdx) | 2026-05-04 | 2026-11-21 | updated | 2026-11-21 | 2026-11-21 |
+| 419 | [Hermes Kanban Setup Guide: Multi-Agent Task Boards (2026)](../src/content/posts/hermes-kanban-setup-guide.mdx) | 2026-05-04 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
 | 420 | [OpenCode Setup Guide: Open-Source Claude Code Alternative](../src/content/posts/opencode-setup-guide.mdx) | 2026-04-30 | 2026-11-21 | updated | 2026-11-21 | 2026-11-21 |
 | 421 | [Qwen 3.6 for AI Coding Agents: Setup, Pricing & Benchmarks](../src/content/posts/qwen36-ai-coding-agents.mdx) | 2026-04-30 | 2026-11-21 | updated | 2026-11-21 | n/a |
 | 422 | [Mirage Tutorial: Virtual Filesystem for AI Agents (2026)](../src/content/posts/mirage-virtual-filesystem-ai-agents.mdx) | 2026-05-12 | 2026-11-22 | updated | 2026-11-22 | n/a |

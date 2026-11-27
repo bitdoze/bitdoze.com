@@ -1,6 +1,6 @@
 ---
 date: 2026-05-04
-lastmod: 2026-11-21T00:00:00Z
+lastmod: 2026-11-27T00:00:00Z
 translationKey: "hermes-kanban-setup-guide"
 title: "Hermes Kanban einrichten (2026): Multi-Agent-Task-Boards"
 meta_title: "Hermes Kanban einrichten (2026): Multi-Agent-Task-Boards"
@@ -21,170 +21,535 @@ import Tabs from "@components/widgets/Tabs.astro";
 import Tab from "@components/widgets/Tab.astro";
 import ListCheck from "@components/widgets/ListCheck.astro";
 
-Hermes Kanban ist ein persistentes SQLite-Task-Board direkt in [Hermes Agent](/hermes-agent-setup-guide/) (auf Englisch) zur Koordination von Multi-Agent-Workflows. Statt alles im Chat zu verlieren, planst du Aufgaben als Karten, weist sie benannten Agent-Profilen zu und lässt den Gateway-Dispatcher Worker starten, die Aufgaben abarbeiten, prüfen lassen und zurückmelden. Das Board siehst du im integrierten [Dashboard](/de/hermes-dashboard-anleitung/) sowie in [Hermes-Dashboards und Mobile-Apps](/de/beste-hermes-dashboards/).
+Hermes Kanban ist das auf SQLite basierende Task-Board, das in [Hermes Agent](/hermes-agent-setup-guide/) für Multi-Agent-Workflows eingebaut ist. Karten werden dort benannten Profilen zugewiesen, und der Dispatcher des Gateways startet jeden Assignee als Worker. Statt alles durch den Chat zu schieben, bekommst du mit Kanban ein strukturiertes Board. Denk an Jira oder Trello, nur für KI-Agenten, die zusammenarbeiten. Worker heben Karten ab, führen sie aus und melden sich über den Lebenszyklus des Boards zurück. Das Board siehst du im integrierten [Dashboard](/de/hermes-dashboard-anleitung/) und in [Hermes-Dashboards und Mobile-Apps von Drittanbietern](/de/beste-hermes-dashboards/).
 
-Dieser Guide deckt den Stand der aktuellen Version (`v0.23.x`), alle relevanten CLI-Befehle, das Dispatcher- und Worker-Modell, Multi-Agent-Muster, Kostenkontrolle und die Fehlerdiagnose ab.
+Alles Folgende bezieht sich auf die aktuelle Version (v0.23.x): Setup, die CLI-Befehle, das Dispatcher- und Worker-Modell, Multi-Agent-Muster, Kostenkontrolle und die Fehlerdiagnose von oben nach unten.
 
 ![Hermes Kanban Architektur: SQLite-Task-Board, Gateway-Dispatcher und Multi-Agent-Worker](@assets/images/25/05/hermes-kanban-setup-guide.svg)
 
 ## Was ist Hermes Kanban?
 
-Hermes Kanban läuft als **SQLite-gestütztes Aufgabensystem** neben dem Hermes-Gateway:
+Hermes Kanban ist ein **auf SQLite basierendes Aufgabensystem**, das neben dem Hermes-Gateway läuft. Die offizielle Doku nennt es ein "durable SQLite-backed task board for coordinating multiple Hermes profiles". In der Praxis bekommst du:
 
-- **Visuelle Boards** mit sechs aktiven Spalten: Triage, Todo, Ready, In progress, Blocked und Done.
-- **Übergaben zwischen Profilen:** Karten gehen an echte Hermes-Profile (`~/.hermes/profiles/<name>/`) mit eigenem Speicher und eigener Modellwahl.
-- **Persistenter Event-Verlauf:** Jeder Zustandswechsel landet mit Zeitstempel und Agent-ID in SQLite.
-- **Dashboard-Anbindung:** Drag-and-drop, Worker-Logs und Live-Updates im eingebauten Kanban-Plugin.
+- **Visuelle Task-Boards** mit sechs workflow-getriebenen Spalten: Triage, Todo, Ready, In progress, Blocked, Done
+- **Übergaben zwischen Agenten:** Karten gehen an benannte Hermes-Profile (`~/.hermes/profiles/<name>/`), jedes mit eigenem Speicher und eigener Modellkonfiguration
+- **Dauerhafter Event-Verlauf:** Jeder Zustandswechsel (created, promoted, claimed, completed, blocked, …) wird mit Zeitstempel und Agent-ID in SQLite protokolliert
+- **Dashboard-Anbindung:** Drag-and-drop, Worker-Logs und Live-Updates im mitgelieferten Kanban-Plugin und in Dashboards von Drittanbietern
 
-Unter der Haube kennt die State-Machine zusätzliche Zustände: `triage | todo | scheduled | ready | running | blocked | review | done | archived`. `review` und `scheduled` sind gesperrte Spalten ohne Drag-and-drop. Das Standard-Board liegt unter `~/.hermes/kanban.db`, weitere Projekt-Boards isoliert unter `~/.hermes/kanban/boards/<slug>/kanban.db`.
+Unter der Haube führt das Board mehr Zustände als die sechs Dashboard-Spalten: `triage | todo | scheduled | ready | running | blocked | review | done | archived`. Die Zustände `review` und `scheduled` existieren in der State-Machine und in der Workflow-Definition als gesperrte Spalten ohne Drag-and-drop. `review` braucht einen Reviewer, und `scheduled` sammelt Karten, die `hermes kanban schedule` parkt. Die Release-Notes zu v0.22.0 formulieren es als "one workflow definition drives columns": die sichtbare Menge folgt deiner Workflow-Konfiguration.
+
+Multi-Projekt-Boards kamen mit dem dauerhaften Kanban-Release. Das Standard-Board liegt unter `~/.hermes/kanban.db`. Weitere Boards liegen unter `~/.hermes/kanban/boards/<slug>/kanban.db` mit eigenen `workspaces/`- und `logs/`-Verzeichnissen (vollständige Isolation zwischen Boards). Worker sehen nur ihr Board, über die Umgebungsvariable `HERMES_KANBAN_BOARD`; Task-Links über Boardgrenzen hinweg sind verboten.
 
 <Notice type="info" title="Versionshinweis">
-Das dauerhafte Kanban erschien mit **v2026.5.7** ("Tenacity Release"); die aktuelle stabile Version ist **v0.23.3** (20.11.2026). Prüfe deinen Stand mit `hermes --version` und aktualisiere per `hermes update`.
+Kanban tauchte erstmals in v2026.4.30 auf, wurde aber sofort zurückgerollt. Die dauerhafte Neuimplementierung kam mit **v2026.5.7** ("Tenacity Release") und ist seither über 100+ PRs gewachsen. Die aktuelle stabile Version ist **v0.23.4** (23.11.2026). Prüfe deinen Stand mit `hermes --version` und aktualisiere per `hermes update`. Alles älter als v0.23.2 (16.11.2026) enthält nicht die Korrektur für GHSA-p22p-9ph6-gmrh. Aktualisiere zuerst, wenn du Bot Desktop in einem `docker`- oder `ssh`-Terminal-Backend betreibst.
 </Notice>
 
-## Kanban vs delegate_task: Wann passt was?
+## Kanban, delegate_task oder Bot Mode: Was solltest du nutzen?
 
-`delegate_task` ist ein synchroner Unteraufruf im laufenden Chat; Kanban ist eine dauerhafte Aufgaben-Queue mit Review, Wiederaufnahme und vollständiger Historie.
+Die Kurzfassung: `delegate_task` ist ein Funktionsaufruf innerhalb eines Gesprächs, ein Bot-Mode-Gruppenchat ist ein Gespräch zwischen Profilen, und Kanban ist eine Arbeits-Queue, in der jede Übergabe eine Zeile ist, die jedes Profil (oder ein Mensch) sehen und bearbeiten kann. Die Kanban-Doku vergleicht nur das Erste und das Dritte; die Bot-Mode-Spalte unten ist meine Lesart der beiden Seiten nebeneinander.
 
 <Accordion label="Schnellvergleich" group="comparison" expanded="true">
 
-| Merkmal | `delegate_task` | Kanban |
-|---|---|---|
-| **Typ** | RPC-Aufruf (fork -> join) | Dauerhafte Queue + State-Machine |
-| **Eltern-Agent** | Wartet blockierend | Fire-and-forget nach `create` |
-| **Worker-Identität** | Anonymer Subagent | Benanntes Profil mit persistentem Speicher |
-| **Wiederaufnahme** | Keine | Block -> Unblock -> Neustart; Crash -> Reclaim |
-| **Mensch im Loop** | Nicht möglich | Kommentieren und Entblocken jederzeit |
-| **Audit-Log** | Geht bei Kontext-Kompression verloren | Dauerhafte SQLite-Einträge |
+| | `delegate_task` | Bot-Mode-Gruppenchat oder DM | Kanban |
+|---|---|---|---|
+| **Form** | Tool-Aufruf, der ein Kind innerhalb der aufrufenden Session startet | Chat-Runden zwischen 2 bis 6 Bots oder `message_agent` zwischen zwei Bots | Dauerhafte Nachrichten-Queue + State-Machine |
+| **Was zurückkommt** | Sofort ein Handle, das Ergebnis als spätere Nachricht (One-Shot-Runs, Cron-Jobs und Kanban-Worker warten im Aufruf) | Antworten im Raum oder `status: queued` und später eine Ergebniszeile pro Ziel | Sofort eine Task-ID; Completion- und Block-Events gehen in den abonnierten Chat, und das `subscribed`-Flag des Ergebnisses sagt, ob deiner dabei ist |
+| **Wer arbeitet** | Anonymer Subagent auf neuem Gespräch | Benannte Bots, jeder ein Profil mit eigenem Speicher und eigenem Modell | Der Dispatcher startet das benannte Profil als vollständigen OS-Prozess |
+| **Nach einem Neustart** | Fortsetzbar mit `action="continue"` (dauerhafter Eintrag in der `state.db` des Profils, v0.23.2+); automatische Wiederaufnahme ist Opt-in | Das Raum-Protokoll überlebt auf einem gateway-eigenen Raum; eine abgestürzte Zustell-Runde wird nicht automatisch wiederholt | Crash -> Reclaim; Block -> Unblock -> Neuer Lauf |
+| **Mensch im Loop** | Das Kind kann keine Fragen stellen; du kannst es lenken oder stoppen, während es läuft | `@user` holt dich in die Diskussion | Kommentieren / Entblocken zu jedem Zeitpunkt |
+| **Audit-Trail** | Kind-Transkript als Session unter dem des Eltern-Agenten gespeichert | Raum-Protokoll plus eigene Raum-Session jedes Mitglieds | Zeilen in SQLite, bis die Aufgabe gelöscht wird |
+| **Was bremst ein durchdrehendes Kind** | Die Ausführung des Kindes ist prozesslokal zu seinem Eigentümer | `gateway.bot_loop_guard.max_hops` (Standard 4) | Failure-Limit, Budget für Protokollverletzungen, `--max-runtime` |
 
 </Accordion>
 
-<Notice type="warning" title="Link-Deadlock vermeiden">
-Ein auf `t_parent` blockierter Worker darf keine Hilfskarte als Kind von `t_parent` per `kanban_link` anlegen, weil die Hilfskarte sonst genau durch den Blocker gesperrt wird (`gated: true`). Lösung: `hermes kanban unlink <parent> <child>`.
+**Bot Mode ist ein Gespräch, keine Queue.** Es ist eine Desktop-Liste über Profilen. Jeder Bot ist ein Profil, deshalb öffnet `hermes -p <bot> chat` denselben Agenten. Ein Gruppenchat fasst 2 bis 6 Bots, und eine Nachricht von dir löst bis zu drei serielle Runden mit Mitglieder-Beiträgen aus, maximal 10 Nachrichten pro Senden. Jedes Mitglied behält seine eigene dauerhafte Raum-Session, und auf einem gateway-eigenen Raum überlebt das Protokoll Desktop. Was der Raum nicht hat, ist eine Aufgabe: Nichts darin trägt einen Status, einen Assignee, eine Retry-Zahl oder einen Worker, den der Dispatcher neu startet. Sind die Runden aufgebraucht, stoppt die Arbeit mit ihnen. Eine Direktnachricht zwischen zwei Bots ist noch schlanker. `message_agent` gibt `status: queued` zurück, das heißt übergeben, nicht beantwortet, und der empfangende Bot liest sie in seiner nächsten Runde. Das Setup steht im [Hermes Agent Einrichtungsleitfaden](/hermes-agent-setup-guide/).
+
+Ein Stolperstein für VPS-Leser: `message_agent` existiert nur in einem kanonischen Bot Chat, und auf einer Headless-Installation schreibt nichts die Marker, die einen anlegen. Die Desktop-App tut das. Ohne sie bearbeitest du die `profile.yaml` des Bots und legst die `Bot Chat`-Session von Hand an (die Bot-Mode-Doku hat das Rezept), oder du nutzt Kanban, das nichts davon braucht.
+
+**`delegate_task`-Kinder überleben einen Neustart.** Das Kind bleibt ein anonymer Subagent auf neuem Gespräch. Seit v0.23.2 (16. November 2026) behält jedes Kind zusätzlich einen dauerhaften Eintrag in der `state.db` des Profils, sodass `continue` nach einem Gateway-Neustart, einem harten Kill oder einem PC-Absturz funktioniert. Hermes speichert das Transkript jedes Kindes als Session unter dem des Eltern-Agenten. Kinder von selbst fortzusetzen ist für das Gateway Opt-in (`delegation.auto_resume`), und unter einem Kanban-Worker verschachtelte Kinder werden nie fortgesetzt.
+
+**Nutze Kanban, wenn:**
+
+- Du ein Projekt mit mehreren zusammengehörigen Aufgaben hast (z. B. "eine REST-API bauen" mit Auth, Endpoints, Tests, Doku)
+- Mehrere Agenten koordiniert werden müssen (einer schreibt Code, ein anderer prüft, ein dritter deployt)
+- Du den Fortschritt über die Zeit verfolgen und sehen willst, was erledigt wurde
+- Aufgaben Abhängigkeiten haben und menschliche Aufsicht unterwegs nötig ist
+
+**Nutze `delegate_task`, wenn:**
+
+- Du eine schnelle Antwort oder ein einzelnes in sich geschlossenes Stück Arbeit brauchst
+- Das Ergebnis in den Kontext des Eltern-Agenten gehört und mit der Session sterben darf
+- Kein anderes Profil und keine andere Person es aufnehmen muss
+- Du mitten im Gespräch bist und das Tempo halten willst
+
+**Nutze Bot Mode (einen Gruppenchat, eine Bot-DM oder eine Routine), wenn:**
+
+- Du willst, dass zwei bis sechs Spezialisten eine Entscheidung ausdiskutieren, während du mitliest
+- Das Ergebnis eine kurze Antwort ist, die in ein Gespräch gehört, und kein Deliverable
+- Die Arbeit eine wiederkehrende Prüfung für einen Spezialisten ist. Das ist eine Routine, ein normaler Hermes-Cron-Job mit dem Namen `[bot:<name>] <routine>`, der in `hermes cron list` auftaucht, mit Läufen, die im Chat-Verlauf des Bots landen
+- Du in der Desktop-App arbeitest. Ein Headless-VPS hat keine Listen-Oberfläche; fahre Desktop auf deinem Laptop gegen das VPS-Backend
+
+<Notice type="info" title="Sie arbeiten zusammen">
+Kanban ist die Planungsebene; `delegate_task` ist einer von mehreren Ausführungsmechanismen. Worker treiben das Board über `kanban_*`-Tools an (`kanban_complete`, `kanban_request_review`, `kanban_block`), nicht über Aufrufe von `hermes kanban` aus der Shell. Ein Worker kann ein Teilstück seiner eigenen Karte per `delegate_task` abgeben, ohne einen Board-Eintrag anzulegen: Das Kind läuft unter diesem Worker, zählt gegen `delegation.max_concurrent_children` und endet mit dem Worker. Geht das Gateway mitten im Kind-Lauf down, wird das Kind stillgelegt und nie fortgesetzt. Arbeit, die das Gateway überleben muss oder einen eigenen Reviewer braucht, gehört in eine Kind-Karte.
 </Notice>
 
+<Notice type="warning" title="Link-Deadlock">
+Ein Worker, der auf `t_parent` blockiert, darf seine Hilfskarte **nicht** per `kanban_link` als Kind von `t_parent` anlegen. Die Hilfskarte wird sonst genau durch die Karte gesperrt, die sie entblocken soll: `link` meldet `gated: true`, und nichts bewegt sich. Behebe das mit `hermes kanban unlink <parent> <child>`. Lege Hilfskarten eigenständig an oder verknüpfe sie als Kinder der Aufgabe, die den Worker gestartet hat, nicht des Blockers.
+</Notice>
 ## Hermes Kanban einrichten
 
 ### Voraussetzungen
 
 <ListCheck>
 <ul>
-<li>Hermes Agent v0.23.x installiert</li>
-<li>Mindestens ein echtes <strong>Profil</strong> pro Worker-Rolle (<code>~/.hermes/profiles/&lt;name&gt;/</code>)</li>
-<li>Lauffähiges Hermes-Gateway (<code>hermes gateway start</code>)</li>
-<li>Modellzugang pro Profil (<a href="/de/guenstige-hermes-agent-modelle/">günstige Modelle für Hermes Agent</a>)</li>
-<li>Optionales <a href="/de/hermes-dashboard-anleitung/">Hermes Dashboard</a></li>
+<li>Hermes Agent v0.23.x installiert. Siehe den <a href="/hermes-agent-setup-guide/">Hermes Agent Einrichtungsleitfaden</a></li>
+<li>Mindestens ein echtes <strong>Profil</strong> pro Worker-Rolle (<code>~/.hermes/profiles/&lt;name&gt;/</code>); Assignees müssen echte Profile sein, sonst bleiben Karten für immer in <code>ready</code></li>
+<li>Hermes-Gateway installiert und startfähig (<code>hermes gateway start</code>)</li>
+<li>Modellzugang pro Worker-Profil. Siehe <a href="/de/guenstige-hermes-agent-modelle/">günstige Modelle für Hermes Agent</a>, wenn die Kosten zählen</li>
+<li>Ein Dashboard (optional, aber empfohlen). Siehe die <a href="/de/hermes-dashboard-anleitung/">Hermes Dashboard Anleitung</a></li>
 </ul>
 </ListCheck>
 
+Es gibt nichts separat zu installieren. Kanban kommt mit dem im Gateway eingebetteten Dispatcher: kein Enable-Flag, kein Plugin zum Aktivieren.
+
 ### Dispatcher konfigurieren
 
-Die Konfigurationsdatei heißt `~/.hermes/config.yaml` (eine `gateway.yaml` gibt es nicht). Secrets gehören in `.env`.
+Die Konfigurationsdatei ist `~/.hermes/config.yaml`. Nicht `gateway.yaml`. Diese Datei existiert im Hermes-Konfigurationsmodell nicht. Alle nicht-geheimen Einstellungen liegen in `config.yaml`; Secrets gehören in `.env`.
 
 ```yaml
 # ~/.hermes/config.yaml
 kanban:
-  dispatch_in_gateway: true        # Standard: Dispatcher läuft im Gateway
-  dispatch_interval_seconds: 60    # Takt in Sekunden
-  review_dispatch: true            # startet Reviewer mit sdlc-review-Skill
-  max_in_progress: 2               # parallele Worker begrenzen (kleiner VPS / lokale LLMs)
-  failure_limit: 2                 # Auto-Block nach N Fehlern (gave_up)
-  done_sub_retention_days: 30
-  reconcile_orphans: true
+  dispatch_in_gateway: true        # default: dispatcher lives in the gateway
+  dispatch_interval_seconds: 60    # default: tick interval
+  review_dispatch: true            # spawn reviewer w/ bundled sdlc-review skill; false = human-only review
+  max_in_progress: 2               # optional: cap concurrent workers (small VPS / local LLMs)
+  failure_limit: 2                 # auto-block after N failures (gave_up)
+  done_sub_retention_days: 30      # notification subscription cleanup
+  reconcile_orphans: true          # reclaim orphaned claims
+  # dispatch_profiles: [coder, researcher]  # optional claim allowlist (shared boards)
 ```
 
-Starten und prüfen:
+Dann bootstrappen und starten:
 
 ```bash
-hermes kanban init
-hermes gateway start
-hermes kanban stats
-hermes kanban diagnostics
-hermes kanban dispatch --dry-run
+hermes kanban init        # idempotent; also auto-runs on the first kanban command
+hermes gateway start      # the dispatcher runs here; ready tasks idle without it
 ```
 
 <Notice type="warning" title="Veraltet: hermes kanban daemon">
-`hermes kanban daemon` ist veraltet. Betreibe niemals den alten Daemon parallel zum Gateway-Dispatcher auf derselben `kanban.db`, sonst starten zwei Dispatcher dieselbe Karte.
+`hermes kanban daemon` ist veraltet (übrig ist nur der `--force`-Notausgang). Betreibe niemals den Daemon und den Gateway-Dispatcher gleichzeitig auf einer `kanban.db`: Du bekommst Claim-Rennen, bei denen zwei Dispatcher dieselbe Karte starten. Nutze `dispatch_in_gateway: true` (der Standard) und genau ein Gateway.
 </Notice>
 
-## Wichtige Befehle für Boards und Aufgaben
+### Setup prüfen
+
+Bestätige vor dem Anlegen von Aufgaben, dass das Board gesund ist:
+
+<ListCheck>
+<ul>
+<li><code>hermes kanban stats</code> zeigt Zählungen pro Status und pro Assignee (ein leeres Board ist in Ordnung; du willst keine Fehler sehen)</li>
+<li><code>hermes kanban diagnostics</code> (Board-Gesundheitscheck: markiert <code>stranded_in_ready</code>, <code>stale_running</code>, <code>review_dependency_deadlock</code>; gibt die aufgelösten <code>dispatch_profiles</code> aus)</li>
+<li><code>hermes kanban dispatch --dry-run</code> zeigt, was ein Dispatch-Durchlauf täte und warum eine ready-Karte nicht startet (<code>Guarded(&lt;reason&gt;)</code>, <code>rate_limited</code>, <code>skipped_locked</code>, <code>memory_pressure</code>)</li>
+<li><code>hermes kanban boards show</code> bestätigt das aktuelle Board und seine Einstellungen</li>
+<li>Öffne <code>hermes dashboard</code> -> Kanban-Tab; das Board rendert unter http://127.0.0.1:9119</li>
+</ul>
+</ListCheck>
+
+Wenn `diagnostics` sauber ist und `dispatch --dry-run` keine blockierenden Guards zeigt, kannst du Aufgaben anlegen.
+## Hermes Kanban-Befehle: Boards und Aufgaben
+
+### Boards verwalten
 
 ```bash
-# Boards verwalten
 hermes kanban boards list
-hermes kanban boards create rest-api --name "REST API" --switch
-hermes kanban boards show
-hermes kanban boards export rest-api -o rest-api.tar.gz
-hermes kanban boards rm rest-api              # archiviert unter boards/_archived/
-hermes kanban boards rm rest-api --delete     # endgültiges rm -rf ohne Rückfrage
+hermes kanban boards create rest-api --name "REST API" --icon 🧪 --switch
+hermes kanban boards switch rest-api          # alias: use
+hermes kanban boards show                     # current board + settings
+hermes kanban boards rename rest-api "REST API (Prod)"
+hermes kanban boards rm rest-api              # archive (recoverable: boards/_archived/)
+hermes kanban boards rm rest-api --delete     # hard delete (rm -rf; no --confirm flag)
+hermes kanban boards export rest-api -o rest-api.tar.gz   # portable backup
+hermes kanban boards import backup.tar.gz     # always lands as a NEW board
+hermes kanban --board default list            # operate on another board without switching
 ```
+
+Board-Slugs sind Kleinbuchstaben, Ziffern, `-` und `_`, 1 bis 64 Zeichen. Auflösungsreihenfolge des Boards: `--board`-Flag -> `HERMES_KANBAN_BOARD`-Env -> `~/.hermes/kanban/current` -> `default`. Ein Export entfernt Claims, PIDs und Benachrichtigungs-Abos; es ist ein sauberes, portables Archiv.
+
+**Prüfen:** `hermes kanban boards list` zeigt dein neues Board; `boards show` bestätigt nach `switch`, dass es das aktuelle ist.
+
+### Aufgaben anlegen
 
 <Tabs>
-<Tab name="Aufgabe anlegen">
+<Tab name="Schnelle Aufgabe">
 
 ```bash
-hermes kanban create "Auth-Endpoints bauen" \
-  --assignee coder --body "POST /login, Sessions, Rate-Limiting" --priority 2
+hermes kanban create "Implement user authentication" \
+  --assignee coder --body "POST /login, sessions, rate limiting" --priority 2
 ```
+
+Der Titel ist positional. `--body` (oder `--body-file PATH`) trägt die Beschreibung. `--priority` ist ein **ganzzahliger Tiebreaker** (Standard 0). Low/Medium/High-Enums gibt es nicht. `--assignee` muss ein echtes Hermes-Profil benennen.
 
 </Tab>
-<Tab name="Abhängigkeiten (--parent)">
+<Tab name="Mit Abhängigkeiten">
 
 ```bash
-# Verkettung über --parent (wiederholbar), NICHT --depends-on
-SCHEMA=$(hermes kanban create "Auth-Schema entwerfen" --assignee coder --json | jq -r .id)
-hermes kanban create "Auth-Endpoints bauen" --assignee coder --parent "$SCHEMA"
+# Verkettete Abhängigkeiten über --parent (wiederholbar), NICHT --depends-on
+SCHEMA=$(hermes kanban create "Design auth schema" --assignee coder --json | jq -r .id)
+hermes kanban create "Implement auth endpoints" --assignee coder --parent "$SCHEMA"
 ```
+
+`--parent` verknüpft eine Karte als Kind. Der Dispatcher befördert sie erst nach `ready`, wenn alle Eltern `done` sind. Du kannst auch nachträglich verknüpfen: `hermes kanban link <parent_id> <child_id>`.
 
 </Tab>
-<Tab name="Worktree, Zeitplan & Goal-Mode">
+<Tab name="Weitere Flags">
 
 ```bash
-hermes kanban create "Billing-Refactor" --assignee coder --workspace worktree --branch wt/billing
-hermes kanban create "Backup-Check" --assignee ops --scheduled-at "2026-12-01T03:00:00Z"
-hermes kanban create "Migration" --assignee coder --max-runtime 2h --model gpt-5.2 --provider openrouter
-hermes kanban create "Doku übersetzen" --assignee linguist --goal --goal-max-turns 15
+# Workspaces: scratch (Standard, wird beim Abschluss gelöscht) | worktree | dir:<absoluter Pfad>
+hermes kanban create "Refactor billing" --assignee coder --workspace worktree --branch wt/billing
+
+# Idempotenz: ein erneuter Lauf mit demselben Key gibt die bestehende Karten-ID zurück
+hermes kanban create "Weekly report" --assignee ops --idempotency-key "report-$(date -u +%Y-%V)"
+
+# Laufzeitgrenzen und Modell-Festlegung
+hermes kanban create "Long transcode" --assignee media --max-runtime 2h --max-retries 1
+hermes kanban create "Tricky migration" --assignee coder --model gpt-5.2 --provider openrouter
+
+# Goal-Mode (Schleife gegen Akzeptanzkriterien)
+hermes kanban create "Translate docs site to FR" --assignee linguist --goal --goal-max-turns 15
 ```
+
+Weitere nützliche Flags: `--triage` (für `specify`/`decompose` parken), `--initial-status running|blocked`, `--skill` (wiederholbar), `--completion-contract OWNER/REPO`, `--created-by`, `--json`.
 
 </Tab>
 </Tabs>
 
 <Notice type="warning" title="Scratch-Workspaces sind temporär">
-Der Standard-Workspace `scratch` wird nach Abschluss gelöscht. Für bleibende Dateien nutze `--workspace worktree`, `--workspace dir:<absoluter Pfad>` oder `kanban_complete(artifacts=[...])`.
+Der Standard-Workspace `scratch` ist ein tmp-Verzeichnis, das **beim Abschluss gelöscht wird**. Wenn die Ausgabe des Workers zählt, muss er `kanban_complete(artifacts=[...])` aufrufen, um Deliverables zu deklarieren, oder du legst die Karte mit `--workspace dir:<absolute path>` oder `--workspace worktree` an. Relative Pfade in `dir:` werden abgelehnt (Schutz vor verwirrtem Stellvertreter).
 </Notice>
 
-Es gibt kein `hermes kanban move`; Statuswechsel laufen über klare Verben (`assign`, `complete`, `request-review`, `request-changes`, `block`, `unblock`, `promote`, `archive`). Jeder Worker schließt per `kanban_complete`, `kanban_request_review` oder `kanban_block` ab.
+**Prüfen:** `hermes kanban list` zeigt deine Karten; `hermes kanban show <id>` legt den vollständigen Event-Verlauf einer Karte offen.
+### Aufgaben-Lebenszyklus
 
-![Hermes Kanban Task-Lebenszyklus: triage, todo, ready, running, blocked, review, done und archived](@assets/images/25/05/hermes-kanban-task-lifecycle.svg)
+Einen `hermes kanban move` gibt es nicht. Der Aufgabenstatus wechselt über Lebenszyklus-Verben und Dispatcher-gesteuerte Übergänge:
 
-## Dispatcher, Swarms, Benachrichtigungen und Betrieb
+```bash
+hermes kanban assign t_abc coder              # or 'none' to unassign
+hermes kanban reassign t_abc t_def coder      # bulk reassign
+hermes kanban complete t_abc --result "auth done, tests green" --summary "handoff: next card"
+hermes kanban request-review t_abc --reviewer reviewer --summary "what changed + how verified"
+hermes kanban request-changes t_abc "extract rate limiter, add tests"
+hermes kanban reopen-review t_abc             # send back to review after changes
+hermes kanban block t_abc "need prod DB creds" --kind needs_input
+hermes kanban unblock t_abc
+hermes kanban promote t_abc                   # todo/blocked -> ready (recovery)
+hermes kanban archive t_abc t_def             # bulk verbs take multiple ids
+hermes kanban comment t_abc "use the 2026 schema" --author user
+hermes kanban edit t_abc --title "new title" --body "updated" --priority 5
+hermes kanban schedule t_abc "waiting on the DNS cut-over"   # parks it in scheduled; unblock returns it to ready
+```
 
-Alle 60 Sekunden räumt der Gateway-Dispatcher verwaiste Claims auf (Claim-TTL 900 s, Stale-Timeout 4 h mit `kanban_heartbeat`), befördert `todo -> ready` sobald Elternkarten `done` sind und startet `hermes -p <assignee> chat -q <prompt>`.
+Der Dispatcher claimed `ready`-Karten und startet das Assignee-Profil als Worker. Jeder Lauf muss mit genau einem Lebenszyklus-Aufruf enden: `kanban_complete` -> `done`, `kanban_request_review` -> `review` oder `kanban_block` -> `blocked`. Bricht der Worker ohne einen solchen ab, protokolliert der Kernel `crashed`/`gave_up`/`timed_out`/`protocol_violation`. Reviewer genehmigen mit `kanban_complete` oder geben mit `kanban_request_changes` zurück. Abhängigkeits-Gating: `link` plus das `promoted`-Event des Dispatchers verschiebt `todo → ready`, wenn alle Eltern `done` sind. `unblock` landet je nach Herkunft auf `review`/`ready`/`todo`, nie direkt auf `triage`.
 
-- **Swarms in einem Befehl:** `hermes kanban swarm "Failover-Plan" --worker researcher --worker architect --verifier reviewer --synthesizer writer`.
-- **Goal-Mode (`--goal`):** iteriert gegen eigene Akzeptanzkriterien bis `--goal-max-turns` (Standard 20) und geht bei Erschöpfung auf `blocked`.
-- **Telegram/Discord-Benachrichtigungen:** Karten über `/kanban create` abonnieren den Chat automatisch für `completed`, `blocked`, `gave_up`, `crashed` und `timed_out`. Aus der CLI nutzt du `hermes kanban notify-subscribe`.
-- **Parallel-Session-Übersicht:** Für viele gleichzeitige Terminal-Agenten ergänzt der [Herdr Agent Multiplexer](/de/herdr-agent-multiplexer/) das Setup ideal.
+<Notice type="info" title="Drag-and-drop zählt auch">
+Das Drag-and-drop des Dashboards schreibt `status`-Events direkt ins Board. "Verschieben" einer Karte gibt es also in der Oberfläche; die CLI nutzt nur präzisere Verben.
+</Notice>
+
+![Hermes Kanban Task-Lebenszyklus: triage, todo, ready, running, blocked, review, done und archived mit Dispatcher-Beförderung](@assets/images/25/05/hermes-kanban-task-lifecycle.svg)
+
+**Prüfen:** `hermes kanban runs <id>` zeigt eine Zeile pro Versuch; `hermes kanban show <id>` zeigt den vollständigen Event-Verlauf.
+
+### Zusammengesetzt: eine REST-API-Pipeline
+
+Hier ist ein Happy Path von Ende zu Ende mit echten Befehlen. Nehmen wir an, die Profile `backend`, `tester` und `devops` existieren bereits:
+
+```bash
+SCHEMA=$(hermes kanban create "Design database schema" --assignee backend --json | jq -r .id)
+MODEL=$(hermes kanban create "Implement user model" --assignee backend --parent $SCHEMA --json | jq -r .id)
+AUTH=$(hermes kanban create "Implement auth endpoints" --assignee backend --parent $MODEL --json | jq -r .id)
+CRUD=$(hermes kanban create "Implement CRUD endpoints" --assignee backend --parent $MODEL --json | jq -r .id)
+UT=$(hermes kanban create "Write unit tests" --assignee tester --parent $AUTH --parent $CRUD --json | jq -r .id)
+IT=$(hermes kanban create "Write integration tests" --assignee tester --parent $AUTH --parent $CRUD --json | jq -r .id)
+hermes kanban create "Deploy to staging" --assignee devops --parent $UT --parent $IT
+hermes kanban watch
+```
+
+Die verketteten `--parent`-IDs ersetzen die alte Form `--depends-on "A,B"`. Jede Karte wird erst befördert, wenn ihre Eltern abgeschlossen sind. `hermes kanban watch` streamt Zustandswechsel in Echtzeit.
+
+**Prüfen:** `hermes kanban list --status done` zeigt am Ende alle sieben Karten als abgeschlossen.
+
+## Das Dispatcher- und Worker-Modell
+
+Das ist die Architektur, auf der das Board sitzt (siehe das Diagramm oben). Wer sie versteht, findet Fehler leichter.
+
+Der **Dispatcher** lebt im Gateway (Standard: `dispatch_in_gateway: true`, Takt alle 60 Sekunden). In jedem Takt:
+
+1. Holt veraltete Claims zurück und erntet abgestürzte Worker (Abgleich von PID + Spawn-Fingerprint)
+2. Befördert `todo → ready`, wenn alle Eltern-Abhängigkeiten `done` sind
+3. Claimt atomar eine `ready`-Karte
+4. Startet das Assignee-Profil als vollständigen OS-Prozess: `hermes -p <assignee> chat -q <prompt>`
+
+Worker bekommen Umgebungsvariablen (`HERMES_KANBAN_TASK`, `HERMES_KANBAN_DB`, `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_WORKSPACES_ROOT`, `HERMES_KANBAN_WORKSPACE`, `HERMES_KANBAN_RUN_ID`, `HERMES_KANBAN_CLAIM_LOCK`, `HERMES_PROFILE`, `HERMES_TENANT`) und treiben das Board über ein **`kanban_*`-Toolset** an: `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_request_review`, `kanban_request_changes`, `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_attach`, `kanban_create`, `kanban_link`, `kanban_unblock`, `kanban_schedule`. Worker rufen `hermes kanban` nie aus der Shell auf. Die Tools werden direkt injiziert. Hinweise zum Lebenszyklus (`KANBAN_GUIDANCE`) landen automatisch in den Worker-Prompts.
+
+Chat- oder Orchestrator-Profile, die außerhalb von Dispatch-Läufen Board-Zugriff brauchen, schalten ihn frei: `hermes -p planner tools enable kanban` (optional `--platform telegram`). Hinweis: `delegate_task`-Kinder bekommen nie Rechte, das Board zu verändern.
+
+Zahlen zum Lebenszyklus:
+
+- **Claim-TTL: 900 s** (15 Min.). Lebende Worker bekommen ihre Claims automatisch verlängert; der Dispatcher holt nur tote PIDs zurück.
+- **Stale-Timeout: 4 h.** Worker an langen Operationen müssen `kanban_heartbeat` mindestens stündlich aufrufen, sonst erntet sie der Dispatcher.
+- **Failure-Limit: 2** (konfigurierbar über `kanban.failure_limit`, pro Aufgabe mit `--max-retries`). Löst die Sicherung aus -> die Karte blockiert sich automatisch mit `gave_up`.
+- **Budget für Protokollverletzungen: 3** aufeinanderfolgende Exits ohne Lebenszyklus-Aufruf.
+- **Respawn-Guard** verhindert Worker-Stürme nach Quota-Wänden (`blocker_auth`), frischem Erfolg (`recent_success`), offenen PR-Kommentaren (`active_pr`), Rate-Limit-Abklingphasen (300 s) oder Infrastruktur-Abklingphasen.
+- **Block-Loop-Breaker**: Ein Zyklus Block -> Unblock -> erneuter Block aus demselben Grund 2 Mal (`BLOCK_RECURRENCE_LIMIT`) schickt die Karte mit einem `block_loop_detected`-Event nach `triage`, nicht zurück nach `blocked`.
+
+Einmaliger manueller Dispatch-Durchlauf: `hermes kanban dispatch [--dry-run --max N --failure-limit N]`. Bei mehreren Gateways: genau ein Dispatcher (`dispatch_in_gateway: true` nur auf dem Eigentümer-Gateway).
+
+<Notice type="warning" title="Ein Dispatcher pro Board">
+Betreibe niemals `hermes kanban daemon` und den Gateway-Dispatcher auf derselben `kanban.db`. In Setups mit mehreren Gateways gehört Dispatch genau einem Gateway. Die Zustellung von Benachrichtigungen gehört zum Profil (siehe die Multi-Gateway-Doku).
+</Notice>
+
+Wenn du viele Agenten projektübergreifend parallel betreibst, löst der [Herdr Agent Multiplexer](/de/herdr-agent-multiplexer/) das Nachbarproblem, viele gleichzeitige Agenten-Sessions zu verwalten.
+
+## Multi-Agent-Workflow-Muster
+
+Die folgenden Muster nutzen benannte Profile, `--parent`-Abhängigkeiten und den Review-Lebenszyklus. Wenn du Frameworks vergleichst: Das [Agno-Workflows-Tutorial](/agno-workflow-writing-team/) zeigt dieselbe Form in einem anderen Stack.
+
+### Code -> Review -> Deploy-Pipeline
+
+Drei Profile mit getrennten Rollen: `coder`, `reviewer`, `devops`.
+
+1. Lege die Arbeitskarten an und weise sie `coder` zu
+2. Ist der Coder fertig, ruft er `kanban_request_review` auf (oder du tust es per `hermes kanban request-review t_abc --reviewer reviewer`)
+3. Der Reviewer genehmigt mit `kanban_complete` oder gibt mit `kanban_request_changes` zurück
+4. Die Deploy-Karte ist per `--parent` an die Review-Karte gekoppelt; sie wird erst befördert, wenn das Review besteht
+
+Hänge für Arbeit in der Code-Spur `--completion-contract OWNER/REPO` an, um `done` an erforderliche GitHub-Checks/Rule-Sets zu binden (nutze `local-only` für Repos ohne erforderliche Checks). Das Completion-Gate liest die Checks über die `gh`-Authentifizierung des Profils: Fehlende oder fehlgeschlagene erforderliche Checks verweigern `done`.
+
+```bash
+CODE=$(hermes kanban create "Implement rate limiter" --assignee coder --json | jq -r .id)
+hermes kanban create "Review rate limiter" --assignee reviewer --parent $CODE --json | jq -r .id
+# ...und eine Deploy-Karte, die von der Review-Karte abhängt
+```
+
+### Parallele Recherche mit Aggregation
+
+Fächere N Researcher-Profile auf; die Aggregator-Karte ist per `--parent` an alle Recherchekarten gekoppelt. Der Dispatcher befördert den Aggregator erst, wenn jede Recherchekarte `done` ist. Das ist Abhängigkeits-Gating bei der Arbeit.
+
+```bash
+R1=$(hermes kanban create "Research auth best practices" --assignee researcher-1 --json | jq -r .id)
+R2=$(hermes kanban create "Research DB scaling patterns" --assignee researcher-2 --json | jq -r .id)
+R3=$(hermes kanban create "Research caching strategies" --assignee researcher-3 --json | jq -r .id)
+hermes kanban create "Write technical design doc" --assignee architect --parent $R1 --parent $R2 --parent $R3
+```
+
+Der Architekt hebt seine Aufgabe erst auf, wenn alle drei Recherchekarten abgeschlossen sind. Ein vergleichbares Muster in einem anderen Framework ist das [Google-ADK-Multi-Agent-Recherche-Team](/google-adk-multi-agent-search/).
+
+### Einmalige Swarms und Goal-Mode
+
+Zwei Features ersetzen, was ältere Leitfäden "Board-Vorlagen" nannten:
+
+**`hermes kanban swarm`** legt eine vollständige Topologie in einem Befehl an: Root-/Blackboard-Karte, parallele Worker, einen gekoppelten Verifier und einen gekoppelten Synthesizer:
+
+```bash
+hermes kanban swarm "Multi-region failover plan" \
+  --worker researcher --worker architect --worker sre \
+  --verifier reviewer --synthesizer writer
+```
+
+**Goal-Mode** (`--goal`, `--goal-max-turns N`, Standard 20) legt eine Karte an, die gegen ihren eigenen Titel/Body als Akzeptanzkriterien schleift (ein Ralph-Loop-Richter). Ist das Budget aufgebraucht, geht die Karte für das menschliche Review nach `blocked`. Unerreichbare Ziele verweigern den Abschluss. Das ersetzt die alten Konfigurationen mit "bis zu 3 Iterationen". Goal-Mode verbrennt Runden, halte `--goal-max-turns` also niedrig.
+
+Ein `save-template` / `create-board --template` gibt es nicht. Für wiederkehrende Projektformen nutze Workflow-Vorlagen (Filter `--workflow-template-id`/`--step-key`, v0.22.0+) und `boards export`/`import`, um Board-Strukturen zu klonen.
+## Das Board ansehen: CLI und Dashboards
+
+<Tabs>
+<Tab name="CLI">
+
+```bash
+# Board-Ansicht (NICHT `show`; show ist eine einzelne Aufgabe)
+hermes kanban list --status ready --assignee coder
+hermes kanban list --mine --archived --sort priority --tenant myteam
+
+# Detail einer Aufgabe + Kommentare + Event-Verlauf
+hermes kanban show t_abc
+
+# Live-Monitoring
+hermes kanban watch --kinds completed,blocked,gave_up
+hermes kanban tail t_abc                # live event stream for one task
+
+# Versuchsverlauf und Logs
+hermes kanban runs t_abc                # one row per attempt
+hermes kanban log t_abc --tail 4000     # worker log output
+
+# Was ein Worker sieht
+hermes kanban context t_abc
+
+# Schnelle Statistik
+hermes kanban stats
+hermes kanban assignees
+```
+
+`list`-Filter: `--mine --assignee --status --tenant --session --archived --sort --workflow-template-id --step-key`. Hänge an einen Befehl `--json` an, um ihn zu skripten.
+
+</Tab>
+<Tab name="Dashboard">
+
+Das mitgelieferte Kanban-Plugin unter `hermes dashboard` (http://127.0.0.1:9119) ist die garantierte Ansicht: Es kommt mit dem Gateway und der Desktop-App. Es bietet:
+
+- **Board-Wechsler** mit New board / Settings / Projekt-Bindung / Archiv
+- **Drag-and-drop** mit einem Papierkorb-Ziel zum Löschen mehrerer Karten
+- **Karten-Drawer** mit Laufverlauf und Worker-Logs
+- **Schalter für Spalten nach Profil**: gruppiert In progress nach Assignee
+- **Nudge-Dispatcher-Button**: erzwingt einen Dispatch-Durchlauf
+- **Orchestration Auto/Manual-Pille**: steuert die automatische Zerlegung
+- Live-WebSocket-Events für Echtzeit-Updates
+
+Optionen von Drittanbietern wie Hermes Studio (EKKOLearnAI) und Hermes WebUI (nesquena) stehen in [den besten Hermes-Dashboards und Mobile-Apps](/de/beste-hermes-dashboards/). Die [Hermes Dashboard Anleitung](/de/hermes-dashboard-anleitung/) zeigt, wie du das mitgelieferte Dashboard hinter einem Reverse-Proxy zum Laufen bekommst.
+
+</Tab>
+</Tabs>
+
+**Prüfen:** Die Ausgabe von `hermes kanban list --status ready` stimmt mit dem überein, was das Dashboard zeigt. Weichen sie ab, ist der Dashboard-WebSocket vielleicht veraltet; lade die Seite neu.
+
+## Benachrichtigungen von Telegram und Discord
+
+Du brauchst keinen separaten Benachrichtigungs-Konfigurationsblock. Das echte System ist chat-nativ:
+
+Legst du eine Karte per `/kanban create` aus einem Gateway-Chat an (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost, E-Mail, SMS), wird der Chat **automatisch** auf Abschluss-Events abonniert (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`). Beim Abschluss geht die erste Ergebniszeile des Workers in den Chat.
+
+CLI-Abos für Karten, die außerhalb des Chats angelegt wurden:
+
+```bash
+hermes kanban notify-subscribe t_abc \
+  --platform telegram --chat-id 12345678 --chat-type group --delivery-mode notify+wake
+hermes kanban notify-list
+hermes kanban notify-unsubscribe t_abc --platform telegram --chat-id 12345678
+```
+
+Zustellungsmodi: `notify` (passiver Ping, Standard), `notify+wake` (Ping + der Agent ist am Zug), `wake` (nur Zug). Discord-Threads brauchen `--parent-chat-id`/`--guild-id` unter `profile_routes`.
+
+Abos verschwinden automatisch bei `done`/`archived` (`done_sub_retention_days`, Standard 30). Desktop-App-Toasts funktionieren nur, während die App läuft; für Zustellung bei geschlossener App nutze Gateway-Abos.
+
+<Notice type="info" title="Vom Handy aus">
+Der Slash-Befehl `/kanban` bietet jedes Board-Verb von den Messaging-Plattformen aus und umgeht den Laufender-Agent-Guard mitten im Lauf. Du kannst eine Karte vom Handy entblocken, während ein Worker mitten in seiner Runde steckt. Beachte, dass die Chat-Ausgabe bei rund 3800 Zeichen abgeschnitten wird. Für breitere mobile Aufsicht siehe [KI-Agenten vom Handy aus steuern](/de/ki-agenten-vom-handy-steuern-moshi-herdr/).
+</Notice>
+
+## Kosten- und Betriebstipps
 
 <Notice type="info" title="Affiliate-Hinweis">
-Einige Links in diesem Abschnitt sind Empfehlungslinks ohne Mehrkosten für dich.
+Einige Links unten sind Empfehlungslinks; sie unterstützen das Blog ohne Mehrkosten für dich.
 </Notice>
 
-- **Kostenstrategie:** starkes Modell für den Planer, günstige Modelle für Worker (siehe [günstige Modelle für Hermes Agent](/de/guenstige-hermes-agent-modelle/) oder [MiMo-Modelle](https://go.bitdoze.com/mimo)).
-- **VPS-Praxis:** 2 vCPU / 2-4 GB RAM (z. B. ein [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner)) mit `max_in_progress: 2`. Auf systemd-Systemen ist `sudo loginctl enable-linger <user>` Pflicht, sonst scheitern Worker-Starts mit `spawn_failed`. Datenbankpflege erledigt `hermes kanban gc --event-retention-days 30 --log-retention-days 14`.
+**Kostenstrategie: Frontmodell als Orchestrator, günstige Worker.** Das Orchestrator-/Planungsprofil profitiert von einem starken Modell. Worker brauchen keine Frontmodelle. Die kostenlosen Modelle im Nous Portal wechseln, nimm die aktuelle Liste also aus [unserem Nous-Portal-Leitfaden](/hermes-agent-mimo-v2-pro/), bevor du einen Worker auf einem davon aufbaust. Günstige Bezahloptionen wie [MiMo-Modelle](https://go.bitdoze.com/mimo) halten die Kosten pro Karte nahe null. Konfiguriere Modelle pro Worker in `~/.hermes/profiles/<name>/config.yaml` oder lege einzelne Karten mit `--model`/`--provider` oder `hermes kanban set-model` fest. Weitere Optionen stehen unter [günstige Modelle für Hermes Agent](/de/guenstige-hermes-agent-modelle/).
 
-## Fehlerbehebung
+**Schütze den Host.** Worker sind echte OS-Prozesse. Setze auf einem kleinen VPS oder mit lokalen LLMs `max_in_progress: 2`, um parallele Spawns zu begrenzen. Betreibe keine Prod-Agenten auf einer 1-vCPU/1-GB-Kiste. 2 vCPU / 2-4 GB sind das praktische Minimum für Gateway + Dashboard + 2-3 Worker. Der ganze Stack passt auf einen günstigen [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner). Die Einstiegsklasse reicht für 2-3 parallele Worker.
 
-<Accordion label="Karten bleiben in ready hängen" group="faq" expanded="true">
-Prüfe nacheinander: (1) Läuft das Gateway (`hermes gateway start`)? (2) Existiert das Profil unter `~/.hermes/profiles/`? (3) Zeigt `hermes kanban dispatch --dry-run` aktive Guards (`respawn_guarded`, `rate_limited`, `memory_pressure`)? (4) Prüfe `hermes kanban diagnostics`.
+<Notice type="warning" title="Ein Host, ein Dispatcher pro Board">
+Der Kanban-Zustand ist eine SQLite-Datei plus host-lokale Worker-PIDs, und die Doku hält das bei einem Host. Zwei Hosts, die sich eine `kanban.db` teilen, sind außerhalb des Rahmens, weil die Absturzerkennung davon ausgeht, dass PIDs host-lokal sind. Was funktioniert, sind mehrere Hermes-Homes auf einem Host (etwa Container), die dasselbe Board einbinden. Profilnamen sind home-lokal, und jedes Home hat ein `default`-Profil, `default` kollidiert also per Konstruktion. Gib jedem Home eindeutige Profilnamen und weise auf einem geteilten Board niemals Karten an `default` zu, oder setze `kanban.dispatch_profiles` pro Home. Alles andere landet im `skipped_nonspawnable`-Eimer des Dispatchers, statt zu starten. Genau ein Gateway fährt den Dispatcher: dort `kanban.dispatch_in_gateway: true`, auf jedem anderen Gateway `false`.
+</Notice>
+
+**Betriebshygiene:**
+
+- `hermes kanban gc --event-retention-days 30 --log-retention-days 14` hält SQLite schlank
+- `hermes kanban boards export <slug> -o backup.tar.gz` als regelmäßiges Backup
+- Bei systemd-Installationen auf Systemebene ist `sudo loginctl enable-linger <user>` **Pflicht**: Ohne Linger scheitern Worker-Spawns mit `spawn_failed` + `infrastructure: true`, und Karten bleiben für immer in `ready`
+- `Type=oneshot`-Dispatch-Units brauchen `KillMode=process`
+
+**Nutzungstipps:**
+
+<ListCheck>
+<ul>
+<li>Halte Aufgaben klein: eine Karte, die ein Worker in einer Session schafft</li>
+<li>Beschränke Abhängigkeiten nicht zu sehr: Parallel schlägt seriell, wenn es kein echtes Gate gibt</li>
+<li>Beobachte die Spalten <code>blocked</code> und <code>triage</code>; dort stockt die Arbeit</li>
+<li>Nutze das Dashboard für die Aufsicht, die CLI für Skripte</li>
+<li>Setze bei langen Jobs <code>--max-runtime</code>, um Zombie-Worker zu vermeiden</li>
+</ul>
+</ListCheck>
+## Warum bewegt sich meine Kanban-Karte nicht?
+
+Prüfe zuerst das Gateway und als Zweites den Assignee: Ohne Gateway-Takt claimed kein Dispatcher eine `ready`-Karte, und ein Assignee, der kein echtes Profil ist, bleibt mit einem `skipped_nonspawnable`-Event in `ready`. Beginne mit `hermes kanban diagnostics` und `hermes kanban dispatch --dry-run`; meist nennen sie das Problem. Dann gehe diese Leiter entlang:
+
+<Accordion label="Kanban-Befehle nicht gefunden" group="faq">
+
+Du bist auf einer Version, die vor dem dauerhaften Kanban-Release liegt. Aktualisiere: `hermes update`, dann `hermes --version` (du willst v0.23.x). Die Konfigurationsdatei ist `~/.hermes/config.yaml`. Falls du `gateway.yaml` bearbeitet hast: Diese Datei wird ignoriert (sie existiert nicht im Konfigurationsmodell).
+
+</Accordion>
+
+<Accordion label="Karten hängen in ready fest (nichts hebt sie ab)" group="faq">
+
+Prüfe der Reihe nach:
+
+1. **Läuft das Gateway?** Der Dispatcher sitzt dort: `hermes gateway start`. Ready-Aufgaben warten ohne ewig.
+2. **Ist der Assignee ein echtes Profil?** Unbekannte Assignees bleiben in `ready` und erzeugen ein `skipped_nonspawnable`-Event. Prüfe `ls ~/.hermes/profiles/`; der Assignee-Name muss einem Verzeichnis entsprechen.
+3. **Ist ein Guard aktiv?** `hermes kanban dispatch --dry-run` zeigt `Guarded(<reason>)`: `respawn_guarded` (`blocker_auth`, `recent_success`, `active_pr`, `rate_limit_cooldown` 300 s, `infrastructure_cooldown`), `rate_limited`, `skipped_locked` oder `memory_pressure`.
+4. **Hängt die Karte fest?** `hermes kanban diagnostics` markiert `stranded_in_ready` (Warnung nach 30 Min., Fehler beim 2-fachen, kritisch beim 6-fachen des Schwellenwerts). Das Assignee-Profil existiert, claimed aber nie.
+
 </Accordion>
 
 <Accordion label="Worker starten auf einem VPS nicht" group="faq">
-Führe `sudo loginctl enable-linger <user>` aus. Ohne Linger schlagen Worker-Spawns unter systemd mit `spawn_failed` + `infrastructure: true` fehl.
+
+Führe bei systemd-Installationen auf Systemebene `sudo loginctl enable-linger <user>` aus. Ohne Linger scheitern Worker-Spawns mit `spawn_failed` + `infrastructure: true`, und die Karte bleibt in `ready` (Retries nach Abklingphase). Nutzt du `Type=oneshot`-Dispatch-Units, ergänze `KillMode=process` oder aktiviere Linger. Das ist der häufigste VPS-spezifische Fehler.
+
 </Accordion>
 
-<Accordion label="Eine Karte bricht wiederholt ab oder springt nach triage" group="faq">
-`gave_up` greift nach `failure_limit` (Standard 2); `protocol_violation` nach 3 Exits ohne `kanban_*`-Aufruf; `block_loop_detected` leitet nach zwei identischen Block-Schleifen nach `triage` um. Logs liest du mit `hermes kanban log <id> --tail`.
+<Accordion label="Eine Karte schlägt immer wieder fehl oder springt zurück" group="faq">
+
+- **`gave_up`**: Die Fehler-Auslöser ist nach `failure_limit` (Standard 2) oder `--max-retries` Versuchen ausgelöst. Behebe die Ursache, dann `hermes kanban promote` oder `edit` und neu laufen lassen.
+- **`protocol_violation`**: Der Worker wurde ohne Lebenszyklus-Aufruf beendet (`kanban_complete`/`kanban_request_review`/`kanban_block`). Das Budget sind 3 in Folge. Prüfe das Worker-Log: `hermes kanban log <id> --tail`.
+- **`block_loop_detected`**: Die Karte ist 2 Mal aus demselben Grund über Block -> Unblock -> erneuten Block geprallt. Sie geht nach **triage** (nicht blocked) zur Neuformulierung. Behebe das per `edit` oder `promote`.
+
 </Accordion>
 
-Weiterführende Guides: [Hermes Dashboard Anleitung](/de/hermes-dashboard-anleitung/), [beste Hermes-Dashboards](/de/beste-hermes-dashboards/), [günstige Modelle für Hermes Agent](/de/guenstige-hermes-agent-modelle/) und [Herdr Agent Multiplexer](/de/herdr-agent-multiplexer/).
+<Accordion label="Board wird im Dashboard nicht angezeigt" group="faq">
+
+Lade die Seite neu. Das mitgelieferte Kanban-Plugin sitzt unter `hermes dashboard` (Port 9119). Stelle sicher, dass das Gateway läuft. Dashboards von Drittanbietern stehen in [den besten Hermes-Dashboards und Mobile-Apps](/de/beste-hermes-dashboards/). Die Unterstützung variiert je Projekt, und wir nennen keine konkreten Mindestversionen.
+
+</Accordion>
+
+<Accordion label="Wie lösche ich ein Board?" group="faq">
+
+`hermes kanban boards rm <slug>` archiviert das Board nach `boards/_archived/<slug>-<ts>/` (wiederherstellbar). `hermes kanban boards rm <slug> --delete` ist ein hartes `rm -rf` ohne Rückfrage und ohne `--confirm`-Flag. Exportiere vorher, wenn du die Daten noch brauchst: `hermes kanban boards export <slug> -o backup.tar.gz`.
+
+</Accordion>
+
+## Was kommt als Nächstes?
+
+Fang einfach an: ein Board, eine Handvoll Karten, ein oder zwei Worker-Profile. Bekomme die Dispatcher-Schleife zuverlässig, bevor du auf Swarms und Goal-Mode skalierst. Der volle Funktionsumfang ist größer, als die meisten Leitfäden zeigen. Erkunde Goal-Mode, Swarms, PR-Completion-Contracts, Worktrees und die Diagnose-Schicht, sobald die Grundlagen stehen.
+
+Mehr zum Hermes-Ökosystem:
+
+- [Hermes Agent Einrichtungsleitfaden](/hermes-agent-setup-guide/): Hermes installieren und konfigurieren
+- [Hermes Dashboard Anleitung](/de/hermes-dashboard-anleitung/): das Web-Dashboard hinter einem Reverse-Proxy zum Laufen bringen
+- [Beste Hermes-Dashboards und Mobile-Apps](/de/beste-hermes-dashboards/): Oberflächen von Drittanbietern und Mobile-Clients
+- [Günstige Modelle für Hermes Agent](/de/guenstige-hermes-agent-modelle/): die Worker-Kosten senken
+- [Beste KI-Coding-Tools und Agenten](/ai-coding-tools/): wo Hermes unter den Coding-Agent-Optionen steht
+
+Die offizielle Doku ist hervorragende weitere Lektüre: [Kanban-Feature-Doku](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md), [Kanban-Tutorial](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-tutorial.md), [Worker-Lanes](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-worker-lanes.md), [Multi-Gateway-Deployment](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-multi-gateway.md).
+
+## FAQ
+
+Kurze Antworten auf die Fragen, die beim Board am häufigsten auftauchen. Der Abschnitt zur Fehlerbehebung oben hat die vollständige Leiter für eine hängende Karte.
+
+<Accordion label="Kanban, ein Gruppenchat oder delegate_task: Was nutze ich?" group="faq">
+Nutze `delegate_task`, wenn das Ergebnis in den Kontext des Eltern-Agenten gehört und mit der Session sterben darf. Nutze einen Bot-Mode-Gruppenchat, wenn du eine Entscheidung in Runden ausdiskutiert bekommen willst, während du mitliest. Nutze Kanban, wenn Arbeit Profilgrenzen überschreitet, einen Neustart überleben muss, unterwegs deine Eingabe brauchen kann oder nächste Woche auffindbar sein muss. Wenn du morgen fragst "was ist aus der Aufgabe geworden", war es eine Karte.
+</Accordion>
+
+<Accordion label="Muss der Assignee ein echtes Profil sein?" group="faq">
+Ja. `--assignee` benennt ein Verzeichnis unter `~/.hermes/profiles/`, und die Spawn-Sperre des Dispatchers prüft, ob dieses Verzeichnis existiert. Eine Rolle wie `coder` ohne solches Verzeichnis lässt die Karte mit einem `skipped_nonspawnable`-Event in `ready` stehen. Prüfe `hermes kanban assignees` (Profile auf der Platte plus Zählungen pro Assignee) und `ls ~/.hermes/profiles/`; die beiden Namen müssen übereinstimmen.
+</Accordion>
+
+<Accordion label="Der Dispatcher läuft nicht. Was passiert mit ready-Karten?" group="faq">
+Nichts, mit Absicht. Ohne Gateway gibt es keinen Takt, `ready`-Karten warten also, bis einer kommt, und `hermes kanban create` warnt bei der Anlage davor. Starte ihn mit `hermes gateway start` und bestätige mit `hermes kanban dispatch --dry-run`. Für einen Durchlauf von Hand führe `hermes kanban dispatch` aus.
+</Accordion>
+
+<Accordion label="Kann ich ein Board zwischen Containern oder Hosts teilen?" group="faq">
+Zwischen Containern auf einem Host: ja. Mehrere Hermes-Homes können dieselbe `kanban.db` einbinden, aber Profilnamen sind home-lokal, und jedes Home hat ein `default`-Profil. Eine an `default` zugewiesene Karte kann vom falschen Home claimed werden. Gib entweder jedem Home eindeutige Profilnamen und weise auf einem geteilten Board niemals `default` zu, oder setze `kanban.dispatch_profiles` pro Home, und halte `kanban.dispatch_in_gateway: true` auf genau einem Gateway. Zwischen zwei Hosts: nein, die Absturzerkennung geht von host-lokalen PIDs aus. Um ein Board zu verschieben statt zu teilen, nutze `hermes kanban boards export` und `hermes kanban boards import`; der Import landet immer als neues Board.
+</Accordion>
+
+<Accordion label="Wie sieht das Kostenmuster aus?" group="faq">
+Ein Dispatcher-Claim ist ein vollständiger Agentenlauf für das Assignee-Profil, plus ein Reviewer-Lauf, wenn eine Karte ins Review geht. Halte das Planungsprofil auf einem starken Modell und die Worker auf günstigen: Konfiguration pro Profil, `--model`/`--provider` bei der Anlage oder `hermes kanban set-model` später. Begrenze die Parallelität mit `max_in_progress` auf einem kleinen VPS, und setze `--max-runtime` auf alles Lange. Gruppenchat rechnet anders ab: Ein Senden kann bis zu 10 Nachrichten über die Mitglieder ausführen, und die Doku veröffentlicht keine Token-Zahlen für eine Runde. Ein lauter Raum kostet echtes Geld. Siehe [günstige Modelle für Hermes Agent](/de/guenstige-hermes-agent-modelle/).
+</Accordion>
+
+<Accordion label="Kann eine Bot-Mode-Routine Karten anlegen?" group="faq">
+Nicht von selbst. Eine Routine ist ein Hermes-Cron-Job mit dem Namen `[bot:<name>] <routine>`; ihr Lauf landet im Chat-Verlauf dieses Bots, und nichts daran ist eine Karte. Um Karten daraus zu bekommen, aktiviere die Kanban-Tools für dieses Profil (`hermes -p <bot> tools enable kanban`), damit der Lauf `kanban_create` aufrufen kann. Oder mach aus dem Job ein Skript, das `hermes kanban create ... --idempotency-key <key>` aufruft. Ein erneuter Lauf mit demselben Key gibt die bestehende Karte statt eines Duplikats zurück.
+</Accordion>
+
+<Button text="KI-Coding-Tools entdecken" link="/ai-coding-tools/" variant="solid" color="blue" size="md" icon="arrow-right" iconPosition="right" />

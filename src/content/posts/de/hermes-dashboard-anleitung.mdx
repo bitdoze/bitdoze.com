@@ -1,10 +1,10 @@
 ---
 date: 2026-04-14
-lastmod: 2026-06-12T00:00:00Z
+lastmod: 2026-11-27T00:00:00Z
 translationKey: "hermes-dashboard-guide"
 title: "Hermes Agent Dashboard einrichten: SSH, Caddy, Docker & Sicherheit (2026)"
 meta_title: "Hermes Agent Dashboard Setup: SSH, Caddy & Sicherheit"
-description: "Betreibe das Hermes-Agent-Web-Dashboard auf deinem VPS mit SSH-Tunneling, Caddy-Reverse-Proxy, Docker oder systemd."
+description: "Betrieb des Hermes Agent Dashboards auf einem VPS: SSH-Tunnel, eingebaute Anmeldung, Caddy als Reverse Proxy, Docker, systemd und die Gateway-Webapp auf 9120."
 image: "@assets/images/26/04/hermes-dashboard-guide.webp"
 categories: ["ai"]
 authors: ["Dragos"]
@@ -17,10 +17,8 @@ import Button from "@components/widgets/Button.astro";
 import Notice from "@components/widgets/Notice.astro";
 import ListCheck from "@components/widgets/ListCheck.astro";
 import Accordion from "@components/widgets/Accordion.astro";
-import Tabs from "@components/widgets/Tabs.astro";
-import Tab from "@components/widgets/Tab.astro";
 
-Wenn du [Hermes Agent](/hermes-agent-setup-guide/) auf einem VPS betreibst und eine browserbasierte Möglichkeit willst, Sessions, API-Keys, Gedächtnis und Konfiguration zu verwalten, macht das eingebaute Dashboard genau das. Seit v0.16 (Juni 2026) kommt das Dashboard als natives Browser-Admin-Panel. Es ist nur einen Befehl entfernt, lauscht aber standardmäßig nur auf localhost. Dieser Guide deckt ab, wie du es lokal laufen lässt, remote per SSH-Tunnel oder über einen Caddy-Reverse-Proxy mit Passwortschutz erreichst, in Docker deployst und mit systemd dauerhaft laufen lässt.
+`hermes dashboard` ist das eingebaute Admin-Panel von Hermes Agent auf Port 9119. Auf Loopback öffnet es ohne Login, und es weigert sich, an jede andere Adresse zu binden, solange kein Anmeldung-Anbieter registriert ist. Seit v0.23.4 (November 2026) ist es ein Panel auf Maschinenebene: Ein Server deckt alle Profile auf dem Host ab. Die Anmeldepflicht kam mit dem Hardening im Juni 2026, und der alte `--insecure`-Bypass ist heute ein No-op. Dieser Guide zeigt, wie du es lokal betreibst, per SSH-Tunnel erreichst (mein Standard), Caddy davorsetzt mit Benutzername und Passwort oder einem Nous-Portal-Login, dazu die Webapp, Docker, systemd und was du mit einem handgeschriebenen `hermes dashboard`-Service machst.
 
 <Button text="Hermes Agent GitHub" link="https://github.com/NousResearch/hermes-agent" variant="solid" color="blue" size="md" icon="github" />
 
@@ -29,9 +27,11 @@ Wenn du [Hermes Agent](/hermes-agent-setup-guide/) auf einem VPS betreibst und e
 <ul>
 <li>Das Hermes-Dashboard lokal und auf einem Remote-Server starten</li>
 <li>Remote-Zugriff via SSH-Port-Forwarding (am einfachsten und sichersten)</li>
-<li>Das Dashboard extern mit einem Caddy-Reverse-Proxy freigeben</li>
-<li>Basic Auth mit Benutzername und Passwort hinzufügen</li>
-<li>Es dauerhaft mit systemd oder Docker laufen lassen</li>
+<li>Die Anmeldesperre: Benutzername und Passwort für ein vertrauenswürdiges Netzwerk, Nous Portal für das Internet</li>
+<li>Caddy davor, mit der öffentlichen URL und den Einstellungen für vertrauenswürdige Proxies</li>
+<li>Die Webapp und wie sie sich vom Dashboard unterscheidet</li>
+<li>Einen alten `hermes dashboard`- oder `hermes serve`-Service aufs Gateway umziehen</li>
+<li>Dauerhafter Betrieb mit systemd oder Docker</li>
 <li>Sicherheitsrisiken, die du kennen solltest</li>
 </ul>
 </ListCheck>
@@ -44,55 +44,96 @@ Wenn du [Hermes Agent](/hermes-agent-setup-guide/) auf einem VPS betreibst und e
   label="Hermes v0.9.0 bekommt ein starkes neues Web-Dashboard"
 />
 
-Das Dashboard gibt dir eine Browser-Oberfläche zur Verwaltung deiner Hermes-Agent-Instanz. Darüber kannst du:
+Das Dashboard gibt dir eine Browser-Oberfläche zur Verwaltung deiner Hermes-Agent-Installation. Darüber kannst du:
 
-- Aktive Chat-Sessions ansehen und verwalten
-- Gedächtnis-Dateien des Agenten durchsuchen und bearbeiten
-- API-Keys und Modell-Einstellungen konfigurieren
-- Token-Nutzung und Kosten überwachen
-- Skills und Tool-Konfigurationen verwalten
+- Chat-Sessions ansehen und fortsetzen oder einen vollständigen TUI-Chat im Browser öffnen
+- `config.yaml` über Formulare oder als Raw-YAML bearbeiten
+- API-Keys und OAuth-Logins in `~/.hermes/.env` setzen, ersetzen und entfernen
+- Token-Nutzung und Kosten pro Tag und pro Modell verfolgen
+- Skills und Toolsets umschalten, MCP-Server hinzufügen und Cron-Jobs anlegen
+- Messaging-Plattformen verbinden und die Nutzer freischalten, die mit deinem Bot reden dürfen
+- Das Gateway starten, stoppen und neu starten sowie Doctor-Checks, Backups und Updates ausführen
 
-Es verbindet sich mit dem bestehenden Hermes-Gateway-Prozess, der schon auf deinem Server läuft – es startet keinen zweiten Agenten.
+Es ist ein eigener Server-Prozess, der dasselbe `~/.hermes` liest und schreibt wie das Gateway. Ein Chat, den du in seinem Chat-Tab startest, läuft im Prozess des Dashboards, nicht im Gateway. Diese zweite Kopie von Hermes ist der Grund, warum v0.23.4 das Backend aufs Gateway umziehen kann (siehe [Alten Dashboard-Service aufs Gateway umziehen](#alten-dashboard-service-aufs-gateway-umziehen)).
 
 ## Dashboard-Tour
 
-Sobald das Dashboard läuft, gibt dir die obere Navigationsleiste Zugriff auf mehrere Tabs. Das zeigt jeder einzelne.
+Das Dashboard verwaltet die ganze Maschine: Ein Server deckt alle Profile auf dem Host ab. Ein Profile-Switcher in der Seitenleiste (sichtbar, sobald mehr als ein Profil existiert) wählt das Profil, das die Verwaltungsseiten lesen und schreiben. Solange ein anderes Profil ausgewählt ist, nennt ein gelber Banner das Profil, das gerade verwaltet wird. Die Auswahl steht als `?profile=<name>` in der URL, ein Link wie `http://127.0.0.1:9119/skills?profile=worker` landet also mit voreingestelltem Switcher.
+
+Die Seiten sind Status, Chat, Config, API Keys, Sessions, Logs, Analytics, Cron, Profiles, Skills, MCP, Webhooks, Pairing, Channels und System. Die Screenshots unten stammen vom Build vom April 2026, das Layout hat sich seitdem verschoben.
 
 ### Status
 
-Der Status-Tab ist die Landing Page. Er zeigt, ob Agent und Gateway laufen, verbundene Plattformen und eine Liste der letzten Sessions mit Nachrichtenzahlen und Vorschauen.
+Die Status-Seite ist die Landing Page. Sie zeigt Agent-Version und Release-Datum, den Gateway-Zustand (läuft oder gestoppt, PID, verbundene Plattformen), die Zahl der Sessions, die in den letzten 5 Minuten aktiv waren, und die 20 jüngsten Sessions mit Modell, Nachrichtenzahl, Token-Nutzung und einer Vorschau. Sie aktualisiert sich alle 5 Sekunden. Läuft dem Host Speicher oder Speicherplatz knapp zu, oder ist der Agent vermutlich durch einen OOM-Kill gestorben, sagt das ein Banner oben.
 
 ![Hermes-Dashboard-Statusseite mit Agent-Health, Gateway-Status, verbundenen Plattformen und letzten Sessions](@assets/images/26/04/hermes-dash-status.webp)
 
+### Chat
+
+Der Chat-Tab ist zum Reden mit dem Agenten aus dem Browser. Er bettet das vollständige Hermes-TUI ein (das du mit `hermes --tui` bekommst), über einen WebSocket zu einem Pseudo-Terminal auf dem Server. Slash-Befehle, die Modellauswahl, Tool-Call-Karten und Freigabe-Aufforderungen funktionieren wie im Terminal. Eine rechte Leiste listet die letzten Sessions und wählt den Workspace, in dem ein neuer Chat startet. Es braucht einen POSIX-Host (Linux, macOS oder WSL2). Unter nativem Windows funktioniert der Rest des Dashboards, dieser Tab aber nicht.
+
 ### Sessions
 
-Der Sessions-Tab listet alle vergangenen und aktiven Sessions. Jeder Eintrag zeigt das genutzte Modell, die Nachrichtenzahl, aufgerufene Tools und wann er zuletzt aktiv war. Du kannst Nachrichteninhalte über alle Sessions hinweg durchsuchen und alte löschen.
+Die Sessions-Seite listet vergangene und aktive Sessions. Jede Zeile zeigt die Quellplattform (CLI, Telegram, Discord, Cron usw.), das Modell, die Zahl der Nachrichten und Tool-Calls und wann die Session zuletzt aktiv war. Die Filter Chats, Automation und All blenden Cron- und Tool-Läufe aus, wenn du nur Unterhaltungen sehen willst. Die Suche ist ein Volltext-Suche über den Nachrichteninhalt. Von hier aus kannst du eine Session umbenennen, als JSON exportieren, alte ausdünnen oder löschen.
 
 ![Hermes-Dashboard-Sessions-Seite mit 51 Sessions, Suche, Nachrichtenzahlen und Session-Typen](@assets/images/26/04/hermes-dash-sessionsjpeg.webp)
 
 ### Analytics
 
-Der Analytics-Tab erfasst Token-Nutzung, Session-Anzahlen und API-Aufrufe über die Zeit. Er zeigt Tagesaufschlüsselungen und Statistiken pro Modell, damit du exakt siehst, wie viel dich dein Agent kostet.
+Die Analytics-Seite summiert Tokens und Kosten aus dem Session-Verlauf über ein Fenster von 7, 30 oder 90 Tagen: Eingabe- und Ausgabe-Tokens, Cache-Trefferquote, Session-Zahl, ein Tages-Chart und eine Tabelle pro Modell.
 
 ![Hermes-Dashboard-Analytics-Seite mit Gesamt-Tokens, täglichem Nutzungs-Chart und Aufschlüsselung pro Modell](@assets/images/26/04/hermes-dash-analytics.webp)
 
 ### Cron
 
-Der Cron-Tab lässt dich geplante Tasks erstellen und verwalten. Du definierst einen Prompt, setzt einen Cron-Ausdruck und wählst, wohin Ergebnisse geliefert werden (lokal, Discord usw.). Du kannst Jobs von hier pausieren, manuell triggern oder löschen.
+Die Cron-Seite erstellt und bearbeitet geplante Jobs. Du gibst einen Prompt, einen Cron-Ausdruck und ein Ziel für die Zustellung an (lokal, Telegram, Discord, Slack oder E-Mail), dann pausierst du sie, setzt sie fort, bearbeitest sie, löst sie aus oder löschst sie. Bei mehr als einem Profil fasst die Seite die Jobs aller Profile zusammen und hat einen eigenen Filter. Bot-Mode-Routinen tauchen hier ebenfalls auf, mit dem Namen `[bot:<name>] <routine>`.
 
 ![Hermes-Dashboard-Cron-Seite mit Job-Erstellungsformular und einem geplanten täglichen Tech-News-Scout-Job](@assets/images/26/04/hermes-dash-jobs.webp)
 
 ### Config
 
-Der Config-Tab gibt dir einen strukturierten Editor für `~/.hermes/config.yaml`. Er ist nach Abschnitten organisiert – General, Agent, Terminal, Display, Memory, Security und mehr – jeweils mit beschrifteten Feldern. Du kannst Werte direkt bearbeiten oder in den Raw-YAML-Modus wechseln.
+Die Config-Seite ist ein Formular-Editor für `~/.hermes/config.yaml`. Die Felder werden aus der Standardkonfiguration ermittelt und in Kategorien wie model, terminal, display, agent, delegation, memory und approvals gruppiert. Bekannte Werte erscheinen als Dropdowns, Booleans als Schalter. Save schreibt die Datei sofort, und die Änderung greift in der nächsten Agent-Session oder nach dem nächsten Gateway-Neustart. Dazu gibt es Auf Standard zurücksetzen sowie Import und Export als JSON.
 
 ![Hermes-Dashboard-Config-Seite mit General-Einstellungen inklusive Modell, Zeitzone und Command-Allowlist](@assets/images/26/04/hermes-dash-config.webp)
 
-### Keys
+### API Keys
 
-Der Keys-Tab verwaltet API-Keys und OAuth-Logins, die in `~/.hermes/.env` gespeichert sind. Er zeigt, welche LLM-Provider konfiguriert sind, behandelt OAuth-Flows (Nous Portal, OpenAI Codex) und lässt dich Credentials hinzufügen oder trennen, ohne die Kommandozeile anzufassen.
+Die API-Keys-Seite verwaltet `~/.hermes/.env`, gruppiert in LLM-Provider, Tool-API-Keys, Tokens der Messaging-Plattformen und Agent-Einstellungen. Jeder Eintrag zeigt, ob er gesetzt ist (mit geschwärzter Vorschau), wofür er da ist, einen Link zum Provider und ein Feld zum Setzen oder Ersetzen. Selten genutzte Keys sitzen hinter einem Schalter.
 
 ![Hermes-Dashboard-Keys-Seite mit OAuth-Provider-Verbindungen und LLM-Provider-API-Key-Verwaltung](@assets/images/26/04/hermes-dash-keys.webp)
+
+### Logs
+
+Die Logs-Seite zeigt die Logdateien des Agenten live. Sie verfolgt die Logdateien `agent`, `errors` und `gateway` mit Filtern nach Level und Komponente, 50 bis 500 Zeilen und einer automatischen Aktualisierung alle 5 Sekunden.
+
+### Profiles
+
+Die Profiles-Seite listet jedes Profil mit seinem Modell, der Zahl der Skills, dem Gateway-Zustand und Badges. Du kannst eines anlegen (geklont oder ohne die mitgelieferten Skills), sein Modell, seine Beschreibung und seine `SOUL.md` bearbeiten, es umbenennen oder löschen und festlegen, welches Profil künftige CLI- und Gateway-Läufe nutzen. Die letzte Schaltfläche ändert den CLI-Standard, nicht das, was das Dashboard verwaltet. Das macht der Switcher in der Seitenleiste.
+
+### Skills
+
+Die Skills-Seite schaltet installierte Skills und Toolsets um und durchsucht den Skill-Hub (dieselbe Suche wie `hermes skills search`) mit One-Click-Install und einer "Update all"-Schaltfläche. Änderungen greifen in der nächsten Session.
+
+### MCP
+
+Die MCP-Seite bearbeitet den `mcp_servers`-Block von `config.yaml`: füge einen HTTP-, SSE- oder stdio-Server mit Umgebungsvariablen hinzu, aktiviere oder deaktiviere ihn, teste die Verbindung und liste seine Tools oder installiere aus dem von Nous freigegebenen Katalog. Änderungen greifen nach dem nächsten Gateway-Neustart.
+
+### Webhooks, Pairing und Channels
+
+Webhooks erstellt dynamische Abonnements (Name, Event-Filter, Zustellziel, Agent-Prompt) und zeigt die Routen-URL und ein einmaliges HMAC-Secret. Das Gateway lädt die Abonnement-Datei ohne Neustart neu. Pairing schaltet Messaging-Nutzer ohne CLI frei und entzieht die Freigabe, mit demselben Ergebnis wie `hermes pairing`. Channels konfiguriert jede Messaging-Plattform im Browser, testet die Verbindung und startet das Gateway neu. Bei einer Installation mit System-Scope (`hermes gateway install --system`) läuft dieser Neustart unter `sudo -n`, der Dashboard-Nutzer braucht dafür also passwortloses sudo.
+
+### System
+
+Die System-Seite ist das Admin-Panel für die ganze Installation:
+
+- Host: OS, Kernel, CPU, Speicher, Speicherplatz und Uptime, dazu die Hermes-Version mit einem Update-Badge. Bei einer Git-Installation führt eine "Update now"-Schaltfläche `hermes update` im Hintergrund aus. Docker- und Nix-Installationen bekommen stattdessen den Befehl für ein Update außerhalb des Agenten.
+- Gateway: das Messaging-Gateway starten, stoppen und neu starten, mit Live-Status und PID.
+- Credential-Pool: die rotierenden API-Keys hinzufügen oder entfernen, die der Agent pro Provider durchwechselt. Die Liste schwärzt die Keys.
+- Memory: den externen Memory-Provider wählen oder die eingebauten Speicher `MEMORY.md` und `USER.md` zurücksetzen.
+- Nous Portal und Skill curator: schreibgeschützter Status des Portal-Logins und des Hintergrund-Jobs zur Skill-Wartung, mit Pause und Jetzt ausführen.
+- Operations: `hermes doctor` ausführen, ein Security-Audit (`hermes security audit`, eine Supply-Chain-Prüfung des venv, der Plugin-Anforderungen und der gepinnten MCP-Server), ein Backup anlegen, aus einem Backup-Archiv wiederherstellen, Skills aktualisieren oder einen Support-Dump erzeugen. Jeder Lauf läuft im Hintergrund und streamt sein Log in die Seite.
+- Checkpoints und Shell-Hooks: die Größe des `/rollback`-Speichers und die Liste der konfigurierten Hooks. Hooks führen beliebige Befehle aus, ein neuer feuert deshalb erst, nachdem du zugestimmt hast.
+- Move to a single Hermes: erscheint, wenn auf diesem Home noch ein älterer `hermes dashboard`- oder `hermes serve`-Server läuft, oder wenn der letzte Umzug gemeldet werden muss. Er führt dieselbe Migration wie `hermes gateway migrate --backends --apply` aus, nach einer Bestätigung, die die Blocker auflistet.
 
 ## Das Dashboard starten
 
@@ -102,38 +143,51 @@ Der einfachste Weg zum Starten:
 hermes dashboard
 ```
 
-Das baut die Web-UI (nur beim ersten Lauf) und startet dann einen Server auf `http://127.0.0.1:9119`. Es öffnet außerdem einen Browser-Tab, wenn du es lokal laufen lässt.
+Das baut die Web-UI beim ersten Lauf, stellt sie dann unter `http://127.0.0.1:9119` bereit und öffnet einen Browser-Tab. Auf Loopback gibt es kein Login. Der erste Build ist auf einem kleinen VPS der langsame Teil: Er ist CPU- und speicherintensiv, Hermes begrenzt Heap und Threads standardmäßig, und `HERMES_WEB_BUILD_LIGHT=1` zieht die Limits auf einen Thread und 1 GB Heap zusammen.
+
+`hermes serve` ist derselbe Server, headless: Er öffnet nie eine Browser-UI. Die Desktop-App startet ihr eigenes `hermes serve`-Backend. Nutze den Befehl direkt, wenn du auf einem Remote-Host ein Headless-Backend willst.
 
 ### Verfügbare Flags
 
 | Flag | Default | Beschreibung |
 |---|---|---|
-| `--host` | `127.0.0.1` | Interface, an das gebunden wird |
+| `--host` | `127.0.0.1` | Bind-Adresse. Alles außer `127.0.0.1`, `::1` oder `localhost` schaltet die Anmeldesperre ein |
 | `--port` | `9119` | Port, auf dem gelauscht wird |
-| `--no-open` | aus | Automatischen Browser-Start überspringen |
+| `--no-open` | aus | Browser-Start überspringen |
+| `--skip-build` | aus | Den vorhandenen Build ausliefern statt neu bauen |
+| `--isolated` | aus | Einen eigenen Server für ein Profil fahren statt des Maschinen-Dashboards |
+| `--stop` | n/a | Das laufende `hermes dashboard` oder `hermes serve` dieses Hermes-Home stoppen |
+| `--status` | n/a | Laufende `hermes dashboard`- und `hermes serve`-Prozesse auflisten |
+| `--insecure` | aus | Seit dem Hardening im Juni 2026 veraltet und wirkungslos |
 
-Das Default-Binding auf `127.0.0.1` heißt, nur deine Maschine erreicht das Dashboard. Das ist der sichere Default – wenn du Remote-Zugriff brauchst, lies weiter.
+Das Default-Binding auf `127.0.0.1` heißt, nur deine Maschine erreicht das Dashboard. Das ist der sichere Default. Wenn du Remote-Zugriff brauchst, lies weiter.
+
+`--isolated` ist ein Routing-Komfort, keine Sicherheitsgrenze. Jedes Profil unter einem OS-Nutzer kann die Dateien der anderen Profile lesen. Um die Daten von Personen zu trennen, fahre jeden Mandanten als eigenen OS-Nutzer oder in einem eigenen Container.
+
+Ist der Port belegt, gibt `hermes dashboard` `BACKEND_PORT_IN_USE port=9119` aus und endet mit Code 75. `hermes dashboard --status` zeigt, welcher Prozess ihn hält. Exit 78 ist etwas anderes: Ein anderes Dashboard bedient diesen Host bereits, und die Meldung nennt dessen PID und Port. Stoppe es, oder gib dem Service mit `--isolated` einen eigenen Server.
 
 ## Remote-Zugriff via SSH-Port-Forwarding
 
-Wenn du das Dashboard nur von deinem Laptop aus öffnen willst, während es auf einem VPS läuft, ist SSH-Port-Forwarding die einfachste Option. Kein Reverse Proxy, kein DNS, keine offenen Ports auf dem Server – alles läuft durch deine bestehende SSH-Verbindung.
+Wenn du das Dashboard nur von deinem Laptop aus öffnen willst, während es auf einem VPS läuft, ist SSH-Port-Forwarding die einfachste Option. Kein Reverse Proxy, kein DNS, keine offenen Ports auf dem Server. Alles läuft durch deine bestehende SSH-Verbindung.
 
 ```bash
 ssh -L 9119:127.0.0.1:9119 user@your-vps-ip
 ```
 
-Öffne dann `http://127.0.0.1:9119` im Browser auf deinem Laptop. Das `-L`-Flag leitet deinen lokalen Port 9119 durch den SSH-Tunnel an das localhost:9119 des VPS weiter. Für das Dashboard sieht das wie eine lokale Verbindung aus.
+Öffne dann `http://127.0.0.1:9119` im Browser auf deinem Laptop. Das `-L`-Flag leitet deinen lokalen Port 9119 durch den SSH-Tunnel an das localhost:9119 des VPS weiter. Für das Dashboard sieht das wie eine Loopback-Verbindung aus, die Sperre bleibt also aus und es gibt kein Login.
 
 Das ist der sicherste Weg für Remote-Zugriff auf das Dashboard, weil:
 
-- Das Dashboard an `127.0.0.1` gebunden bleibt – nichts anderes im Internet erreicht es
-- Der Traffic innerhalb von SSH verschlüsselt ist – kein extra TLS-Setup nötig
+- Das Dashboard an `127.0.0.1` gebunden bleibt, nichts anderes erreicht es also
+- Der Traffic innerhalb von SSH verschlüsselt ist, ohne TLS-Setup
 - Du schon SSH-Zugriff hast, es gibt also nichts Neues abzusichern
 - Keine offenen Ports auf dem VPS außer SSH
 
 <Notice type="info" title="Wann du SSH-Forwarding nutzen solltest">
-Nutze das, wenn du die einzige Person bist, die auf das Dashboard zugreift, und du dich immer von einer Maschine mit SSH-Zugriff verbindest. Überspringe die Caddy- und systemd-Abschnitte komplett – lass einfach <code>hermes dashboard</code> in einer tmux- oder screen-Session laufen.
+Nutze das, wenn du die einzige Person bist, die auf das Dashboard zugreift, und du dich immer von einer Maschine mit SSH-Zugriff verbindest. Überspringe die Caddy- und systemd-Abschnitte komplett und lass <code>hermes dashboard</code> in einer tmux- oder screen-Session laufen.
 </Notice>
+
+Der [SSH-Tunneling-Guide](/ssh-tunneling-linux/) der Seite hat die anderen Forwarding-Optionen, und der [ProxyJump-Guide](/ssh-proxyjump-jumphost/) behandelt Hosts hinter einer Bastion.
 
 ### SSH-Tunnel im Hintergrund
 
@@ -143,8 +197,8 @@ Wenn der Tunnel im Hintergrund offen bleiben soll:
 ssh -f -N -L 9119:127.0.0.1:9119 user@your-vps-ip
 ```
 
-- `-f` — forkt nach der Authentifizierung in den Hintergrund
-- `-N` — kein Remote-Befehl, nur der Tunnel
+- `-f` forkt nach der Authentifizierung in den Hintergrund
+- `-N` führt keinen Remote-Befehl aus, nur den Tunnel
 
 Um ihn später zu beenden:
 
@@ -163,28 +217,109 @@ Mit SSH-Forwarding muss das Dashboard weiterhin auf dem VPS laufen. Nutze tmux o
 ```bash
 # Auf dem VPS
 tmux new -s hermes
-hermes dashboard
+hermes dashboard --no-open
 # Ctrl+B, dann D zum Trennen
 
 # Später wieder verbinden mit
 tmux attach -t hermes
 ```
 
-Wenn es dauerhaft laufen soll – auch ganz ohne SSH – nutze den weiter unten beschriebenen systemd-Service.
+`--no-open` hindert einen headless VPS daran, einen Browser starten zu wollen. Wenn es dauerhaft laufen soll, auch ganz ohne SSH, nutze den weiter unten beschriebenen systemd-Service.
 
-## Das Dashboard extern verfügbar machen
+## Warum verweigert hermes dashboard den Start auf 0.0.0.0?
 
-Um das Dashboard von einer anderen Maschine zu erreichen (deinem Handy, deinem Laptop oder einem Teamkollegen), brauchst du zwei Dinge: an alle Interfaces binden und einen Reverse Proxy davor.
+`hermes dashboard` verweigert den Start auf `0.0.0.0`, weil ein Bind außerhalb von Loopback die Anmeldesperre einschaltet, und ohne registrierten Anbieter fails closed der Server und gibt aus, welche Einstellung fehlt. Setze zuerst einen mit `hermes dashboard password --username admin` oder `hermes dashboard register`. Seit dem Hardening im Juni 2026 verlangt jeder Bind außer `127.0.0.1`, `::1` oder `localhost` einen Auth-Anbieter, und jeder Request muss ein verifiziertes Session-Cookie mitbringen, sonst landet er bei `/login`. Einen unauthentifizierten öffentlichen Bind gibt es nicht mehr. `--insecure` wird weiterhin akzeptiert, schreibt eine Warnung ins Log und tut nichts.
 
-### Schritt 1: An 0.0.0.0 binden
+Die Docker-Doku nennt den Grund: In einer Kampagne im Juni 2026 erreichten Internetscanner unauthentifizierte öffentliche Dashboards und OpenAI-API-Server und trieben den Agenten dazu, eine SSH-Key-Hintertür zu pflanzen.
+
+| Bind | Sperre | Typischer Einsatz |
+|---|---|---|
+| Default, `127.0.0.1` | aus | Lokale Arbeit, SSH-Tunnel |
+| `--host 0.0.0.0`, eine LAN-Adresse oder eine Tailscale-IP | an | Benutzername und Passwort in einem vertrauenswürdigen Netzwerk |
+| `--host 0.0.0.0` auf einem öffentlichen Host | an | Nous Portal oder dein eigenes OIDC |
+| `127.0.0.1` mit einer `dashboard.public_url` außerhalb von Loopback | an | Hinter Caddy oder einem anderen Reverse Proxy |
+
+Drei Anbieter werden mit Hermes ausgeliefert:
+
+| Anbieter | Wo er konfiguriert wird | Nutze ihn, wenn |
+|---|---|---|
+| Benutzername und Passwort (`basic`) | `dashboard.basic_auth` in `config.yaml` oder die Variablen `HERMES_DASHBOARD_BASIC_AUTH_*` | Der Host steht in einem vertrauenswürdigen LAN oder ist über ein VPN erreichbar. Ein gemeinsames Credential, kein zweiter Faktor, keine Konten pro Nutzer |
+| Nous Portal OAuth (`nous`) | `HERMES_DASHBOARD_OAUTH_CLIENT_ID` in `~/.hermes/.env`, geschrieben von `hermes dashboard register` | Das Dashboard zeigt ins Internet, oder Hermes Desktop verbindet sich von überall her |
+| Selbst gehostetes OIDC (`self-hosted`) | `dashboard.oauth.self_hosted` in `config.yaml` | Du betreibst schon Keycloak, Authelia, Authentik oder einen anderen OIDC-Anbieter |
+
+Wenn du `hermes dashboard --host 0.0.0.0` interaktiv ohne konfigurierten Anbieter startest, bietet es an, einen direkt einzurichten. Ein nicht-interaktiver Start (systemd, Docker, CI) überspringt die Abfrage und failt closed, setze den Anbieter also, bevor du den Service anlegst.
+
+## Das Dashboard mit Benutzername und Passwort freigeben
+
+Nutze diesen Weg, wenn das Dashboard auf deinem Handy, auf einem anderen Laptop oder für einen Teamkollegen aufgehen soll, und jedes Gerät, das den Host erreichen kann, eines ist, dem du vertraust. Für das öffentliche Internet kommt der Nous-Portal-Login aus dem nächsten Abschnitt dazu.
+
+### Schritt 1: Benutzername und Passwort setzen
 
 ```bash
-hermes dashboard --host 0.0.0.0
+hermes dashboard password --username admin
 ```
 
-Das lässt den Server auf allen Netzwerk-Interfaces lauschen. Für sich genommen heißt das: Jeder, der die IP deines Servers erreichen kann, kommt ans Dashboard – hör hier nicht auf.
+Er fragt zweimal nach dem Passwort auf dem Terminal. Er schreibt drei Dinge unter `dashboard.basic_auth` in `~/.hermes/config.yaml`: den Benutzernamen, einen scrypt-Hash des Passworts und ein Signing-Secret, falls noch keins existiert. Das Passwort selbst wird nie gespeichert, nie ausgegeben und nie als Argument akzeptiert, es bleibt also aus der Shell-Historie und der Prozessliste heraus.
 
-### Schritt 2: Reverse Proxy mit Caddy
+Auf einem Host ohne Terminal lies es aus einer Datei (neu in v0.23.4):
+
+```bash
+hermes dashboard password --username admin --password-stdin < /run/secrets/dashboard_password
+```
+
+Nur die erste Zeile zählt, höchstens 1024 Bytes. Die Standardeingabe muss eine Pipe oder eine Datei sein: An einem Terminal endet der Befehl mit Code 2, weil getippter Text sichtbar wäre.
+
+Führe ihn als der Nutzer aus, unter dem das Dashboard laufen wird. Die Credentials gehören zu dem Hermes-Home, in das sie geschrieben wurden, und ein Service unter einem anderen Nutzer sieht sie nicht.
+
+Der Block in `config.yaml` sieht am Ende so aus:
+
+```yaml
+dashboard:
+  basic_auth:
+    username: admin
+    password_hash: "scrypt$16384$8$1$<salt>$<hash>"
+    secret: "<32 or more random bytes, base64 or hex>"
+    session_ttl_seconds: 43200
+```
+
+Ein paar Dinge, die du dazu wissen solltest:
+
+- `password_hash` ist die Einstellung, die du behalten solltest. Ein `password`-Key im Klartext funktioniert auch, ist im Ruhezustand aber weniger sicher.
+- `session_ttl_seconds` steht standardmäßig auf 43200, ein Login hält also 12 Stunden.
+- Eine Änderung von Benutzername oder Passwort beendet jede Session.
+- Die Variablen `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`, `_PASSWORD_HASH`, `_PASSWORD`, `_SECRET` und `_TTL_SECONDS` überschreiben `config.yaml`. Setzt du das Passwort mit dem Befehl, während diese Zeilen in `~/.hermes/.env` stehen, entfernt der Befehl sie und nennt die Keys, die er entfernt hat, nie aber ihre Werte.
+- Die Login-Route ist pro Client-IP rate-limitiert: 10 Versuche pro Minute, danach HTTP 429. Ein unbekannter Nutzer und ein falsches Passwort bekommen dieselbe generische 401.
+- Bei benannten Profilen setzt `-p <profile>` die eigene Anmeldung dieses Profils, die sein `--isolated`-Server nutzt. Das Maschinen-Dashboard und ein Gateway, das mehrere Profile bedient, nutzen die Credentials des Homes, aus dem sie gestartet wurden, führe dafür also `hermes -p default dashboard password` aus.
+
+### Schritt 2: An eine erreichbare Adresse binden
+
+```bash
+hermes dashboard --host 0.0.0.0 --port 9119 --no-open
+```
+
+Der Server lauscht jetzt auf jedem Interface, und die Sperre ist an. Fehlt der Anbieter, verweigert der Befehl den Start und nennt die fehlende Einstellung. Jedes Gerät, das den Host routen kann, sieht die Login-Seite, kombiniere das also mit den Firewall-Regeln aus [Direkten Zugriff auf Port 9119 blockieren](#direkten-zugriff-auf-port-9119-blockieren), außer der Host steht in einem Netzwerk, das du vollständig kontrollierst.
+
+In einem Tailnet binde an die Tailscale-IP der Maschine statt an `0.0.0.0`. Nur deine Geräte erreichen diese Adresse:
+
+```bash
+hermes dashboard --host <tailscale-ip> --port 9119 --no-open
+```
+
+Der Bind ist weiterhin kein Loopback, die Sperre bleibt also an und das Passwort aus Schritt 1 wird auch hier gebraucht. Der [Tailscale-Setup-Guide](/de/tailscale-einrichten-anleitung/) behandelt die Installation.
+
+### Schritt 3: Die Sperre prüfen
+
+Von jeder Maschine, die das Dashboard erreichen kann:
+
+```bash
+curl -s http://127.0.0.1:9119/api/status | jq '.auth_required, .auth_providers'
+# true
+# ["basic"]
+```
+
+`auth_required: true` mit `basic` in der Liste heißt, die Sperre ist an. `false` heißt, der Bind ist Loopback, oder die Sperre hat nicht gegriffen. `true` ohne `basic` heißt, der Dashboard-Prozess hat die Credentials nicht geladen: Prüfe, dass sie im Home liegen, aus dem er läuft, und starte ihn dann neu. Im Browser öffnet `http://<host>:9119/` jetzt ein Login-Formular statt des Dashboards.
+
+### Schritt 4: Reverse Proxy mit Caddy
 
 Wenn du Caddy schon als Reverse Proxy auf deinem Server laufen lässt, füge deiner Caddyfile einen Block wie diesen hinzu:
 
@@ -209,9 +344,26 @@ hermes.yourdomain.com {
 }
 ```
 
-<Notice type="warning" title="Host-Networking-Voraussetzung">
-Wenn das Dashboard an 127.0.0.1 bindet (der Default), können Docker-Container es nicht über <code>host.docker.internal</code> erreichen. Du musst entweder <code>--host 0.0.0.0</code> nutzen oder Caddy direkt auf dem Host laufen lassen (nicht in Docker).
-</Notice>
+Ein an `127.0.0.1` gebundenes Dashboard ist aus einem Docker-Container heraus nicht über `host.docker.internal` erreichbar. Behalte entweder den `0.0.0.0`-Bind aus Schritt 2 mit den Firewall-Regeln unten, oder betreibe Caddy direkt auf dem Host.
+
+Caddy reicht den `Host`-Header des Browsers durch, Hermes muss also seinen öffentlichen Namen kennen. Füge das zu `~/.hermes/config.yaml` hinzu (oder setze denselben Key mit `hermes config set dashboard.public_url https://hermes.yourdomain.com`):
+
+```yaml
+dashboard:
+  public_url: "https://hermes.yourdomain.com"
+  trusted_proxies:
+    - "172.20.0.5"
+```
+
+Ersetze die Proxy-IP. Mit Caddy auf dem Host lass `trusted_proxies` weg: Loopback-Proxies sind automatisch vertrauenswürdig. Mit Caddy in einem Container nutze die Adresse, von der sich Caddy verbindet, so wie der Host sie sieht (Caddys IP in seinem Docker-Netzwerk; `docker network inspect` listet sie), oder ein begrenztes CIDR für ein Netzwerk, das nur der Proxy nutzt. Hermes lehnt `*`, `0.0.0.0/0` und `::/0` ab.
+
+Was die beiden Einstellungen tun:
+
+- `public_url` ist die vollständige Adresse, unter der das Dashboard erreicht wird. Ihr Hostname wird als exakter Wert für HTTP-`Host` und WebSocket-`Origin` akzeptiert, und genau das prüft der DNS-Rebinding-Schutz. Wildcards und Suffixe sind nicht erlaubt, `hermes.yourdomain.com.evil.test` bleibt also abgelehnt.
+- Eine `public_url` außerhalb von Loopback schaltet die Sperre immer ein, auch wenn das Backend an Loopback bindet. Konfiguriere zuerst einen Anbieter, sonst failt Hermes beim Start closed. Die Doku erklärt warum: Ein Loopback-Dashboard legt ein Session-Token in jede Seite, die es ausliefert, und ohne die Sperre würde der Proxy aus diesem Token ein Remote-Login machen.
+- `trusted_proxies` listet die Peers, die `X-Forwarded-Proto` und `X-Forwarded-For` setzen dürfen. Das sorgt dafür, dass das Session-Cookie hinter TLS `Secure` ist. Ohne Eintrag teilen sich alle hinter dem Proxy sein Rate-Limit für den Passwort-Login, und das Auth-Log protokolliert die Adresse des Proxys statt der des Clients.
+
+Wenn das Dashboard Loopback nie verlassen soll, geht das auch. Führe `hermes dashboard --host 127.0.0.1 --port 9119 --no-open` aus, betreibe Caddy auf dem Host, zeige mit ihm auf `http://127.0.0.1:9119`, und setze dieselbe `public_url`. Tailscale Serve hat dieselbe Form: Es terminiert reines Tailnet-HTTPS an `https://<machine>.<tailnet>.ts.net` und proxiet zum Loopback-Dashboard. Nutze genau diesen Origin als `public_url`. Ein Anbieter ist weiterhin nötig, auch wenn nichts ins öffentliche Internet geht.
 
 Dann Caddy neu laden:
 
@@ -225,29 +377,42 @@ Oder wenn Caddy auf dem Host läuft:
 sudo systemctl reload caddy
 ```
 
-## Passwortschutz hinzufügen
+Öffne `https://hermes.yourdomain.com/` und du bekommst erst das Login-Formular, dann das Dashboard. Der Chat-Tab schickt alle 20 Sekunden ein kleines Keepalive, Caddys Idle-Timeout beendet also keinen Chat, der nur wartet.
 
-Das Hermes-Dashboard hat kein eingebautes Passwort-Feature. Da es aber hinter Caddy sitzt, kannst du HTTP Basic Auth auf Proxy-Ebene nutzen. Das blendet einen Browser-Login-Prompt ein, bevor irgendjemand das Dashboard erreicht.
+### Nous-Portal-Login für einen Host im Internet
 
-### Passwort-Hash erzeugen
-
-Caddy speichert Passwörter als bcrypt-Hashes. Erzeuge einen:
+Benutzername und Passwort schützen ein gemeinsames Credential, ohne zweiten Faktor und ohne Konten pro Nutzer. Die Doku ist deutlich, dass dieser Anbieter für ein vertrauenswürdiges Netzwerk oder ein VPN gedacht ist. Auf einem öffentlichen Host registriere die Installation stattdessen mit deinem Nous-Portal-Konto:
 
 ```bash
-caddy hash-password --plaintext 'your-password-here'
+hermes setup    # only if this install is not logged in to Nous Portal yet
+hermes dashboard register \
+  --name vps-dashboard \
+  --redirect-uri https://hermes.yourdomain.com/auth/callback
 ```
 
-Oder in einem Caddy-Docker-Container:
+Das legt einen OAuth-Client an und schreibt `HERMES_DASHBOARD_OAUTH_CLIENT_ID` nach `~/.hermes/.env`. Mit `dashboard.public_url` auf demselben Origin startest du das Dashboard wie zuvor. `/api/status` meldet dann `["nous"]`, und `/login` zeigt eine Schaltfläche "Continue with Nous Research". Selbst gehostete Dashboards kannst du auf der Seite Local Dashboards des Portals ebenfalls registrieren, benennen und widerrufen.
+
+Portal-Zugriffstokens halten 15 Minuten, und der aktuelle Vertrag hat keinen Refresh-Token. Ist einer abgelaufen, schickt die Seite dich zurück zu `/login`, um dich neu anzumelden. Jeder Login-Start, Erfolg und Fehlschlag ist eine JSON-Zeile in `~/.hermes/logs/dashboard-auth.log`, mit geschwärzten Tokens und Codes.
+
+Betreibst du einen eigenen Identity-Provider, funktioniert der selbst gehostete OIDC-Anbieter auf dieselbe Weise, mit einem Issuer und einem öffentlichen PKCE-Client unter `dashboard.oauth.self_hosted`. Jedes Konto, das sich anmelden kann, handelt als du, beschränke die App im Provider also auf dein eigenes Konto.
+
+### Ein zweites Schloss in Caddy (optional)
+
+Hermes übernimmt jetzt das Login, Caddys `basic_auth` ist also nicht mehr nötig. Auf Hosts im Internet setze ich es trotzdem drauf: Scanner bekommen eine 401, bevor sie die Hermes-Login-Route erreichen, und ein gestohlenes Hermes-Passwort allein reicht dann nicht.
+
+Erzeuge einen bcrypt-Hash. Ohne `--plaintext` liest Caddy das Passwort ohne Echo vom Terminal, so bleibt es aus deiner Shell-Historie heraus:
 
 ```bash
-sudo docker exec caddy caddy hash-password --plaintext 'your-password-here'
+caddy hash-password
 ```
 
-Das gibt einen Hash-String aus, der mit `$2a$...` beginnt.
+Oder in einer Dockerisierten Caddy:
 
-### Caddyfile aktualisieren
+```bash
+sudo docker exec -it caddy caddy hash-password
+```
 
-Füge eine `basic_auth`-Direktive im Site-Block hinzu:
+Caddys Standard ist bcrypt mit Cost 14, der Hash beginnt also mit `$2a$14$`. Füge ihn im Site-Block ein:
 
 ```caddyfile
 hermes.yourdomain.com {
@@ -265,56 +430,43 @@ hermes.yourdomain.com {
 }
 ```
 
-Ersetze `yourusername` und den Hash durch deine eigenen. Du kannst mehrere Benutzername-Hash-Paare für verschiedene Nutzer hinzufügen.
+Ersetze `yourusername` und den Hash durch deine eigenen. Du kannst mehrere Benutzername-Hash-Paare hinzufügen.
 
-### Verifizieren, dass es funktioniert
-
-Ohne Credentials – erwarte 401:
+So prüfst du das erste Schloss:
 
 ```bash
+# Ohne Caddy-Credentials: Caddy antwortet 401
 curl -sk -o /dev/null -w "%{http_code}" https://hermes.yourdomain.com/
-# 401
 ```
 
-Mit Credentials – erwarte 200:
-
-```bash
-curl -sk -o /dev/null -w "%{http_code}" -u yourusername:your-password-here https://hermes.yourdomain.com/
-# 200
-```
-
-Wenn du die URL in einem Browser öffnest, erscheint ein Login-Popup, bevor das Dashboard lädt.
+Mit den Caddy-Credentials erreicht der Request Hermes, das ihn an sein eigenes Login weitergibt. Im Browser bekommst du zwei Aufforderungen nacheinander: die von Caddy, dann das Hermes-Login-Formular.
 
 ### Direkten Zugriff auf Port 9119 blockieren
 
-Wenn Caddy Authentifizierung und TLS auf Port 443 übernimmt, gibt es keinen Grund, Port 9119 direkt erreichbar zu lassen. Wenn jemand die IP deines Servers entdeckt, könnte er Caddy umgehen und ohne Passwort direkt auf Port 9119 zugreifen. Blockiere den Port mit iptables:
+Mit dem `0.0.0.0`-Bind kann jeder, der die IP deines Servers findet, Caddy überspringen und Port 9119 direkt erreichen. Die Sperre hält ihn draußen, er kann aber die Login-Route hämmern, und Caddys TLS und zweites Schloss fallen weg. Blockiere ihn mit iptables:
 
 ```bash
-# Zuerst internen Docker-/Caddy-Traffic erlauben
+# Docker-/Caddy-internen Traffic zuerst erlauben
 sudo iptables -A INPUT -p tcp --dport 9119 -s 172.16.0.0/12 -j ACCEPT
 
 # Alles andere blockieren
 sudo iptables -A INPUT -p tcp --dport 9119 -j DROP
 ```
 
-<Notice type="warning" title="Die Docker-Allow-Regel ist kritisch">
-Wenn du 9119 nur blockierst, ohne Docker-Traffic vorher zu erlauben, wird auch Caddy geblockt. Caddy verbindet sich mit dem Dashboard über Dockers internes Netzwerk (172.16.0.0/12-Bereich). Die ACCEPT-Regel muss vor der DROP-Regel stehen – iptables verarbeitet Regeln der Reihe nach.
+<Notice type="warning" title="Die Docker-Allow-Regel kommt zuerst">
+Wenn du 9119 nur blockierst, ohne Docker-Traffic vorher zu erlauben, wird auch Caddy geblockt. Caddy verbindet sich mit dem Dashboard über Dockers internes Netzwerk (172.16.0.0/12-Bereich), und iptables verarbeitet Regeln der Reihe nach, die ACCEPT-Regel muss also über der DROP-Regel stehen.
 </Notice>
 
-Verifiziere, dass die Regeln greifen:
+Prüfe, dass die Regeln greifen:
 
 ```bash
 sudo iptables -L INPUT -n | grep 9119
-# ACCEPT  tcp  --  172.16.0.0/12  0.0.0.0/0  tcp dpt:9119
-# DROP    tcp  --  0.0.0.0/0      0.0.0.0/0  tcp dpt:9119
 ```
 
-Das blockiert alle externen Verbindungen auf 9119, während Caddy das Dashboard intern weiter erreicht.
+Du willst zwei Zeilen: zuerst das ACCEPT für 172.16.0.0/12, danach das DROP.
 
 <Notice type="warning" title="Regel über Neustarts hinweg persistieren">
-iptables-Regeln gehen beim Neustart standardmäßig verloren. Speichere sie:
-<code>sudo iptables-save | sudo tee /etc/iptables/rules.v4</code>
-Wenn die Datei nicht existiert, installiere zuerst <code>iptables-persistent</code>: <code>sudo apt install iptables-persistent</code>
+iptables-Regeln gehen beim Neustart standardmäßig verloren. Speichere sie mit <code>sudo iptables-save | sudo tee /etc/iptables/rules.v4</code>. Existiert die Datei nicht, installiere zuerst <code>iptables-persistent</code>: <code>sudo apt install iptables-persistent</code>.
 </Notice>
 
 Wenn du `ufw` statt rohem iptables nutzt:
@@ -323,9 +475,11 @@ Wenn du `ufw` statt rohem iptables nutzt:
 sudo ufw deny 9119/tcp
 ```
 
+Diese Regeln gelten für ein Dashboard, das auf dem Host läuft, wie im systemd-Weg. Ein von Docker veröffentlichter Port geht an ufw und der INPUT-Kette vorbei. Der Guide der Seite zu [Docker, das die Firewall umgeht](/docker-bypasses-firewall/) hat die Lösung.
+
 ## Dauerhaft mit systemd laufen lassen
 
-Der Befehl `hermes dashboard` läuft im Vordergrund. Schließt du dein Terminal, stoppt er. Damit er dauerhaft läuft, erstelle einen systemd-Service.
+Der Befehl `hermes dashboard` läuft im Vordergrund. Schließt du dein Terminal, stoppt er. Damit er dauerhaft läuft, erstelle einen systemd-Service. Diese Unit ist eine System-Unit mit `0.0.0.0`-Bind, setze also zuerst Benutzername und Passwort, als der Nutzer, unter dem die Unit laufen wird.
 
 ### Service-Datei erstellen
 
@@ -338,17 +492,20 @@ After=network.target
 [Service]
 Type=simple
 User=dragos
+Environment=HOME=/home/dragos
 ExecStart=/home/dragos/.hermes/hermes-agent/venv/bin/python -m hermes_cli.main dashboard --host 0.0.0.0 --port 9119 --no-open
 Restart=on-failure
 RestartSec=5
-Environment=HOME=/home/dragos
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
 
-Passe `User` und den Python-Pfad an dein Setup an. Den exakten Pfad findest du mit:
+Eine Zeile ist wichtiger als der Rest: `RestartPreventExitStatus=78`. Exit 78 ist eine bewusste Verweigerung (ein anderes Dashboard bedient diesen Host bereits auf einem anderen Port), und auf ihr stehen zu bleiben ist besser als eine Restart-Schleife, bei der nichts lauscht. Ein belegter Port ist etwas anderes: Der Befehl gibt `BACKEND_PORT_IN_USE port=9119` aus und endet mit 75, was `Restart=on-failure` alle 5 Sekunden erneut versucht, bis der Port frei wird.
+
+Passe `User`, `HOME` und den Python-Pfad an dein Setup an. Den exakten Pfad findest du mit:
 
 ```bash
 which hermes
@@ -356,9 +513,15 @@ which hermes
 readlink -f $(which hermes)
 ```
 
+Setzt du die Credentials über die Variablen `HERMES_DASHBOARD_BASIC_AUTH_*` in `~/.hermes/.env` statt über `config.yaml`, füge `EnvironmentFile=%h/.hermes/.env` unter `[Service]` hinzu, damit die Unit sie lädt. Für einen Service nur im Tailnet ersetze `0.0.0.0` durch die Tailscale-IP der Maschine.
+
+Hermes installiert nie eine Unit wie diese. Existiert sie auf deinem Host, hat sie jemand von Hand geschrieben, und `hermes update` startet sie nicht neu. Der Gateway-Service ist der, den Hermes selbst wartet, lies also [Alten Dashboard-Service aufs Gateway umziehen](#alten-dashboard-service-aufs-gateway-umziehen), bevor du entscheidest, welche von beiden du behältst.
+
 ### Aktivieren und starten
 
 ```bash
+hermes dashboard --status    # anything already running on 9119?
+hermes dashboard --stop      # stop it, then:
 sudo systemctl daemon-reload
 sudo systemctl enable hermes-dashboard
 sudo systemctl start hermes-dashboard
@@ -373,77 +536,193 @@ sudo journalctl -u hermes-dashboard -f
 
 ## In Docker laufen lassen
 
-Wenn du das Dashboard lieber in einem Docker-Container laufen lässt (konsistent mit dem, wie du andere Dienste auf dem VPS deployst), kannst du es containerisieren. Die zentrale Einschränkung: Das Dashboard muss das Hermes-Gateway auf `127.0.0.1:8642` erreichen – der Container muss also Host-Networking nutzen.
-
-### Dockerfile
-
-```dockerfile
-FROM python:3.12-slim
-
-RUN pip install hermes-agent[web]
-
-EXPOSE 9119
-
-CMD ["python", "-m", "hermes_cli.main", "dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open"]
-```
-
-### docker-compose.yml
+Das offizielle Image enthält das Dashboard bereits, es gibt also kein Dockerfile zu schreiben. Es läuft als überwachter s6-Service neben dem Gateway im selben Container und startet bei einem Absturz von selbst neu. Die Form zum Kopieren ist die Compose-Datei des Repos: Host-Networking, damit das Dashboard auf dem Loopback des Hosts sitzen kann und nichts veröffentlicht wird.
 
 ```yaml
 services:
-  hermes-dashboard:
-    build: .
-    container_name: hermes-dashboard
-    network_mode: host
+  hermes:
+    image: nousresearch/hermes-agent:stable
+    container_name: hermes
     restart: unless-stopped
+    network_mode: host
+    command: gateway run
+    volumes:
+      - ~/.hermes:/opt/data
+    environment:
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=127.0.0.1
 ```
 
-`network_mode: host` ist Pflicht, weil das Gateway an `127.0.0.1:8642` bindet – ohne es erreicht der Container das Gateway nicht, auch nicht über `host.docker.internal`.
+Mit `HERMES_DASHBOARD_HOST=127.0.0.1` liegt das Dashboard auf dem Loopback des Hosts unter `http://127.0.0.1:9119`. Die Sperre ist aus, der SSH-Tunnel von oben funktioniert unverändert, und es ist kein Login nötig.
 
-### Mit Caddy im selben Stack
-
-Wenn du Caddy schon in Docker laufen lässt (typisches Setup mit einem externen `web`-Netzwerk), ist der Dashboard-Container mit `network_mode: host` von Caddy aus unter `host.docker.internal:9119` erreichbar. Füge den Caddy-Block wie im [Caddy-Reverse-Proxy-Abschnitt](#schritt-2-reverse-proxy-mit-caddy) oben beschrieben hinzu – keine Änderungen nötig.
-
-### Bauen und starten
+Um es von anderen Maschinen zu erreichen, lass die Zeile weg. Im Container bindet das Dashboard dann standardmäßig `0.0.0.0` (`HERMES_DASHBOARD_PORT` setzt den Port, 9119, wenn nicht geändert). Das ist ein Bind außerhalb von Loopback, die Sperre ist also an, und ohne Anbieter failt das Dashboard beim Start closed. Setze das Passwort im Container und starte ihn dann neu, damit das Dashboard die neuen Credentials liest:
 
 ```bash
-docker compose up -d --build
+docker exec -it hermes hermes dashboard password --username admin
+docker restart hermes
 ```
+
+Die Credentials landen in `/opt/data/config.yaml`, das ist dein eingehängtes `~/.hermes`. Die Doku zeigt auch den schnellen Weg, `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` und `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` als Container-Variablen. Das funktioniert, das Passwort ist dann aber in `docker inspect` sichtbar, ich nutze deshalb den Hash. `HERMES_DASHBOARD_INSECURE` ist auch hier ein No-op.
+
+### Mit Caddy in einem anderen Container
+
+Caddy in Docker kann ein Dashboard auf dem Loopback des Hosts nicht erreichen. Behalte den `0.0.0.0`-Bind im Container und lasse Caddy auf `host.docker.internal:9119` zeigen, füge dann `dashboard.public_url` und `dashboard.trusted_proxies` zu `~/.hermes/config.yaml` hinzu, genau wie im systemd-Weg. Da das Dashboard ein Prozess mit Host-Netzwerk ist, gelten für es auch die iptables-Regeln aus jenem Abschnitt.
 
 ### Prüfen, ob es läuft
 
 ```bash
-sudo docker ps --filter name=hermes-dashboard
-curl -sk -o /dev/null -w "%{http_code}" http://127.0.0.1:9119/
+docker exec hermes hermes dashboard --status
+curl -s http://127.0.0.1:9119/api/status | jq '.auth_required, .auth_providers'
 ```
 
+Die Ausgabe des Dashboards landet in `docker logs hermes`.
+
 <Notice type="warning" title="Host-Networking und Sicherheit">
-<code>network_mode: host</code> heißt, der Container teilt sich den Netzwerk-Stack des Hosts direkt. Der Dashboard-Port ist auf allen Interfaces erreichbar – stell sicher, dass Caddy oder eine Firewall davorsteht, wenn du ihn öffentlich freigibst.
+<code>network_mode: host</code> teilt den Netzwerk-Stack des Hosts mit dem Container. Behalte <code>HERMES_DASHBOARD_HOST=127.0.0.1</code>, außer andere Maschinen müssen das Dashboard erreichen, und wenn sie müssen, setze die Anmeldung und die Firewall-Regeln oder Caddy davor.
 </Notice>
+
+Ein veröffentlichter Port ist eine andere Geschichte. Das `-p 9119:9119` im Bridge-Network-Beispiel der Doku öffnet 9119 auf jedem Host-Interface, und Docker geht an ufw und der INPUT-Kette vorbei, lies also den Guide zu [Docker, das die Firewall umgeht](/docker-bypasses-firewall/), bevor du etwas veröffentlichst.
+
+## Die Webapp: der Desktop-Workspace im Browser
+
+Aktuelle Builds liefern eine zweite Browser-App mit, und die Doku sagt, sie sei nicht das Web Dashboard. `hermes webapp` serviert den Hermes-Desktop-Workspace vom Gateway: Sessions, Profile, Skills, geplante Jobs, Messaging-Einrichtung, den Dateibaum des Hosts, Git-Review, Vorschauen und eine Terminal-Leiste. Settings deckt Provider, Modelle, Tools und MCP-Server ab. Sie ist aus, bis du sie einschaltest:
+
+```bash
+hermes config set webapp.enabled true
+hermes gateway restart
+hermes webapp
+```
+
+Das Gateway serviert sie unter `http://127.0.0.1:9120`. `hermes webapp` baut das Bundle, wenn es veraltet ist, startet das Gateway, falls es nicht läuft, und öffnet einen einmaligen Anmeldelink, der einmal funktioniert, innerhalb von 60 Sekunden. Ein nacktes `http://127.0.0.1:9120` in einem frischen Tab zeigt Anweisungen statt der App; führe `hermes webapp` noch einmal aus, um einen neuen Link zu bekommen. Auf einem headless VPS gibt `hermes webapp --no-open` den Link aus, und ein SSH-Tunnel auf Port 9120 öffnet ihn von deinem Laptop.
+
+| | `hermes dashboard` | `hermes webapp` |
+|---|---|---|
+| Was es ist | Admin-Panel für die Installation | Der Desktop-Workspace im Browser |
+| Serviert von | Seinem eigenen `hermes dashboard`- oder `hermes serve`-Prozess | Dem Gateway |
+| Standardport | 9119 | 9120 |
+| Wo ein Chat läuft | Im eigenen Prozess des Dashboards | Im Gateway, zusammen mit CLI, Desktop und Messaging |
+| Loopback-Zugriff | Kein Login | Einmaliger Link von `hermes webapp` |
+| Anmeldesperre | Bind außerhalb von Loopback oder eine `dashboard.public_url` außerhalb von Loopback | `webapp.host` außerhalb von Loopback oder `webapp.public_url` |
+| Seiten laut Doku | Status, Chat, Config, API Keys, Sessions, Logs, Analytics, Cron, Profiles, Skills, MCP, Webhooks, Pairing, Channels, System | Sessions, profiles, Capabilities, Messaging, Artifacts, scheduled jobs, file tree, Git review, Settings |
+
+Beide nutzen dieselben Anmeldeeinstellungen: `hermes dashboard password` und `hermes dashboard register` funktionieren auch für die Webapp.
+
+Behandle Webapp-Zugriff wie Zugriff auf Hermes auf dem Host. Die Doku sagt, dass ein angemeldeter Webapp-Nutzer beliebige Befehle als das OS-Konto ausführen kann, unter dem Hermes läuft. Hinter einem Reverse Proxy auf derselben Maschine lass `webapp.host` auf Loopback und setze `webapp.public_url` auf die Adresse, die der Proxy serviert; das verlangt dieselbe Anmeldung. Plaines HTTP von einer anderen Maschine kostet auch die Features, die einen sicheren Kontext brauchen (Mikrofon, Zwischenablage, Benachrichtigungen), die über HTTPS oder durch einen SSH-Tunnel zurückkommen. `hermes webapp --status` zeigt, ob das Gateway die Webapp serviert, und unter welcher Adresse.
+
+## Alten Dashboard-Service aufs Gateway umziehen
+
+Hermes installiert nie einen Service für `hermes dashboard` oder `hermes serve`. Läuft einer im Hintergrund auf deinem Host, wurde er von Hand eingerichtet: eine systemd-Unit wie die oben, ein Dashboard-Slot in Docker oder ein Compose-Sidecar, oder ein Desktop-SSH-Backend. v0.23.4 ergänzt einen Befehl, der sie findet und aufs Gateway umzieht.
+
+Der Grund steht in der Docker-Doku: Das Dashboard ist eine zweite Kopie von Hermes neben dem Gateway, und Chats, die darin starten, laufen im eigenen Prozess. Nach dem Umzug serviert die Webapp des Gateways die alte Adresse (gleicher Bind, gleicher Port), und jeder Chat läuft im Gateway, demselben Prozess, den CLI, Desktop und Messaging nutzen. Du hörst auch auf, eine Unit von Hand zu warten.
+
+```bash
+# Report: Supervisor, HERMES_HOME und Ownership jedes alten Backends. Ändert nichts
+hermes gateway migrate --backends --dry-run
+
+# Der Plan und jeder Blocker. Ändert nichts
+hermes gateway migrate --backends --apply --dry-run
+
+# Den Umzug durchführen (fragt am Terminal, außer du übergibst --yes)
+hermes gateway migrate --backends --apply
+
+# Zustand des letzten oder laufenden Laufs
+hermes gateway migrate --backends --status
+
+# Einen abgeschlossenen Umzug rückgängig machen
+hermes gateway migrate --backends --restore
+```
+
+Laut Doku zeichnet `--apply` zuerst den aktuellen Zustand in `backend_migration.json` im Hermes-Home auf, mit Mode-600-Backups von `config.yaml` und `.env`. Dann baut es das Webapp-Bundle, falls es fehlt, und kopiert `HERMES_DASHBOARD_*`-Anmeldeeinstellungen, die nur in der Umgebung der alten Unit existieren, nach `.env`. Es installiert das Gateway als User-Service und versucht, Lingering zu aktivieren. Danach stoppt und deaktiviert es die alte Unit (die Unit-Datei bleibt erhalten), startet das Gateway und prüft jede Adresse innerhalb von 300 Sekunden. Bei einem Fehler wird alles zurückgesetzt, was der Lauf geändert hatte.
+
+| Exit-Code | Bedeutung |
+|---|---|
+| 0 | Erledigt, oder nichts zu migrieren |
+| 2 | Ungültiger Aufruf |
+| 3 | Blockiert: ein laufender Turn, ein zweites Backend für dieses Home, ein Bind oder eine öffentliche URL, die das Gateway ablehnen würde. Nichts geändert, und es werden keine Schritte ausgegeben |
+| 4 | Fehlgeschlagen und zurückgesetzt |
+| 5 | Rollback unvollständig; nummerierte manuelle Schritte werden ausgegeben |
+| 6 | Diese Art von Backend lässt sich nicht automatisch migrieren: Nix, s6 oder ein anderer Container, eine systemd-System-Unit, Windows. Die Schritte von Hand werden ausgegeben |
+
+Die Unit oben ist eine System-Unit (`/etc/systemd/system`, mit `User=`), auf v0.23.4 endet sie also mit Exit 6. Die ausgegebenen Schritte stoppen zuerst das alte Backend. Für eine System-Unit braucht nur `sudo systemctl disable --now hermes-dashboard` Root. Die Schritte installieren, starten oder starten dann das Gateway neu, wie es die `hermes gateway status`-Zeile angibt, und enden mit `hermes webapp --status`. Ein gerade gestartetes Gateway braucht ein paar Sekunden, um die Adresse zu servieren, sagt der letzte Befehl also, das Gateway laufe nicht, warte und führe ihn noch einmal aus.
+
+Die System-Seite des Dashboards bietet denselben Umzug als Karte "Move to a single Hermes". `hermes update` nennt nach einem Update ebenfalls ein altes Backend und gibt den Dry-Run-Befehl aus.
+
+Was sich für Clients nach einem Umzug ändert:
+
+- Eine Adresse, die eine Anmeldung verlangt hat: Jeder Browser und jede App meldet sich noch einmal an, mit demselben Benutzernamen und Passwort oder Anbieter.
+- Eine Loopback-Adresse: kein Session-Token mehr in der Seite. Öffne die Webapp mit `hermes webapp`, das dem Browser einen einmaligen Link gibt.
+- Ein Dashboard-Tab, der über den Umzug offen blieb, läuft noch mit der alten Seite. Lade ihn neu.
+- Der alte `hermes dashboard`- oder `hermes serve`-Befehl verweigert von da an seinen alten Port mit Exit 78. Einen freien Port startet er wie zuvor.
+
+### Systemd-Unit oder Umzug aufs Gateway?
+
+Bei einer frischen v0.23.4-Installation würde ich die handgeschriebene Unit auslassen. Installiere den Gateway-Service (`hermes gateway install`, dann `hermes gateway start`), öffne die Webapp mit `hermes webapp` oder richte Hermes Desktop darauf. Das gibt einen Prozess für jeden Chat, einen Service, den Hermes über Updates hinweg wartet, und eine eingebaute Anmeldung. Der Updater startet handgeschriebene Backends ebenfalls nicht neu: Sie laufen mit dem alten Code weiter, bis es jemand tut.
+
+Behalte ein eigenständiges `hermes dashboard` nur, wenn du seine Admin-Seiten brauchst: den Config-Formular-Editor, Logs, Analytics, Webhooks, Pairing und die Operationen unter System. Die Webapp ist der Desktop-Workspace, die Doku sagt, sie sei nicht das Web Dashboard, und ein Umzug ersetzt das Dashboard an dieser Adresse durch die Webapp. Betrifft das dich, betreibe das Dashboard auf Loopback und erreiche es über den SSH-Tunnel.
+
+Betreibst du die Unit oben schon, führe den Dry Run aus, lies den Plan und zieh um. `--restore` macht einen abgeschlossenen Umzug rückgängig. Es verweigert das, wenn `config.yaml` oder `.env` nach der Migration geändert wurden, weil das Wiederherstellen diese Änderungen verlieren würde.
+
+In Docker läuft der Umzug von Hand. `hermes gateway migrate --backends --apply` endet im Container mit Exit 6, weil Slot und Sidecar vom Image und von der Compose-Datei deklariert werden, die der Befehl nicht bearbeitet. Die Docker-Doku listet die Schritte: Richte die Webapp auf die Adresse des Dashboards (`hermes config set webapp.enabled true`, dann `webapp.host` und `webapp.port 9119`), kopiere die öffentliche Adresse des Dashboards nach `webapp.public_url`, erstelle den Container ohne `HERMES_DASHBOARD` neu und prüfe dann mit `hermes webapp --status`.
+
+## Desktop als Remote-Client
+
+Hermes Desktop kann ein Backend auf einer anderen Maschine steuern: deinen VPS, einen Homeserver oder einen Mini hinter Tailscale. In der App geht das über Settings, Gateways, Remote gateway. Du gibst die Remote-URL ein und meldest dich an, und die Desktop-Shell schaltet auf dieses Backend um. Einen reinen Remote-Download gibt es nicht; installiere das Paket auf deinem Laptop und verbinde dich aus Settings.
+
+Das Remote-Backend ist ein laufender `hermes serve`-Prozess (Standardport 9119), derselbe Server wie `hermes dashboard` ohne Browser-UI:
+
+```bash
+hermes serve --host 0.0.0.0 --port 9119
+```
+
+Ein Bind außerhalb von Loopback schaltet dieselbe Sperre ein, setze also zuerst einen Anbieter (Benutzername und Passwort aus Schritt 1 oben). Desktop erkennt, welchen Anbieter das Backend anbietet: eine Sign-in-Schaltfläche mit Anmeldeformular für Benutzername und Passwort oder Sign in with Nous Research für OAuth. Nach der Anmeldung wird die Session für den Chat-Socket wiederverwendet, und sie überlebt Neustarts, wenn ein Signing-`secret` gesetzt ist. Die Webapp des Gateways füllt nach einem Umzug dieselbe Rolle, und der Add-Flow auf dieser Seite bietet auch SSH- und Hermes-Cloud-Verbindungen an.
+
+Die Doku empfiehlt OAuth (Nous Portal) für jedes Backend, das über deine eigene Maschine hinaus erreichbar ist, und Benutzername und Passwort für ein vertrauenswürdiges LAN oder VPN. Tailscale ist die saubere Option für ein vertrauenswürdiges Netzwerk: Binde an die Tailscale-IP der Maschine und nutze diese Adresse als Remote URL.
+
+```bash
+hermes serve --host <tailscale-ip> --port 9119
+```
+
+Nur Geräte in deinem Tailnet erreichen es, und das Passwort ist das zweite Schloss.
+
+Sagt Desktop, das Backend sei bereit, aber der Chat funktioniert nie, prüfe drei Dinge, in dieser Reihenfolge:
+
+- `curl -s http://<host>:9119/api/status | jq '.auth_required, .auth_providers'` muss `true` ausgeben und den von dir gesetzten Anbieter enthalten. `false` heißt, das Backend liegt auf Loopback.
+- Die eingegebene URL muss das Dashboard über denselben Host erreichen, an den es gebunden ist. Der DNS-Rebinding-Schutz verlangt, dass der `Host`-Header passt.
+- Ein Chat-Socket, der sich mit 4403 schließt, ist an den Request-Guard gescheitert (Host oder Peer passt nicht). 4401 heißt, das WebSocket-Ticket hat sich nicht authentifiziert. Die Logs liegen unter Settings, Gateways, Open logs.
+
+Das Messaging-Gateway (Telegram, Discord und die übrigen) ist ein eigener Prozess neben `hermes serve`. Starte es separat, wenn du Messaging-Kanäle nutzt.
 
 ## Sicherheitsrisiken
 
-Ein AI-Agent-Dashboard ins Internet freizugeben ist nicht dasselbe wie eine statische Website zu hosten. Das musst du verstehen.
+Ein AI-Agent-Dashboard freizugeben ist nicht dasselbe wie eine statische Website zu hosten.
 
 ### Das Dashboard ist eine Control Plane
 
-Jeder mit Zugriff auf das Dashboard kann Sessions ansehen, Gedächtnis-Dateien lesen, API-Keys ändern und die Konfiguration verändern. Es ist keine Read-only-Statusseite – es ist voller administrativer Zugriff auf deinen AI-Agenten.
+Jeder mit Zugriff auf das Dashboard kann Sessions lesen, API-Keys ändern und die Konfiguration verändern. Der Chat-Tab führt den echten Agenten mit seinen Terminal-Tools aus, und die System-Seite kann das Gateway starten und stoppen sowie Shell-Hooks anlegen, die beliebige Befehle ausführen. Es ist voller administrativer Zugriff auf das Nutzerkonto, unter dem Hermes läuft, keine Statusseite. Die Sperre failt closed, und das hat seinen Grund.
 
-### Basic Auth sendet Credentials in Base64
+### Es gibt keinen unauthentifizierten öffentlichen Bind
 
-HTTP Basic Auth kodiert Benutzername und Passwort in Base64 in jedem Request-Header. Ohne HTTPS kann jeder, der dein Netzwerk mitsnifft, sie sofort dekodieren. Caddy liefert automatisches HTTPS mit Let's Encrypt, was das löst – aber nur, wenn du einen echten Domainnamen nutzt, keine rohe IP-Adresse.
+Seit dem Hardening im Juni 2026 tut `--insecure` nichts. Ein Bind außerhalb von Loopback ohne Anbieter verweigert den Start, und eine `dashboard.public_url` außerhalb von Loopback schaltet die Sperre auch bei einem Loopback-Bind ein. Laut Docker-Doku waren unauthentifizierte öffentliche Dashboards der Eintrittspunkt für eine Kampagne im Juni 2026, in der Internetscanner freiliegende Agenten zum Pflanzen einer SSH-Key-Hintertür trieben. Ist deine Installation älter als v0.23.2 (16. November 2026), aktualisiere zuerst: Dieses Release behob ein Problem mit dem Schweregrad High, CVE-2026-130164, in den Docker- und SSH-Terminal-Backends von Bot Desktop.
 
-<Notice type="error" title="Nie ohne HTTPS freigeben">
-Betreibe das Dashboard auf Port 9119 mit <code>--host 0.0.0.0</code> nicht ohne einen TLS-terminierenden Reverse Proxy davor. Basic Auth über schlichtes HTTP ist praktisch gar keine Auth.
+### Benutzername und Passwort sind für vertrauenswürdige Netzwerke
+
+Der `basic`-Anbieter schützt ein gemeinsames Credential, ohne zweiten Faktor und ohne Konten pro Nutzer. Die Login-Route ist pro Client-IP rate-limitiert (10 Versuche pro Minute, danach 429) und gibt unbekannten Nutzern und falschen Passwörtern dieselbe generische 401. Das schreckt vom Raten ab. Es ist keine Verteidigung für einen öffentlichen Host, deshalb verweist die Doku Installationen im Internet auf Nous Portal oder selbst gehostetes OIDC.
+
+### Sessions
+
+Ein Login hält standardmäßig 12 Stunden (`dashboard.basic_auth.session_ttl_seconds`, 43200). Eine Änderung von Benutzername oder Passwort beendet jede Session. Setze ein explizites Signing-`secret`, das `hermes dashboard password` für dich erledigt: Ohne eins wird pro Prozess ein zufälliger Key erzeugt, und jeder Neustart meldet alle aus. Jeder Login-Start, Erfolg und Fehlschlag ist eine JSON-Zeile in `~/.hermes/logs/dashboard-auth.log`, mit geschwärzten Tokens und Codes. Beobachte diese Datei auf einem öffentlichen Host.
+
+<Notice type="error" title="Das Login nie über plaines HTTP ausliefern">
+Das Passwort reist im Request, der an <code>/auth/password-login</code> posted. Über plaines HTTP kann jeder, der diesen Traffic mitliest, das Passwort lesen. Caddys automatisches HTTPS braucht einen echten Domainnamen; eine rohe IP-Adresse bekommt kein öffentliches Zertifikat. Andernfalls bleib auf Loopback und nutze einen Tunnel.
 </Notice>
 
-### Credential-Speicherung im Browser
+### Ein vertrauenswürdiger Proxy ist Teil der Sicherheits-Einrichtung
 
-Sobald du dich über Basic Auth eingeloggt hast, cachen die meisten Browser die Credentials und senden sie automatisch bei jedem Request an diese Domain. Wenn jemand Zugriff auf deine Browser-Session bekommt (geteilter Computer, Browser-Exploit), hat er freien Zugriff auf das Dashboard.
+Hinter Caddy entscheiden zwei Einstellungen, ob das Session-Cookie `Secure` bekommt und ob jeder Client sein eigenes Rate-Limit-Bucket bekommt: `dashboard.public_url` (der eine Hostname, der als `Host` und WebSocket-`Origin` akzeptiert wird) und `dashboard.trusted_proxies` (die Peers, die `X-Forwarded-Proto` und `X-Forwarded-For` setzen dürfen). Hermes lehnt `*`, `0.0.0.0/0` und `::/0` ab, und ein vertrauenswürdiges Netzwerk heißt, dass jeder Container darin diese Header liefern kann. Liste die exakte IP des Proxys oder ein CIDR für ein Netzwerk, das nur der Proxy nutzt.
 
-### Standardmäßig kein Rate-Limiting
+### Ein handgeschriebener Service läuft nach Updates mit altem Code
 
-Weder das Dashboard noch Basic Auth bringen Brute-Force-Schutz mit. Ein Angreifer kann Tausende Passwörter pro Minute probieren. Ziehe fail2ban-Regeln für deine Reverse-Proxy-Logs in Betracht, oder nutze Caddys `forward_auth` mit einem robusteren Auth-Provider, wenn du das brauchst.
+`hermes update` schreibt die Service-Definition des Gateways neu und startet sie neu. Der Updater lässt manuell gestartete `hermes serve`- und `hermes dashboard`-Backends laufen und bittet ihren Besitzer, sie neu zu starten. Bis jemand es tut, serviert das Backend die vorherige Version. Starte es nach jedem Update neu oder zieh es aufs Gateway um.
 
 ### IP-Allowlisting hilft
 
@@ -462,27 +741,22 @@ hermes.yourdomain.com {
     @blocked not remote_ip YOUR_IP_ADDRESS/32
     respond @blocked "Forbidden" 403
 
-    basic_auth {
-        yourusername $2a$14$...
-    }
     reverse_proxy host.docker.internal:9119
 }
 ```
-
-### Das Dashboard spricht mit dem Gateway
-
-Das Dashboard kommuniziert mit der Hermes-Gateway-API auf `127.0.0.1:8642`. Wenn jemand das Dashboard kompromittiert, hat er auch indirekten Zugriff auf das Gateway – das den Agenten steuert, der Terminal-Befehle auf deinem Server ausführen kann. Behandle das Dashboard als privilegierte Fläche, nicht als Komfort-Feature.
 
 ### Risiken im Überblick
 
 | Risiko | Schweregrad | Maßnahme |
 |---|---|---|
-| Dashboard ohne HTTPS freigegeben | Kritisch | Immer Caddy mit TLS nutzen |
-| Port 9119 offen ins Internet | Kritisch | Mit iptables blockieren (siehe oben) |
-| Schwaches oder wiederverwendetes Passwort | Hoch | Ein starkes Zufallspasswort erzeugen |
-| Kein Brute-Force-Schutz | Mittel | fail2ban oder IP-Allowlisting hinzufügen |
-| Browser cacht Zugangsdaten | Mittel | Privates Surfen auf geteilten Maschinen nutzen |
-| Dashboard gibt Gateway-Zugriff | Hoch | IP-Einschränkung + starke Auth + Logs überwachen |
+| Dashboard ohne HTTPS freigegeben | Kritisch | Caddy mit TLS auf einer echten Domain oder ein SSH-Tunnel |
+| Benutzername und Passwort im öffentlichen Internet | Hoch | Nous Portal oder selbst gehostetes OIDC |
+| Port 9119 offen ins Internet | Hoch | Mit iptables oder ufw blockieren; die Sperre ist keine Firewall |
+| Dashboard gibt Agenten- und Shell-Zugriff | Hoch | Firewall, starke Anmeldung und `logs/dashboard-auth.log` beobachten |
+| Kein Signing-Secret gesetzt | Mittel | `hermes dashboard password` schreibt eins |
+| Altes Backend läuft nach `hermes update` weiter | Mittel | Neu starten oder aufs Gateway umziehen |
+| Geteilte Maschine mit laufender Session | Mittel | In der Seitenleiste abmelden; `session_ttl_seconds` senken |
+| Ein Rate-Limit-Bucket hinter einem Proxy | Niedrig | Den Proxy in `dashboard.trusted_proxies` eintragen |
 
 ## Kurzreferenz
 
@@ -494,22 +768,65 @@ hermes dashboard
 ssh -L 9119:127.0.0.1:9119 user@your-vps-ip
 # Danach http://127.0.0.1:9119 im Laptop-Browser öffnen
 
-# Remote-Zugriff (an alle Interfaces binden)
-hermes dashboard --host 0.0.0.0
+# Anmeldung vor jedem Bind außerhalb von Loopback setzen
+hermes dashboard password --username admin
 
-# Eigener Port
-hermes dashboard --host 0.0.0.0 --port 3000
+# Vertrauenswürdiges Netzwerk: binden, dann die Sperre prüfen
+hermes dashboard --host 0.0.0.0 --port 9119 --no-open
+curl -s http://127.0.0.1:9119/api/status | jq '.auth_required, .auth_providers'
+
+# Öffentlicher Host: Nous-Portal-Login
+hermes dashboard register --redirect-uri https://hermes.yourdomain.com/auth/callback
+
+# Welcher Dashboard- oder serve-Prozess läuft
+hermes dashboard --status
+
+# Webapp (Desktop-Workspace, Port 9120)
+hermes config set webapp.enabled true
+hermes gateway restart
+hermes webapp
+
+# Alter Dashboard- oder serve-Service: Report, Plan, Umzug
+hermes gateway migrate --backends --dry-run
+hermes gateway migrate --backends --apply --dry-run
+hermes gateway migrate --backends --apply
+
+# Headless-Backend für Hermes Desktop
+hermes serve --host 0.0.0.0 --port 9119
 
 # Mit systemd (dauerhaft)
 sudo systemctl start hermes-dashboard
 
-# Mit Docker
-docker compose up -d --build
-
-# Prüfen, ob das Dashboard läuft
+# Prüfen, ob es läuft
 curl -sk -o /dev/null -w "%{http_code}" https://hermes.yourdomain.com/
 ```
 
-Für mehr zu Hermes-Agent-Setup, Messaging-Integration und Skills sieh dir den [Hermes-Agent-Setup-Guide](/hermes-agent-setup-guide/) und den [MIMO-V2-Pro-Integrations-Guide](/hermes-agent-mimo-v2-pro/) an. Für die besten Drittanbieter-Dashboards und Web-UIs jenseits des eingebauten Dashboards findest du alles im Vergleich der [besten Hermes-Dashboards](/de/beste-hermes-dashboards/). Für bezahlbare Modell-Empfehlungen für Hermes Agent sieh dir den Guide zu den [besten günstigen Modellen für Hermes Agent](/de/guenstige-hermes-agent-modelle/) an. Für strukturiertes Multi-Agent-Task-Management mit visuellen Boards behandelt die [Hermes-Kanban-Einrichtung](/de/hermes-kanban-einrichten/) Kanban-Task-Boards, Abhängigkeiten und Koordinationsmuster.
+Für Hermes-Agent-Setup, Messaging, Skills und Bot Mode sieh dir den [Hermes-Agent-Setup-Guide](/hermes-agent-setup-guide/) an. Für Drittanbieter-Dashboards, Web-UIs, Desktop-Apps und mobile Apps jenseits der eingebauten findest du alles im Vergleich der [besten Hermes-Dashboards](/de/beste-hermes-dashboards/). Für bezahlbare Modell-Empfehlungen sieh dir den Guide zu den [besten günstigen Modellen für Hermes Agent](/de/guenstige-hermes-agent-modelle/) an, für die kostenlosen Modelle auf dem Nous Portal den [Nous-Portal-Guide](/hermes-agent-mimo-v2-pro/). Für strukturiertes Multi-Agent-Task-Management behandelt die [Hermes-Kanban-Einrichtung](/de/hermes-kanban-einrichten/) Kanban-Task-Boards, Abhängigkeiten und Koordinationsmuster.
 
-<Button text="Mehr KI-Tool-Guides" link="/de/categories/ai/" variant="solid" color="blue" size="md" icon="arrow-right" iconPosition="right" />
+<Button text="Mehr KI-Tool-Guides" link="/categories/ai/" variant="solid" color="blue" size="md" icon="arrow-right" iconPosition="right" />
+
+## FAQ
+
+<Accordion label="Warum verweigert hermes dashboard den Start auf 0.0.0.0?" group="faq" expanded="true">
+Seit dem Hardening im Juni 2026 schaltet jeder Bind außer `127.0.0.1`, `::1` oder `localhost` die Anmeldesperre ein, und der Server failt closed, wenn kein Anbieter registriert ist. `--insecure` ist ein veralteter No-op. Führe zuerst `hermes dashboard password --username admin` aus oder registriere Nous Portal mit `hermes dashboard register`. Um es lokal zu halten, lass den Standard-Bind und öffne es durch einen SSH-Tunnel.
+</Accordion>
+
+<Accordion label="Wie setze ich das Dashboard-Passwort ohne Terminal?" group="faq">
+Pipe es hinein: `hermes dashboard password --username admin --password-stdin < /run/secrets/dashboard_password`. Nur die erste Zeile zählt, höchstens 1024 Bytes, und die Standardeingabe muss eine Pipe oder eine Datei sein; an einem Terminal endet der Befehl mit Exit 2. Das kam mit v0.23.4. Jeder Listener liest die Credentials beim Start, starte also danach das Dashboard oder das Gateway neu.
+</Accordion>
+
+<Accordion label="Schaltet dashboard.public_url die Anmeldung auch auf 127.0.0.1 ein?" group="faq">
+Ja. Eine `dashboard.public_url` außerhalb von Loopback schaltet die Sperre immer ein, auch wenn das Backend an Loopback bindet. Das ist Absicht: Ein Loopback-Dashboard legt ein Session-Token in jede Seite, die es ausliefert, und ohne die Sperre würde der Proxy aus diesem Token ein Remote-Login machen. Der Hostname in `public_url` ist zugleich der Wert, der als `Host` und WebSocket-`Origin` akzeptiert wird, und `dashboard.trusted_proxies` listet, wer `X-Forwarded-Proto` und `X-Forwarded-For` setzen darf.
+</Accordion>
+
+<Accordion label="Was ist der Unterschied zwischen hermes webapp und hermes dashboard?" group="faq">
+`hermes dashboard` ist das Admin-Panel: Config-Formulare, API Keys, Logs, Analytics, MCP und System. Es läuft als eigener Prozess auf Port 9119, und ein dort gestarteter Chat läuft in diesem Prozess. `hermes webapp` ist der Hermes-Desktop-Workspace, den das Gateway auf Port 9120 serviert, betreten über einen einmaligen Link, und seine Chats laufen im Gateway. Die Doku sagt es deutlich: Die Webapp ist nicht das Web Dashboard.
+</Accordion>
+
+<Accordion label="Wie ziehe ich einen alten hermes dashboard- oder hermes serve-Service um?" group="faq">
+Führe `hermes gateway migrate --backends --dry-run` für einen Report aus, dann `hermes gateway migrate --backends --apply --dry-run` für den Plan, dann `hermes gateway migrate --backends --apply` für den Umzug. Die alte Adresse wird danach von der Webapp des Gateways serviert, und `hermes gateway migrate --backends --restore` macht es rückgängig. Exit 6 heißt, das Backend lässt sich nicht automatisch umziehen, dazu gehört eine systemd-System-Unit; der Befehl gibt die Schritte von Hand aus.
+</Accordion>
+
+<Accordion label="Kann ich Bot Mode gegen einen VPS nutzen?" group="faq">
+Ja, über Hermes Desktop. Bot Mode ist in die Desktop-App eingebaut, führe sie also auf deinem Laptop aus und füge den VPS unter Settings, Gateways, Remote gateway hinzu (ein `hermes serve`-Backend mit Anmeldeanbieter) oder über SSH. Bots sind Profile auf dem VPS, von dessen Gateway betreute Gruppenchats laufen weiter, wenn du Desktop schließt, und Routinen sind Cron-Jobs, die in `hermes cron list` und auf der Cron-Seite des Dashboards erscheinen. Der [Hermes-Agent-Setup-Guide](/hermes-agent-setup-guide/) hat die vollständige Anleitung.
+</Accordion>

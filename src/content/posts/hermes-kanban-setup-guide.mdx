@@ -1,7 +1,7 @@
 ---
 date: 2026-05-04
 translationKey: "hermes-kanban-setup-guide"
-lastmod: 2026-11-21T00:00:00Z
+lastmod: 2026-11-27T00:00:00Z
 title: "Hermes Kanban Setup Guide: Multi-Agent Task Boards (2026)"
 meta_title: "Hermes Kanban Setup Guide (2026): Multi-Agent Task Boards"
 description: "Set up Hermes Kanban, the SQLite task board for multi-agent AI workflows. Covers the gateway dispatcher, boards, worker lanes, CLI commands, and dashboards."
@@ -21,9 +21,9 @@ import Tabs from '@components/widgets/Tabs.astro';
 import Tab from '@components/widgets/Tab.astro';
 import ListCheck from '@components/widgets/ListCheck.astro';
 
-Hermes Kanban is a durable, SQLite-backed task board built into [Hermes Agent](/hermes-agent-setup-guide/) for coordinating multi-agent AI workflows. Instead of pushing everything through chat, Kanban gives you a structured board. Think Jira or Trello, but designed for AI agents working together. You plan work as cards, assign them to named agent profiles, and watch a dispatcher spawn workers that pick up, execute, and report back through a proper lifecycle. The board is visible from the built-in [dashboard](/hermes-dashboard-guide/) and third-party [Hermes dashboards and mobile apps](/best-hermes-dashboards/).
+Hermes Kanban is the SQLite-backed task board built into [Hermes Agent](/hermes-agent-setup-guide/) for multi-agent workflows, where cards are assigned to named profiles and the gateway's dispatcher spawns each assignee as a worker. Instead of pushing everything through chat, Kanban gives you a structured board. Think Jira or Trello, but designed for AI agents working together. Workers pick up cards, execute them, and report back through the board's lifecycle. The board is visible from the built-in [dashboard](/hermes-dashboard-guide/) and third-party [Hermes dashboards and mobile apps](/best-hermes-dashboards/).
 
-This guide covers setup against the current release (v0.23.x), the CLI command surface, the dispatcher and worker model, practical multi-agent workflow patterns, cost controls, and the troubleshooting ladder you'll need.
+Everything below is written against the current release (v0.23.x): setup, the CLI command surface, the dispatcher and worker model, multi-agent workflow patterns, cost controls, and the troubleshooting ladder.
 
 ![Hermes Kanban setup architecture: SQLite task board, gateway dispatcher, and multi-agent workers](../../assets/images/25/05/hermes-kanban-setup-guide.svg)
 
@@ -36,32 +36,37 @@ Hermes Kanban is a **SQLite-backed task management system** that runs alongside 
 - **Durable event history**: every state change (created, promoted, claimed, completed, blocked, …) is logged with timestamps and agent IDs in SQLite
 - **Dashboard integration**: drag-and-drop, worker logs, and live updates in the bundled Kanban plugin and third-party dashboards
 
-Under the hood, the board tracks a richer status set than the six dashboard columns: `triage | todo | scheduled | ready | running | blocked | review | done | archived`. The `review` and `scheduled` states live in the state machine and in the workflow definition as locked, non-drag columns (`review` needs a reviewer, `scheduled` needs a wake time). The v0.22.0 release notes put it as "one workflow definition drives columns": the visible set follows your workflow config.
+Under the hood, the board tracks a richer status set than the six dashboard columns: `triage | todo | scheduled | ready | running | blocked | review | done | archived`. The `review` and `scheduled` states live in the state machine and in the workflow definition as locked, non-drag columns. `review` needs a reviewer, and `scheduled` holds cards parked by `hermes kanban schedule`. The v0.22.0 release notes put it as "one workflow definition drives columns": the visible set follows your workflow config.
 
 Multi-project boards landed with the durable Kanban release. The default board lives at `~/.hermes/kanban.db`. Additional boards live at `~/.hermes/kanban/boards/<slug>/kanban.db` with their own `workspaces/` and `logs/` directories (absolute isolation between boards). Workers only see their board via the `HERMES_KANBAN_BOARD` environment variable; cross-board task links are forbidden.
 
 <Notice type="info" title="Version history">
-Kanban first appeared in v2026.4.30 but was reverted immediately. The durable reimplementation shipped in **v2026.5.7** ("Tenacity Release") and has since grown across 100+ PRs into a real multi-agent platform. The current stable release is **v0.23.3** (2026-11-20). Check your version with `hermes --version` and update with `hermes update` if you're behind.
+Kanban first appeared in v2026.4.30 but was reverted immediately. The durable reimplementation shipped in **v2026.5.7** ("Tenacity Release") and has since grown across 100+ PRs. The current stable release is **v0.23.4** (2026-11-23). Check your version with `hermes --version` and update with `hermes update`. Anything older than v0.23.2 (2026-11-16) is missing the fix for GHSA-p22p-9ph6-gmrh, so update first if you run Bot Desktop inside a `docker` or `ssh` terminal backend.
 </Notice>
 
-## Kanban vs delegate_task: when to use which
+## Should you use Kanban, delegate_task or Bot Mode?
 
-This is the question every Hermes user hits once they discover both features. The short version: `delegate_task` is a function call, Kanban is a work queue where every handoff is a row any profile (or human) can see and edit.
+The short version: `delegate_task` is a function call inside one conversation, a Bot Mode group chat is a conversation between profiles, and Kanban is a work queue where every handoff is a row any profile (or human) can see and edit. The Kanban docs compare only the first and the third; the Bot Mode column below is my reading of the two pages side by side.
 
 <Accordion label="Quick comparison" group="comparison" expanded="true">
 
-| | `delegate_task` | Kanban |
-|---|---|---|
-| **Shape** | RPC call (fork → join) | Durable message queue + state machine |
-| **Parent** | Blocks until child returns | Fire-and-forget after `create` |
-| **Child identity** | Anonymous subagent | Named profile with persistent memory |
-| **Resumability** | None (failed = failed) | Block → unblock → re-run; crash → reclaim |
-| **Human in the loop** | Not supported | Comment / unblock at any point |
-| **Agents per task** | One call = one subagent | N agents over the task's life (retry, review, follow-up) |
-| **Audit trail** | Lost on context compression | Durable SQLite rows |
-| **Coordination** | Hierarchical | Peer (any profile reads/writes any task) |
+| | `delegate_task` | Bot Mode group chat or DM | Kanban |
+|---|---|---|---|
+| **Shape** | Tool call that runs a child inside the calling session | Chat turns between 2 to 6 Bots, or `message_agent` between two Bots | Durable message queue + state machine |
+| **What comes back** | A handle at once, the result as a later message (one-shot runs, cron jobs and Kanban workers wait in the call) | Replies in the room, or `status: queued` and later one outcome line per target | A task id at once; completion and block events go to the subscribed chat, and the result's `subscribed` flag says whether yours is one |
+| **Who does the work** | Anonymous subagent on a fresh conversation | Named Bots, each a profile with its own memory and model | Dispatcher spawns the named profile as a full OS process |
+| **After a restart** | Continuable with `action="continue"` (durable record in the profile's `state.db`, v0.23.2+); automatic resume is opt-in | The room log survives on a gateway-owned room; a crashed delivery turn is not automatically replayed | Crash → reclaim; block → unblock → re-run |
+| **Human in the loop** | The child cannot ask questions; you can steer or stop it while it runs | `@user` pulls you into the discussion | Comment / unblock at any point |
+| **Audit trail** | Child transcript stored as a session under the parent's | Room transcript plus each member's own room session | Rows in SQLite until the task is deleted |
+| **What stops a runaway** | Child execution is process-local to its owner | `gateway.bot_loop_guard.max_hops` (default 4) | Failure limit, protocol-violation budget, `--max-runtime` |
 
 </Accordion>
+
+**Bot Mode is a conversation, not a queue.** It is a desktop roster over profiles. Every Bot is a profile, so `hermes -p <bot> chat` opens the same agent. A group chat holds 2 to 6 Bots, and one message from you triggers up to three serial rounds of member turns, capped at 10 messages per send. Each member keeps its own persistent room session, and on a gateway-owned room the log outlives Desktop. What the room does not have is a task: nothing in it carries a status, an assignee, a retry count or a worker the dispatcher will respawn. When the rounds run out, the work stops with them. A direct message between two Bots is thinner still. `message_agent` returns `status: queued`, which means handed over, not answered, and the receiving Bot reads it on its next turn. Setup lives in the [Hermes Agent setup guide](/hermes-agent-setup-guide/).
+
+One footgun for VPS readers: `message_agent` exists only in a canonical Bot Chat, and on a headless install nothing writes the markers that create one. The desktop app does. Without it you are editing the Bot's `profile.yaml` and creating the `Bot Chat` session by hand (the Bot Mode docs give the recipe), or you use Kanban, which needs none of that.
+
+**`delegate_task` children survive a restart.** The child is still an anonymous subagent on a fresh conversation. Since v0.23.2 (November 16, 2026) every child also keeps a durable record in the profile's `state.db`, so `continue` works after a gateway restart, a hard kill or a PC crash. Hermes stores each child's transcript as a session under the parent's. Resuming children on its own is opt-in for the gateway (`delegation.auto_resume`), and it never resumes children nested under a Kanban worker.
 
 **Use Kanban when:**
 
@@ -73,11 +78,19 @@ This is the question every Hermes user hits once they discover both features. Th
 **Use `delegate_task` when:**
 
 - You need a quick answer or a single self-contained piece of work
-- No follow-up or tracking is needed
+- The result belongs in the parent's own context and can die with the session
+- No other profile or person has to pick it up
 - You're mid-conversation and want to keep momentum
 
+**Use Bot Mode (a group chat, a Bot DM or a routine) when:**
+
+- You want two to six specialists to argue a decision while you read along
+- The output is a short answer that belongs in a conversation, not a deliverable
+- The work is a recurring check for one specialist. That is a routine, a plain Hermes cron job named `[bot:<name>] <routine>` that shows in `hermes cron list`, with runs landing in the Bot's chat history
+- You work in the desktop app. A headless VPS has no roster UI; run Desktop on your laptop against the VPS backend
+
 <Notice type="info" title="They work together">
-Kanban is the planning layer; `delegate_task` is one execution mechanism among several. Workers drive the board through `kanban_*` tools (`kanban_complete`, `kanban_request_review`, `kanban_block`), not through shelling out to `hermes kanban`. You can also use `delegate_task` to hand off a quick sub-piece of a Kanban card without creating a new board entry.
+Kanban is the planning layer; `delegate_task` is one execution mechanism among several. Workers drive the board through `kanban_*` tools (`kanban_complete`, `kanban_request_review`, `kanban_block`), not through shelling out to `hermes kanban`. A worker can `delegate_task` a sub-piece of its own card without creating a board entry: the child runs under that worker, counts against `delegation.max_concurrent_children`, and ends with the worker. If the gateway goes down mid-child, it retires the child and never resumes it. Work that must outlive the gateway, or needs its own reviewer, goes in a child card.
 </Notice>
 
 <Notice type="warning" title="Link deadlock">
@@ -161,7 +174,7 @@ hermes kanban boards import backup.tar.gz     # always lands as a NEW board
 hermes kanban --board default list            # operate on another board without switching
 ```
 
-Board slugs are lowercase alphanumeric plus hyphen/underscore, 1-64 characters. Board resolution order: `--board` flag → `HERMES_KANBAN_BOARD` env → `~/.hermes/kanban/current` → `default`. Export strips claims, PIDs, and notification subscriptions; it's a clean portable archive.
+Board slugs are lowercase alphanumeric plus `-` and `_`, 1 to 64 characters. Board resolution order: `--board` flag → `HERMES_KANBAN_BOARD` env → `~/.hermes/kanban/current` → `default`. Export strips claims, PIDs, and notification subscriptions; it's a clean portable archive.
 
 **Verify:** `hermes kanban boards list` shows your new board; `boards show` confirms it's the current one after `switch`.
 
@@ -195,8 +208,7 @@ hermes kanban create "Implement auth endpoints" --assignee coder --parent "$SCHE
 # Workspaces: scratch (default, deleted on completion) | worktree | dir:<abs path>
 hermes kanban create "Refactor billing" --assignee coder --workspace worktree --branch wt/billing
 
-# Scheduling and idempotency
-hermes kanban create "Nightly backup audit" --assignee ops --scheduled-at "2026-12-01T03:00:00Z"
+# Idempotency: a re-run with the same key returns the existing card id
 hermes kanban create "Weekly report" --assignee ops --idempotency-key "report-$(date -u +%Y-%V)"
 
 # Runtime caps and model pinning
@@ -235,10 +247,10 @@ hermes kanban promote t_abc                   # todo/blocked -> ready (recovery)
 hermes kanban archive t_abc t_def             # bulk verbs take multiple ids
 hermes kanban comment t_abc "use the 2026 schema" --author user
 hermes kanban edit t_abc --title "new title" --body "updated" --priority 5
-hermes kanban schedule t_abc --at "2026-12-01T03:00:00Z"
+hermes kanban schedule t_abc "waiting on the DNS cut-over"   # parks it in scheduled; unblock returns it to ready
 ```
 
-The dispatcher drives the core transitions: it claims `ready` cards, spawns the assignee profile as a worker, and each run must end in exactly one lifecycle call: `kanban_complete` → `done`, `kanban_request_review` → `review`, or `kanban_block` → `blocked`. If the worker exits without one, the kernel records `crashed`/`gave_up`/`timed_out`/`protocol_violation`. Reviewers approve with `kanban_complete` or send back with `kanban_request_changes`. Dependency gating: `link` + the dispatcher's `promoted` event moves `todo → ready` when all parents are `done`. `unblock` lands on `review`/`ready`/`todo` depending on provenance, never `triage` directly.
+The dispatcher claims `ready` cards and spawns the assignee profile as a worker. Each run must end in exactly one lifecycle call: `kanban_complete` → `done`, `kanban_request_review` → `review`, or `kanban_block` → `blocked`. If the worker exits without one, the kernel records `crashed`/`gave_up`/`timed_out`/`protocol_violation`. Reviewers approve with `kanban_complete` or send back with `kanban_request_changes`. Dependency gating: `link` + the dispatcher's `promoted` event moves `todo → ready` when all parents are `done`. `unblock` lands on `review`/`ready`/`todo` depending on provenance, never `triage` directly.
 
 <Notice type="info" title="Drag-and-drop counts too">
 The dashboard's drag-and-drop writes `status` events directly to the board. So "moving" a card exists in the UI; the CLI just uses more precise verbs.
@@ -282,10 +294,10 @@ Workers get environment variables (`HERMES_KANBAN_TASK`, `HERMES_KANBAN_DB`, `HE
 
 For chat/orchestrator profiles that need board access outside of dispatched runs, opt in: `hermes -p planner tools enable kanban` (optionally `--platform telegram`). Note: `delegate_task` children never get board-mutation rights.
 
-Key lifecycle numbers:
+Lifecycle numbers:
 
-- **Claim TTL: 900 s** (15 min). Live workers get claims extended automatically; only dead PIDs are reclaimed.
-- **Stale timeout: 4 h.** Workers on long operations must call `kanban_heartbeat` at least hourly or they get reaped.
+- **Claim TTL: 900 s** (15 min). Live workers get their claims extended automatically; the dispatcher reclaims only dead PIDs.
+- **Stale timeout: 4 h.** Workers on long operations must call `kanban_heartbeat` at least hourly or the dispatcher reaps them.
 - **Failure limit: 2** (configurable via `kanban.failure_limit`, per-task override with `--max-retries`). Trips the breaker → card auto-blocks with `gave_up`.
 - **Protocol-violation budget: 3** consecutive exits without a lifecycle call.
 - **Respawn guard** prevents worker storms after quota walls (`blocker_auth`), fresh success (`recent_success`), open PR comments (`active_pr`), rate-limit cooldowns (300 s), or infrastructure cooldowns.
@@ -345,7 +357,7 @@ hermes kanban swarm "Multi-region failover plan" \
   --verifier reviewer --synthesizer writer
 ```
 
-**Goal mode** (`--goal`, `--goal-max-turns N`, default 20) creates a card that loops against its own title/body as acceptance criteria (a Ralph-loop judge). If the budget is exhausted, the card goes to `blocked` for human review. Unachievable goals refuse completion. This replaces the old "run up to 3 iterations" configs. Goal mode burns turns, so set `--goal-max-turns` conservatively.
+**Goal mode** (`--goal`, `--goal-max-turns N`, default 20) creates a card that loops against its own title/body as acceptance criteria (a Ralph-loop judge). If the budget runs out, the card goes to `blocked` for human review. Unachievable goals refuse completion. This replaces the old "run up to 3 iterations" configs. Goal mode burns turns, so keep `--goal-max-turns` low.
 
 There is no `save-template` / `create-board --template`. For recurring project shapes, use workflow templates (`--workflow-template-id`/`--step-key` filters, v0.22.0+) and `boards export`/`import` to clone board structures.
 
@@ -383,7 +395,7 @@ hermes kanban assignees
 </Tab>
 <Tab name="Dashboard">
 
-The bundled Kanban plugin on `hermes dashboard` (http://127.0.0.1:9119) is the guaranteed view: it ships with the gateway and the Desktop app. Features include:
+The bundled Kanban plugin on `hermes dashboard` (http://127.0.0.1:9119) is the guaranteed view: it ships with the gateway and the Desktop app. It has:
 
 - **Board switcher** with New board / Settings / Project binding / Archive
 - **Drag-and-drop** with a trash drop zone for bulk delete
@@ -429,12 +441,12 @@ The `/kanban` slash command exposes every board verb from messaging platforms an
 Some links below are affiliate links; they support the blog at no extra cost to you.
 </Notice>
 
-**Cost strategy: frontier orchestrator, cheap workers.** The orchestrator/planning profile benefits from a strong model. Workers don't need frontier models. Free options like MiMo v2 Pro on the Nous Portal ([our MiMo v2 Pro guide](/hermes-agent-mimo-v2-pro/)) or cheap providers such as [MiMo models](https://go.bitdoze.com/mimo) keep per-card cost near zero. Configure per-worker models in `~/.hermes/profiles/<name>/config.yaml`, or pin individual cards with `--model`/`--provider` or `hermes kanban set-model`. For more options, see [cheap models for Hermes Agent](/best-cheap-models-hermes-agent/).
+**Cost strategy: frontier orchestrator, cheap workers.** The orchestrator/planning profile benefits from a strong model. Workers don't need frontier models. The free models on the Nous Portal rotate, so take the current list from [our Nous Portal guide](/hermes-agent-mimo-v2-pro/) before you build a worker on one. Cheap paid options such as [MiMo models](https://go.bitdoze.com/mimo) keep per-card cost near zero. Configure per-worker models in `~/.hermes/profiles/<name>/config.yaml`, or pin individual cards with `--model`/`--provider` or `hermes kanban set-model`. For more options, see [cheap models for Hermes Agent](/best-cheap-models-hermes-agent/).
 
 **Protect the host.** Workers are real OS processes. On a small VPS or with local LLMs, set `max_in_progress: 2` to cap concurrent spawns. Don't run prod agents on a 1-vCPU/1 GB box. 2 vCPU / 2-4 GB is the practical floor for gateway + dashboard + 2-3 workers. The whole stack fits on an affordable [Hetzner Cloud VPS](https://go.bitdoze.com/hetzner). Entry-level class is enough for 2-3 concurrent workers.
 
-<Notice type="warning" title="Single-host only">
-Kanban is single-host by design: SQLite file + host-local PIDs. Sharing one `kanban.db` across two hosts is unsupported. If you mount one board in multiple homes, you need `dispatch_profiles` per home and unique profile names: `default` collides by construction.
+<Notice type="warning" title="Single host, one dispatcher per board">
+Kanban state is a SQLite file plus host-local worker PIDs, and the docs keep it single-host. Two hosts sharing one `kanban.db` is out of scope, because crash detection assumes PIDs are host-local. What does work is several Hermes homes on one host (containers, say) mounting the same board. Profile names are home-local and every home has a `default` profile, so `default` collides by construction. Give each home unique profile names and never assign cards to `default` on a shared board, or set `kanban.dispatch_profiles` per home. Anything else lands in the dispatcher's `skipped_nonspawnable` bucket instead of spawning. Exactly one gateway runs the dispatcher: `kanban.dispatch_in_gateway: true` there, `false` on every other gateway.
 </Notice>
 
 **Ops hygiene:**
@@ -456,9 +468,9 @@ Kanban is single-host by design: SQLite file + host-local PIDs. Sharing one `kan
 </ul>
 </ListCheck>
 
-## Troubleshooting: when a card won't move
+## Why won't my Kanban card move?
 
-Start with `hermes kanban diagnostics` and `hermes kanban dispatch --dry-run`; they usually name the problem. Then walk this ladder:
+Check the gateway first and the assignee second: without a gateway tick no dispatcher claims a `ready` card, and an assignee that is not a real profile stays `ready` with a `skipped_nonspawnable` event. Start with `hermes kanban diagnostics` and `hermes kanban dispatch --dry-run`; they usually name the problem. Then walk this ladder:
 
 <Accordion label="Kanban commands not found" group="faq">
 
@@ -505,7 +517,7 @@ Refresh the page. The bundled Kanban plugin lives on `hermes dashboard` (port 91
 
 ## What's next
 
-Start simple: one board, a handful of cards, one or two worker profiles. Get the dispatcher loop reliable before scaling to swarms and goal mode. The full surface is bigger than most guides show: goal mode, swarms, PR completion contracts, worktrees, and the diagnostics layer are worth exploring once the basics are solid.
+Start simple: one board, a handful of cards, one or two worker profiles. Get the dispatcher loop reliable before scaling to swarms and goal mode. The full surface is bigger than most guides show. Explore goal mode, swarms, PR completion contracts, worktrees and the diagnostics layer once the basics are solid.
 
 For more on the Hermes ecosystem:
 
@@ -516,5 +528,33 @@ For more on the Hermes ecosystem:
 - [Best AI coding tools and agents](/ai-coding-tools/): where Hermes fits among coding agent options
 
 Official docs are excellent further reading: [Kanban feature doc](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md), [Kanban tutorial](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-tutorial.md), [Worker lanes](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-worker-lanes.md), [Multi-gateway deployment](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban-multi-gateway.md).
+
+## FAQ
+
+Short answers to the questions that come up most with the board. The troubleshooting section above has the full ladder for a stuck card.
+
+<Accordion label="Kanban, a group chat or delegate_task: which one do I use?" group="faq">
+Use `delegate_task` when the result belongs in the parent's own context and can die with the session. Use a Bot Mode group chat when you want a decision argued in rounds while you read along. Use Kanban when work crosses profile boundaries, has to survive a restart, may need your input mid-run, or has to be findable next week. If you will ask "what happened to that task" tomorrow, it was a card.
+</Accordion>
+
+<Accordion label="Does the assignee have to be a real profile?" group="faq">
+Yes. `--assignee` names a directory under `~/.hermes/profiles/`, and the dispatcher's spawn gate checks that directory exists. A role like `coder` with no such directory leaves the card in `ready` with a `skipped_nonspawnable` event. Check `hermes kanban assignees` (profiles on disk plus per-assignee counts) and `ls ~/.hermes/profiles/`; the two names have to match.
+</Accordion>
+
+<Accordion label="The dispatcher is not running. What happens to ready cards?" group="faq">
+Nothing, by design. Without the gateway there is no tick, so `ready` cards idle until one comes up, and `hermes kanban create` warns about this at creation time. Start it with `hermes gateway start` and confirm with `hermes kanban dispatch --dry-run`. For one pass by hand, run `hermes kanban dispatch`.
+</Accordion>
+
+<Accordion label="Can I share one board between containers or hosts?" group="faq">
+Between containers on one host, yes. Several Hermes homes can mount the same `kanban.db`, but profile names are home-local and every home has a `default` profile. A card assigned to `default` can be claimed by the wrong home. Either give each home unique profile names and never assign `default` on a shared board, or set `kanban.dispatch_profiles` per home, and keep `kanban.dispatch_in_gateway: true` on exactly one gateway. Between two hosts, no: crash detection assumes host-local PIDs. To move a board instead of sharing it, use `hermes kanban boards export` and `hermes kanban boards import`; the import always lands as a new board.
+</Accordion>
+
+<Accordion label="What is the cost pattern?" group="faq">
+One dispatcher claim is one full agent run for the assignee profile, plus a reviewer run when a card goes to review. Keep the planning profile on a strong model and the workers on cheap ones: per-profile config, `--model`/`--provider` at creation, or `hermes kanban set-model` later. Cap concurrency with `max_in_progress` on a small VPS, and put `--max-runtime` on anything long. Group chats bill differently: one send can run up to 10 messages across the members, and the docs publish no token figures for a round. A rowdy room costs real money. See [cheap models for Hermes Agent](/best-cheap-models-hermes-agent/).
+</Accordion>
+
+<Accordion label="Can a Bot Mode routine create cards?" group="faq">
+Not by itself. A routine is a Hermes cron job named `[bot:<name>] <routine>`; its run lands in that Bot's chat history and nothing about it is a card. To get cards out of one, enable the kanban tools for that profile (`hermes -p <bot> tools enable kanban`) so the run can call `kanban_create`. Or make the job a script that calls `hermes kanban create ... --idempotency-key <key>`. A re-run with the same key returns the existing card instead of a duplicate.
+</Accordion>
 
 <Button text="Explore AI coding tools" link="/ai-coding-tools/" variant="solid" color="blue" size="md" icon="arrow-right" iconPosition="right" />
