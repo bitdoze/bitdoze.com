@@ -255,12 +255,12 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 3 | [Upload a Directory Tree to an OCI Bucket With Python](../src/content/posts/upload-directory-oci-bucket-python.mdx) | 2023-04-26 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 4 | [Fix Kernel Panic: VFS Unable to Mount Root FS on Ubuntu](../src/content/posts/fix-kernel-panic-unable-mount-root-fs.mdx) | 2023-05-11 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 5 | [How to Update Docker Compose Containers (With Rollback)](../src/content/posts/updating-container-docker-compose.mdx) | 2023-05-11 | 2026-11-23 | updated | 2026-11-23 | n/a |
-| 6 | [Fix - SSH Too Many Authentication Failures](../src/content/posts/fix-ssh-too-many-authentication-failures.mdx) | 2023-08-03 | 2023-08-03 | not updated | 2026-11-13 | n/a |
-| 7 | [How To Clean All Docker Images With Disks and Everything](../src/content/posts/cleanup-all-docker-things.mdx) | 2023-08-16 | 2023-08-16 | not updated | not updated (file 2026-11-06) | n/a |
-| 8 | [OpnForm Free Open Source Form Builder Tool](../src/content/posts/opnform-open-source.mdx) | 2023-08-18 | 2023-08-18 | not updated | not updated (file 2026-11-06) | n/a |
-| 9 | [How To Install Docker & Docker-compose for Ubuntu ARM Systems](../src/content/posts/install-docker-ubuntu-arm.mdx) | 2023-09-28 | 2023-09-28 | not updated | not updated (file 2026-11-06) | n/a |
-| 10 | [How To Compare Two Folders Content and See Different Files in Terminal](../src/content/posts/compare-folders-content-differences.mdx) | 2023-11-14 | 2023-11-14 | not updated | not updated (file 2026-11-06) | n/a |
-| 11 | [Fix Cannot Open Packages Database In /var/lib/rpm DB_RUNRECOVERY: Fatal error](../src/content/posts/fix-rpmdb-error-bdb0087-db_runrecovery.mdx) | 2024-05-24 | 2024-05-24 | not updated | 2026-11-13 | n/a |
+| 6 | [SSH too many authentication failures: why and how to fix](../src/content/posts/fix-ssh-too-many-authentication-failures.mdx) | 2023-08-03 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 7 | [Docker cleanup: safely remove images, volumes and cache](../src/content/posts/cleanup-all-docker-things.mdx) | 2023-08-16 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 8 | [OpnForm review: self-hosting the open source form builder](../src/content/posts/opnform-open-source.mdx) | 2023-08-18 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 9 | [Install Docker on Ubuntu ARM: steps, checks, uninstall](../src/content/posts/install-docker-ubuntu-arm.mdx) | 2023-09-28 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 10 | [Compare Two Folders in the Terminal: diff, git and rsync](../src/content/posts/compare-folders-content-differences.mdx) | 2023-11-14 | 2026-11-27 | updated | 2026-11-27 | n/a |
+| 11 | [Fix rpm DB_RUNRECOVERY: Fatal error, run database recovery](../src/content/posts/fix-rpmdb-error-bdb0087-db_runrecovery.mdx) | 2024-05-24 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 12 | [Unleash the Power of oha: Website Performance Testing Made Simple](../src/content/posts/oha-website-load-testing.mdx) | 2025-02-10 | 2025-02-10 | not updated | 2026-11-13 | n/a |
 | 13 | [Building Your AI Research Squad with Agno, Streamlit, and uv](../src/content/posts/agno-squad.mdx) | 2025-04-09 | 2025-04-09 | not updated | not updated (file 2025-04-09) | n/a |
 | 14 | [How to Build Your First Agent with Google Agent Development Kit (ADK)](../src/content/posts/google-adk-start.mdx) | 2025-04-10 | 2025-04-10 | not updated | not updated (file 2026-10-29) | n/a |

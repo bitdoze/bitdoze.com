@@ -1,100 +1,574 @@
 ---
 date: 2024-05-24T0:00:00Z
+lastmod: 2026-11-27T00:00:00Z
 translationKey: "fix-rpmdb-error-bdb0087-db_runrecovery"
-title: "Arreglar el error «Cannot Open Packages Database in /var/lib/rpm» DB_RUNRECOVERY: error fatal"
-meta_title: "Arreglar «Cannot Open Packages Database in /var/lib/rpm»"
-description: "Aprende a solucionar el habitual error «Cannot open Packages database in /var/lib/rpm» DB_RUNRECOVERY: error fatal y a volver a instalar paquetes."
+title: "Arregla el error rpm DB_RUNRECOVERY: error fatal"
+meta_title: "Arregla el error rpm DB_RUNRECOVERY: error fatal"
+description: "Arregla el error rpm DB_RUNRECOVERY (BDB0087): detén rpm y yum, borra los archivos __db obsoletos en /var/lib/rpm, ejecuta rpm --rebuilddb y repara Packages."
 image: "@assets/images/24/05/fix-rpmdb-error-bdb0087-db_runrecovery.jpeg"
-lastmod: 2026-11-13T00:00:00Z
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["rpm", "centos", "berkeley-db"]
 canonical: https://www.bitdoze.com/es/arreglar-error-rpmdb-bdb0087/
-quickAnswer: "rm -f /var/lib/rpm/__db.* y luego rpm --rebuilddb para reconstruir rpmdb limpiamente."
+quickAnswer: "Detén todo proceso de rpm o yum, ejecuta rm -f /var/lib/rpm/__db.* y luego rpm --rebuilddb. Cuando rpmdb_verify informa de un archivo Packages dañado, vacíalo y recárgalo con rpmdb_dump y rpmdb_load antes de la reconstrucción."
 ---
 
-Si te aparece el mensaje de error de abajo, que no te permite instalar paquetes con `rpm` o `yum`:
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-```sh
-error: rpmdb: BDB0113 Thread/process 21929/140612494501952 failed: BDB1507 Thread died in Berkeley DB library
+Detén primero todo proceso de rpm, yum y dnf. Después haz una copia de `/var/lib/rpm`, ejecuta `rm -f /var/lib/rpm/__db.*` y ejecuta `rpm --rebuilddb`. Eso arregla `DB_RUNRECOVERY` siempre que el archivo `Packages` esté intacto.
+
+Cada comando `rpm` de la máquina imprime esto y sale con el código 1:
+
+```text
+error: rpmdb: BDB0113 Thread/process 528/126330028189760 failed: BDB1507 Thread died in Berkeley DB library
 error: db5 error(-30973) from dbenv->failchk: BDB0087 DB_RUNRECOVERY: Fatal error, run database recovery
-error: cannot open Packages index using db5 - (-30973)
+error: cannot open Packages index using db5 -  (-30973)
 error: cannot open Packages database in /var/lib/rpm
-error: rpmdb: BDB0113 Thread/process 21929/140612494501952 failed: BDB1507 Thread died in Berkeley DB library
+error: rpmdb: BDB0113 Thread/process 528/126330028189760 failed: BDB1507 Thread died in Berkeley DB library
 error: db5 error(-30973) from dbenv->failchk: BDB0087 DB_RUNRECOVERY: Fatal error, run database recovery
 error: cannot open Packages database in /var/lib/rpm
 ```
 
-indica que la base de datos de RPM (rpmdb) está corrupta. Esta corrupción puede ocurrir por varias razones, como instalaciones, actualizaciones o desinstalaciones de paquetes interrumpidas, cortes de energía u otras interrupciones del sistema.
+`yum` se detiene en el mismo punto:
 
-## Causas de la corrupción de la base de datos de RPM
+```text
+error: rpmdb: BDB0113 Thread/process 528/126330028189760 failed: BDB1507 Thread died in Berkeley DB library
+error: db5 error(-30973) from dbenv->failchk: BDB0087 DB_RUNRECOVERY: Fatal error, run database recovery
+error: cannot open Packages index using db5 -  (-30973)
+error: cannot open Packages database in /var/lib/rpm
+CRITICAL:yum.main:
+Error: rpmdb open failed
+```
 
-1. **Operaciones interrumpidas**: La causa más común es la interrupción de operaciones de gestión de paquetes, como una instalación, actualización o desinstalación. Esto puede ocurrir si el proceso se detiene manualmente o si el sistema pierde energía durante la operación.
-2. **Archivos de bloqueo residuales**: Si los comandos `rpm`, `yum` o `dnf` no terminan correctamente, pueden dejar atrás archivos de bloqueo en `/var/lib/rpm`, lo que provoca que las operaciones posteriores fallen.
-3. **Problemas de hardware**: Una memoria o un disco defectuosos también pueden corromper la base de datos. Es menos común, pero deberías tenerlo en cuenta si el problema persiste.
-4. **Errores de software**: Puede haber bugs en el software de RPM o de Berkeley DB que causen corrupción bajo ciertas condiciones.
+La base de datos de rpm (rpmdb) no se puede abrir. En RHEL 6 a 8 y sus clones es un conjunto de archivos Berkeley DB en `/var/lib/rpm`. `DB_RUNRECOVERY` significa que un proceso dejó una entrada ocupada en su tabla de bloqueos.
 
-## Pasos para resolver el problema
+Toda la salida procede de contenedores desechables que ejecuté para este artículo. Los sistemas fueron CentOS 7.9.2009 con rpm 4.11.3 y Red Hat Enterprise Linux 8.10 con rpm 4.14.3, después Rocky Linux 9.9 y Amazon Linux 2023, ambos con rpm 4.16.1.3.
 
-Para arreglar la base de datos de RPM corrupta, puedes seguir estos pasos:
+Si `yum` se queda esperando un bloqueo en lugar de fallar, lee [cómo arreglar el bloqueo de la transacción que espera](/es/arreglar-bloqueo-transaccion-rpm/).
 
-1. **Haz una copia de seguridad de la base de datos RPM actual**:
+![Flujo de la recuperación de la base de datos rpm en tres niveles: cada fila muestra el síntoma, el comando que lo arregla y la prueba que lo demuestra](@assets/images/24/05/fix-rpmdb-error-bdb0087-db_runrecovery-recovery-flow.webp)
 
-   ```bash
-   mkdir /var/lib/rpm/backup
-   cp -a /var/lib/rpm/__db* /var/lib/rpm/backup/
-   ```
+## ¿Qué sistemas dan el error DB_RUNRECOVERY?
 
-2. **Elimina los archivos de base de datos corruptos**:
+El error necesita archivos `__db.*`, y solo el backend Berkeley DB los crea. Eso lo limita a RHEL 6 a 8 y sus clones, donde rpm todavía usa Berkeley DB.
 
-   ```bash
-   rm -f /var/lib/rpm/__db.[0-9][0-9]*
-   ```
+Red Hat pasó rpm a sqlite en RHEL 9, y [las notas de la versión 9.0](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/9.0_release_notes/new-features) dicen "The rpm database is now based on the sqlite library". Fedora hizo lo mismo en la versión 33. RHEL 10 eliminó `libdb`.
 
-3. **Reconstruye la base de datos de RPM**:
+| Sistema | rpm | Backend | `rpm -E '%_db_backend'` imprime |
+|---|---|---|---|
+| RHEL y CentOS 6 y 7 (aquí se ejecutó el 7) | 4.11.3 en 7 | Berkeley DB | `%_db_backend`, la macro no existe |
+| RHEL 8 y sus clones | 4.14.3 en 8.10 | Berkeley DB, sqlite incluido como opción | `bdb` |
+| RHEL 9 y sus clones (aquí se ejecutó Rocky 9.9) | 4.16.1.3 | sqlite | `sqlite` |
+| Amazon Linux 2023 | 4.16.1.3 | sqlite | `sqlite` |
 
-   ```bash
-   rpm --rebuilddb
-   ```
-
-4. **Limpia la caché de Yum**:
-
-   ```bash
-   yum clean all
-   ```
-
-5. **Verifica la integridad del archivo Packages** (opcional):
-
-   ```bash
-   db_verify /var/lib/rpm/Packages
-   ```
-
-6. **Comprueba si hay problemas de hardware** (opcional):
-   Revisa los registros del sistema en busca de errores relacionados con el hardware que puedan indicar una memoria o un disco defectuosos.
-
-## Comandos de ejemplo
-
-Aquí tienes un conjunto consolidado de comandos para realizar los pasos anteriores:
+En los sistemas con Berkeley DB, `/var/lib/rpm` contiene el archivo `Packages`, un archivo por índice (`Name`, `Basenames`...) y los archivos de entorno `__db.001` a `__db.003`. Un sistema con sqlite guarda una sola base de datos:
 
 ```bash
-# Copia de seguridad de la base de datos RPM actual
-mkdir /var/lib/rpm/backup
-cp -a /var/lib/rpm/__db* /var/lib/rpm/backup/
-
-# Eliminar los archivos de base de datos corruptos
-rm -f /var/lib/rpm/__db.[0-9][0-9]*
-
-# Reconstruir la base de datos de RPM
-rpm --rebuilddb
-
-# Limpiar la caché de Yum
-yum clean all
+ls -la /var/lib/rpm
 ```
 
-## Consideraciones adicionales
+```text
+total 6016
+drwxr-xr-x 2 root root    4096 Nov 13 00:29 .
+drwxr-xr-x 9 root root    4096 Nov 13 00:29 ..
+-rw-r--r-- 1 root root        0 Nov 13 00:29 .rpm.lock
+-rw-r--r-- 1 root root  6115328 Nov 13 00:29 rpmdb.sqlite
+-rw-r--r-- 1 root root    32768 Nov 13 00:29 rpmdb.sqlite-shm
+-rw-r--r-- 1 root root        0 Nov 13 00:29 rpmdb.sqlite-wal
+```
 
-- **Garantiza operaciones sin interrupciones**: Asegúrate de que las operaciones de gestión de paquetes no se interrumpan. Usa un SAI (UPS) para evitar cortes de energía durante operaciones críticas.
-- **Comprueba problemas de automatización**: Si usas herramientas de automatización, asegúrate de que no estén terminando los procesos de gestión de paquetes de forma abrupta.
-- **Monitoriza los registros del sistema**: Revisa periódicamente los registros del sistema en busca de señales de problemas de hardware u otras anomalías que puedan provocar la corrupción de la base de datos.
+## Diagnostica la base de datos rpm antes de borrar nada
 
-Siguiendo estos pasos, deberías poder resolver la corrupción de la base de datos de RPM y evitar que vuelva a ocurrir. Si el problema persiste, considera investigar más a fondo posibles problemas de hardware o bugs de software.
+El mismo texto de error cubre una tabla de bloqueos obsoleta, un archivo `Packages` dañado y una base de datos que desapareció. Cinco comprobaciones los distinguen. Ejecuta todas como root antes del primer `rm`.
+
+<ListCheck>
+<ul>
+<li>Un shell de root. El `rm`, la copia de seguridad y `yum` lo necesitan.</li>
+<li>Espacio en `/root` para un tarball de copia de seguridad. El tarball del laboratorio ocupó 2,926,616 bytes para 152 paquetes.</li>
+<li>Una lista de los paquetes instalados, si tienes una.</li>
+</ul>
+</ListCheck>
+
+**1. ¿Falla rpm, y cómo?**
+
+```bash
+rpm -qa > /dev/null; echo $?
+rpm -q bash
+```
+
+```text
+1
+error: cannot open Packages database in /var/lib/rpm
+package bash is not installed
+```
+
+El primer comando imprime las siete líneas de error del inicio de esta página. `rpm -q` responde `package bash is not installed` porque la base de datos nunca se abre, no porque bash haya desaparecido.
+
+**2. ¿Qué hay en el directorio de la base de datos?**
+
+```bash
+ls -la /var/lib/rpm
+```
+
+```text
+total 10380
+drwxr-xr-x 1 root root     4096 Nov 27 14:49 .
+drwxr-xr-x 1 root root     4096 Nov 27 14:49 ..
+-rw-r--r-- 1 root root        0 Nov 13  2020 .dbenv.lock
+-rw-r--r-- 1 root root        0 Nov 13  2020 .rpm.lock
+-rw-r--r-- 1 root root   667648 Nov 27 14:50 Basenames
+-rw-r--r-- 1 root root  7872512 Nov 27 14:50 Packages
+-rw-r--r-- 1 root root   352256 Nov 27 14:51 __db.001
+-rw-r--r-- 1 root root    98304 Nov 27 14:51 __db.002
+-rw-r--r-- 1 root root  1318912 Nov 27 14:51 __db.003
+```
+
+El listado está recortado a las líneas que importan. El archivo `Packages` guarda todas las cabeceras instaladas, y es el único archivo que no se puede construir a partir de otro. Los archivos `__db.00N` son los archivos de entorno, la memoria compartida de Berkeley DB, con la tabla de bloqueos entre ellos.
+
+**3. ¿Está el disco lleno?**
+
+```bash
+df -h /var
+```
+
+```text
+Filesystem      Size  Used Avail Use% Mounted on
+overlay         150G  136G  8.6G  95% /
+```
+
+El sistema de archivos se llama `overlay` porque la línea procede de un contenedor. `rpm --rebuilddb` escribe una segunda copia de la base de datos en `/var/lib/rpmrebuilddb.NNN` y luego sustituye la antigua por ella, así que `/var` necesita sitio para esa copia. Cuando a `/var` le falta espacio, [añade un disco con LVM](/es/anadir-disco-lvm/) y [alerta sobre el uso del disco](/es/monitorizar-servidor/). `df -h` y `free -h` son también los dos primeros comandos de [la referencia de comandos de Linux](/es/comandos-linux/).
+
+**4. ¿Tiene alguien la base de datos abierta?**
+
+```bash
+fuser -v /var/lib/rpm/Packages; echo $?
+```
+
+```text
+1
+```
+
+Sin salida y con código de salida 1, significa que nadie la tiene abierta. Con un comando rpm en ejecución se ve así:
+
+```text
+                     USER        PID ACCESS COMMAND
+/var/lib/rpm/Packages:
+                     root      f.... rpm
+   598
+```
+
+El [KCS 3330211](https://access.redhat.com/solutions/3330211) de Red Hat usa `fuser -v /var/lib/rpm`, que en el laboratorio no imprimió nada ni siquiera mientras `rpm -Va` tenía abiertos todos los archivos. `fuser` comprueba el directorio indicado y no los archivos que contiene.
+
+**5. ¿Qué proceso murió?**
+
+```bash
+cd /var/lib/rpm && /usr/lib/rpm/rpmdb_stat -CA | grep -A3 'Locks grouped by lockers'
+```
+
+```text
+Locks grouped by lockers:
+Locker   Mode      Count Status  ----------------- Object ---------------
+      96 dd= 0 locks held 1    write locks 0    pid/thread 528/126330028189760 flags 0    priority 100
+      96 READ          1 HELD    (4feee2 5f 72e2c494 182 0) handle        0
+```
+
+`528` es el pid de la línea de error. El bloqueo pertenece a un proceso que ya no existe, y ese bloqueo obsoleto es lo que hace fallar a cada comando rpm posterior.
+
+| Lo que ves | Lo que significa | Sección |
+|---|---|---|
+| `BDB0087 DB_RUNRECOVERY`, y `rpmdb_verify Packages` pasa | archivos de entorno obsoletos, datos intactos | ¿Cómo arreglo rpm DB_RUNRECOVERY? |
+| `rpmdb_verify` falla, o aparecen líneas `rpmdbNextIterator: skipping h#` | el archivo `Packages` está dañado | Cuando el propio archivo Packages está dañado |
+| Falta `Packages`, o `rpmdb_dump` falla o no imprime nada | las cabeceras tienen que salir de los archivos rpm | Último recurso |
+
+## ¿Cómo arreglo rpm DB_RUNRECOVERY?
+
+Para el error `BDB0087 DB_RUNRECOVERY` en cada comando rpm, detén todo proceso de rpm, yum y dnf y ejecuta `rm -f /var/lib/rpm/__db.*` seguido de `rpm --rebuilddb`. En el laboratorio `rpm -qa` volvió a funcionar antes de que empezara la reconstrucción, y el `rm` tocó solo los archivos de entorno.
+
+<Notice type="warning" title="No puede haber ningún proceso de rpm, yum o dnf en ejecución">
+Detén `yum-cron`, PackageKit y cualquier agente de gestión de configuración antes del `rm`. En el laboratorio, borrar los archivos de entorno mientras yum instalaba hizo que yum abortara 3 de 3 veces con `Rpmdb checksum is invalid`.
+</Notice>
+
+rpm abre la base de datos con una tabla de bloqueos compartida por cada proceso que la toca. Cuando un proceso muere entre dos llamadas a la base de datos, el siguiente rpm libera sus bloqueos e imprime `BDB2053 Freeing read locks for locker 0x1: 284/139101924841536`. Cuando muere dentro de una llamada, su entrada queda marcada como ocupada, y cada comando rpm posterior se niega a abrir la base de datos hasta que la tabla de bloqueos desaparezca. La tabla de bloqueos forma parte de los archivos de entorno.
+
+Un `kill -9` que cae dentro de una llamada a la base de datos produce ese estado. En el laboratorio inicié `rpm -qa` y lo maté con `kill -9` en momentos aleatorios entre 20 y 95 ms después del arranque. El intento 12 en CentOS 7 y el 18 en RHEL 8.10 dejaron la base de datos rota. 40 kills con `SIGTERM` no produjeron ningún error, y tampoco 6 kills de `yum` en mitad de su transacción.
+
+**1. Haz una copia de seguridad de la base de datos.**
+
+```bash
+tar czf /root/rpmdb-backup-$(date +%F).tar.gz -C /var/lib rpm
+ls -la /root/rpmdb-backup-*.tar.gz
+```
+
+```text
+-rw-r--r-- 1 root root 2926616 Nov 27 14:51 /root/rpmdb-backup-2026-11-27.tar.gz
+```
+
+Guarda la copia fuera de `/var/lib/rpm`. Un directorio `backup` dentro de él no contiene más que el estado roto, y cada copia posterior de `/var/lib/rpm` se lleva consigo los archivos de entorno obsoletos.
+
+**2. Borra los archivos de entorno.**
+
+```bash
+rm -f /var/lib/rpm/__db.*
+```
+
+Solo estos. `Packages` y los archivos de índice son los datos.
+
+**3. Verifica.**
+
+```bash
+rpm -qa > /dev/null; echo $?
+```
+
+```text
+0
+```
+
+La base de datos responde antes de cualquier reconstrucción, porque el `rm` no tocó ningún archivo de datos.
+
+**4. Reconstruye los índices.**
+
+```bash
+rpm --rebuilddb; echo $?
+rpm -qa | wc -l
+```
+
+```text
+0
+152
+```
+
+`rpm --rebuilddb` no imprime nada cuando tiene éxito. Lee todas las cabeceras del archivo `Packages` y escribe archivos de índice nuevos, lo que también descarta las páginas libres que llevaban los antiguos. En el primer contenedor del laboratorio el archivo `Packages` pasó de 19,070,976 bytes a 7,790,592. Abre su propio entorno privado, así que funciona incluso mientras el compartido está roto.
+
+**5. Demuestra que las escrituras funcionan.**
+
+```bash
+yum -y install tcpdump
+```
+
+```text
+Running transaction
+  Installing : 14:libpcap-1.5.3-12.el7.x86_64                               1/2
+  Installing : 14:tcpdump-4.9.2-4.el7_7.1.x86_64                            2/2
+  Verifying  : 14:libpcap-1.5.3-12.el7.x86_64                               1/2
+  Verifying  : 14:tcpdump-4.9.2-4.el7_7.1.x86_64                            2/2
+Installed:
+  tcpdump.x86_64 14:4.9.2-4.el7_7.1
+Dependency Installed:
+  libpcap.x86_64 14:1.5.3-12.el7
+Complete!
+```
+
+`package-cleanup`, del paquete `yum-utils`, comprueba después que cada paquete instalado tiene sus dependencias, y `package-cleanup --dupes` lista los paquetes instalados dos veces:
+
+```bash
+package-cleanup --problems
+```
+
+```text
+Loaded plugins: fastestmirror, ovl
+No Problems Found
+```
+
+Para volver atrás, restituye el tarball. Borra después los archivos de entorno, porque sacaste el tarball mientras estaban obsoletos:
+
+```bash
+rm -rf /var/lib/rpm
+tar xzf /root/rpmdb-backup-2026-11-27.tar.gz -C /var/lib
+rm -f /var/lib/rpm/__db.*
+```
+
+Un reinicio también limpia los archivos de entorno. El paquete rpm incluye `/usr/lib/tmpfiles.d/rpm.conf` con una línea, `r /var/lib/rpm/__db.*`, y `systemd-tmpfiles-setup.service` la ejecuta en cada arranque. El KCS 3330211 de Red Hat enumera el reinicio como alternativa. Yo ejecutaría igualmente los tres comandos, porque funcionan en un host que no puedes reiniciar ahora mismo.
+
+Si el error vuelve, algo sigue matando rpm y el arreglo es temporal. El KCS señala los tiempos de espera de la automatización como la causa más común y Microsoft Defender for Endpoint como una causa conocida (compruébalo con `rpm -q mdatp`). Su paquete no soportado `rpm-deathwatch` registra cada señal enviada a rpm, yum y dnf, y el [`rpm_db_snooper`](https://blogs.oracle.com/linux/oled-rpm-db-snooper) de Oracle hace lo mismo en Oracle Linux. Ejecuta uno de ellos antes de la siguiente aparición.
+
+## Cuando el propio archivo Packages está dañado
+
+Borrar los archivos de entorno no puede ayudar cuando el archivo `Packages` está dañado. El síntoma es una línea `rpmdbNextIterator: skipping h#` en stderr con código de salida 0, o `rpmdb_verify` saliendo con 1. La reparación vacía el archivo con `rpmdb_dump`, carga el volcado en un archivo nuevo con `rpmdb_load` y ejecuta `rpm --rebuilddb`. Pierde las cabeceras de las páginas dañadas (1 de 154 en el laboratorio), y `rpm -ivh --justdb` las vuelve a escribir. En el laboratorio, rpm imprimió esta línea y aun así salió con 0:
+
+```bash
+rpm -qa 2>&1 > /dev/null | head -3
+rpm -qa | wc -l
+```
+
+```text
+error: rpmdbNextIterator: skipping h#       2 region trailer: BAD, tag 0 type 0 offset 0 count 0
+153
+```
+
+El contenedor tenía 154 paquetes. rpm lista 153 con código de salida 0, así que `wc -l` sobre `rpm -qa` es lo único que muestra la pérdida. Produje este estado en un contenedor poniendo a cero una página de 4 KiB del archivo `Packages`:
+
+```bash
+dd if=/dev/zero of=/var/lib/rpm/Packages bs=4096 seek=300 count=1 conv=notrunc
+```
+
+No ejecutes eso fuera de un contenedor desechable.
+
+La comprobación estructural es `/usr/lib/rpm/rpmdb_verify`. El [artículo 3763](https://access.redhat.com/articles/3763) de Red Hat lo documenta para RHEL 8 y anteriores:
+
+```bash
+cd /var/lib/rpm
+rm -f __db.*
+/usr/lib/rpm/rpmdb_verify Packages; echo $?
+```
+
+```text
+rpmdb_verify: BDB0682 Page 300: bad prev_pgno 0 on overflow page (should be 299)
+rpmdb_verify: BDB0683 Page 300: overflow item incomplete
+rpmdb_verify: Packages: BDB0090 DB_VERIFY_BAD: Database verification failed
+BDB5105 Verification of Packages failed.
+1
+```
+
+Con un archivo `Packages` intacto imprime `BDB5105 Verification of Packages succeeded.` y sale con 0. `db_verify`, del paquete `libdb-utils`, es el mismo programa. Ese paquete no forma parte del grupo `core` en CentOS 7, así que usa la copia que incluye rpm.
+
+Guarda la lista de paquetes instalados antes de la reparación, porque la reparación pierde las cabeceras que estaban en las páginas dañadas:
+
+```bash
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /root/rpm-qa-before.txt
+```
+
+La reparación es [la de rpm.org](https://rpm.org/user_doc/db_recovery.html), que vacía el archivo dañado y carga el volcado en uno nuevo.
+
+Cuando `rpmdb_dump` rechaza el archivo `Packages`, su línea de uso enumera dos modos de recuperación, `-r` y `-R`. El laboratorio no los necesitó.
+
+```bash
+mv Packages Packages.orig
+/usr/lib/rpm/rpmdb_dump Packages.orig | /usr/lib/rpm/rpmdb_load Packages
+/usr/lib/rpm/rpmdb_verify Packages; echo $?
+rpm -qa 1> /dev/null
+```
+
+```text
+BDB5105 Verification of Packages succeeded.
+0
+error: rpmdbNextIterator: skipping h#       2 region trailer: BAD, tag 0 type 0 offset 0 count 0
+```
+
+El nuevo archivo `Packages` es estructuralmente correcto, y la cabecera dañada vino con él. `rpm -qa 1> /dev/null` descarta los nombres de paquete para que solo se vean los errores. La reconstrucción es lo que descarta esa cabecera. Con `-vv` imprime lo que hace:
+
+```bash
+rpm -vv --rebuilddb 2>&1 | grep -v -E 'closed|opening|opened|effective|mdi' | head -8
+```
+
+```text
+D: rebuilding database /var/lib/rpm into /var/lib/rpmrebuilddb.781
+D: locked   db index       /var/lib/rpm/Packages
+D: disabling fsync on database
+D:  read h#       2 Header SHA1 digest: OK (8ea4fd0f464f4c0c41746be3c3bf9b5540fec576)
+D: adding "popt" to Name index.
+D: adding 32 entries to Basenames index.
+D: adding "System Environment/Libraries" to Group index.
+D: adding 13 entries to Requirename index.
+```
+
+Después busca qué falta:
+
+```bash
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /root/rpm-qa-after.txt
+comm -23 /root/rpm-qa-before.txt /root/rpm-qa-after.txt
+```
+
+```text
+tzdata-2020d-2.el7.noarch
+```
+
+La cabecera que estaba en la página puesta a cero se ha perdido. El paquete sigue en disco (`/usr/share/zoneinfo/UTC` está ahí), y rpm ya no lo conoce. Descarga el archivo rpm exactamente de esa versión, aquí con `yum -y install --downloadonly --downloaddir=/root/one tzdata-2020d-2.el7.noarch`, y vuelve a escribir la cabecera sin tocar los archivos:
+
+```bash
+rpm -ivh --justdb --noscripts /root/one/tzdata-2020d-2.el7.noarch.rpm
+```
+
+```text
+warning: /root/one/tzdata-2020d-2.el7.noarch.rpm: Header V3 RSA/SHA256 Signature, key ID f4a80eb5: NOKEY
+Preparing...                          ########################################
+Updating / installing...
+tzdata-2020d-2.el7                    ########################################
+```
+
+La advertencia viene de la comprobación de la firma, porque el contenedor del laboratorio no tenía importada ninguna clave de CentOS. `--justdb` actualiza solo la base de datos, y `--noscripts` deja fuera los scripts de instalación porque el paquete ya está instalado. Después, `rpm -qa | wc -l` vuelve a dar 154 y `diff` sobre las dos listas no imprime nada.
+
+## Último recurso: reconstruir la base de datos rpm desde los archivos rpm
+
+Cuando el archivo `Packages` no se puede leer o ha desaparecido, las cabeceras tienen que salir de los archivos rpm de las versiones instaladas. `yum reinstall --downloadonly` descarga esos archivos y `rpm -ivh --justdb --noscripts` escribe cada cabecera en una base de datos vacía. En el laboratorio tardó unos segundos para 154 paquetes. También restablece el estado de instalación de cada archivo. En la imagen del laboratorio, instalada con `tsflags=nodocs`, `rpm -Va bash` listó después 90 archivos de doc, man y locale como ausentes. Es [el procedimiento "If all fails" de rpm.org](https://rpm.org/user_doc/db_recovery.html).
+
+**1. Conserva lo que rpm todavía sabe y descarga los archivos rpm.**
+
+```bash
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /root/rpm-qa-before.txt
+mkdir -p /root/allrpms
+yum -y reinstall --downloadonly --downloaddir=/root/allrpms $(rpm -qa)
+```
+
+Contra una copia local del vault de CentOS 7.9, esto resolvió los 154 paquetes instalados en el laboratorio.
+
+**2. Aparta la base de datos rota.**
+
+```bash
+mv /var/lib/rpm /root/rpmdb-broken && mkdir /var/lib/rpm
+rpm -qa | wc -l
+```
+
+```text
+0
+```
+
+**3. Vuelve a escribir cada cabecera.**
+
+```bash
+rpm -ivh --justdb --noscripts /root/allrpms/*.rpm 2>&1 | head -10
+```
+
+```text
+warning: /root/allrpms/acl-2.2.51-15.el7.x86_64.rpm: Header V3 RSA/SHA256 Signature, key ID f4a80eb5: NOKEY
+Preparing...                          ########################################
+Updating / installing...
+libgcc-4.8.5-44.el7                   ########################################
+centos-release-7-9.2009.0.el7.centos  ########################################
+setup-2.8.71-11.el7                   ########################################
+filesystem-3.2-25.el7                 ########################################
+basesystem-10.0-7.el7.centos          ########################################
+tzdata-2020d-2.el7                    ########################################
+nss-softokn-freebl-3.53.1-6.el7_9     ########################################
+```
+
+**4. Verifica.**
+
+```bash
+rpm -qa | wc -l
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /root/rpm-qa-after.txt
+diff /root/rpm-qa-before.txt /root/rpm-qa-after.txt; echo $?
+package-cleanup --problems
+```
+
+```text
+154
+0
+Loaded plugins: fastestmirror, ovl
+No Problems Found
+```
+
+`yum -y erase tree && yum -y install tree` terminó entonces con `Complete!` dos veces en la base de datos reconstruida.
+
+<Notice type="warning" title="Conserva /root/rpmdb-broken hasta que pasen todas las comprobaciones">
+El directorio antiguo es la vuelta atrás. Vuelve a moverlo a `/var/lib/rpm` si la base de datos reconstruida no pasa una comprobación. Bórralo solo después de que las listas de paquetes coincidan y de que un `yum install` termine.
+</Notice>
+
+## La era sqlite: RHEL 9, Rocky 9 y Amazon Linux 2023
+
+RHEL 9, sus clones y Amazon Linux 2023 guardan la base de datos en un solo archivo sqlite, así que no hay tabla de bloqueos en archivos de entorno y `DB_RUNRECOVERY` no puede ocurrir. Allí el daño imprime `database disk image is malformed`, y `rpm --rebuilddb` lo repara descartando las cabeceras que no puede leer. Maté 40 instalaciones y borrados seguidos en Rocky 9.9 con `kill -9`, entre 1 y 20 ms después de empezar, y el siguiente `rpm -qa` no imprimió nada.
+
+Para producir el daño, puse a cero una página de 4 KiB de una copia de `rpmdb.sqlite`, con 147 paquetes instalados:
+
+```bash
+rpm --dbpath /root/rpmdb-copy -qa 2>&1 | tail -4
+```
+
+```text
+ca-certificates-2026.2.92_v9.0.319-90.3.el9_8.noarch
+openssl-fips-provider-3.5.9-1.el9_9.x86_64
+openssl-libs-3.5.9-1.el9_9.x86_64
+error: SELECT hnum, blob FROM 'Packages': 11: database disk image is malformed
+```
+
+La copia lista 129 de los 147 paquetes. En un segundo contenedor, con una página puesta a cero en la base de datos activa, `yum -y install tree` imprimió el error y aun así terminó con éxito:
+
+```text
+Running transaction
+  Preparing        :                                                        1/1
+  Installing       : tree-1.8.0-10.el9.x86_64                               1/1
+error: SELECT hnum, blob FROM 'Packages' WHERE hnum=?: 11: database disk image is malformed
+  Running scriptlet: tree-1.8.0-10.el9.x86_64                               1/1
+  Verifying        : tree-1.8.0-10.el9.x86_64                               1/1
+Installed:
+  tree-1.8.0-10.el9.x86_64
+Complete!
+```
+
+`sqlite3`, del paquete `sqlite`, señala las páginas rotas de la copia:
+
+```bash
+sqlite3 /root/rpmdb-copy2/rpmdb.sqlite 'PRAGMA integrity_check;' | head -4
+```
+
+```text
+Error: database disk image is malformed
+*** in database main ***
+Page 1120: btreeInitPage() returns error code 11
+Page 1106 is never used
+```
+
+En el laboratorio `rpm --rebuilddb` salió con 0, imprimió el mismo error una vez y dejó una base de datos de 129 paquetes sin ningún error. Ese código de salida oculta 18 cabeceras perdidas. Siguen siendo desconocidas para rpm hasta que las reinstales con `--justdb`, para lo que necesitas la lista de paquetes con la que comparar.
+
+Dentro de un contenedor la reconstrucción puede fallar en el último paso:
+
+```text
+error: failed to replace old database with new database!
+error: replace files in /var/lib/rpm with files from /var/lib/rpmrebuilddb.15 to recover
+```
+
+La base de datos antigua no se ha tocado. El mismo comando tuvo éxito en el laboratorio en cuanto `/var/lib/rpm` fue un directorio nuevo en la capa de escritura del contenedor. Haz lo que dice el mensaje. Copia los archivos del directorio impreso en `/var/lib/rpm`, sobre los antiguos.
+
+## Qué lo causa y cómo prevenirlo
+
+| Causa | Evidencia | Qué hacer |
+|---|---|---|
+| rpm o yum matados dentro de una llamada a la base de datos: tiempo de espera de la automatización, `kill -9`, OOM killer | [KCS 3330211](https://access.redhat.com/solutions/3330211) de Red Hat ("an automation tool timed out"), Oracle, las [notas de dcrpm](https://github.com/facebookincubator/dcrpm/blob/main/MANUAL_RPM_CLEANUP.md). Laboratorio: el `kill -9` número 12 en CentOS 7 y el 18 en RHEL 8.10 rompieron la base de datos | Deja que la transacción termine. Dale a la automatización un tiempo de espera por encima del `yum update` más largo, y nunca uses `kill -9`. Añade swap, lee [cómo identificar los procesos que usan espacio de swap](/es/uso-swap-linux/) |
+| `yum` interrumpido con Ctrl+C | [KCS 217553](https://access.redhat.com/solutions/217553) de Red Hat | Deja que `yum update` termine y mantén Ctrl+C lejos de él |
+| Dos transacciones de paquetes iniciadas casi al mismo tiempo | [KCS 3955251](https://access.redhat.com/solutions/3955251) de Red Hat | Ejecuta los trabajos de paquetes de uno en uno ([la guía del bloqueo de transacción](/es/arreglar-bloqueo-transaccion-rpm/)) |
+| Pérdida de energía, pánico del kernel, reinicio forzado | rpm.org, las [notas de dcrpm](https://github.com/facebookincubator/dcrpm/blob/main/MANUAL_RPM_CLEANUP.md) | Un SAI para las máquinas que se actualizan sin supervisión |
+| Archivos de entorno borrados mientras rpm se ejecuta | Laboratorio: 3 de 3 instalaciones de yum abortaron con `Rpmdb checksum is invalid`. `/usr/lib/tmpfiles.d/rpm.conf` los borra en el arranque | Nunca limpies `/var/lib/rpm` a mano mientras yum se ejecuta |
+| Errores en el backend Berkeley DB | rpm.org califica sqlite y ndb como "much more stable and resilient than the traditional Berkley DB based backend" | Pasa a una versión que use sqlite cuando puedas |
+
+La comprobación de una línea es `rpm -qa > /dev/null`. Abre la base de datos, lee todas las cabeceras y no imprime nada. Una línea de cron lo convierte en una alarma:
+
+```bash
+rpm -qa > /dev/null 2>&1 || echo "rpm database check failed on $(hostname)"
+```
+
+En los sistemas con Berkeley DB, ejecuta `/usr/lib/rpm/rpmdb_verify /var/lib/rpm/Packages` una vez al mes, mientras no se ejecute ningún gestor de paquetes. Detecta la página dañada que `rpm -qa` oculta tras el código de salida 0.
+
+Guarda la lista de paquetes en cada host mientras rpm todavía funciona, y sácala de la máquina junto con un tarball de `/var/lib/rpm`. [Pluton, una interfaz de copias de seguridad Restic autoalojada](/es/pluton-backup-autoalojado/), es una forma de programar esa copia:
+
+```bash
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /root/rpm-qa-$(date +%F).txt
+```
+
+En una VM, toma la instantánea antes de que empiece `yum update` y no durante, porque una vuelta atrás entonces vuelve a dejar en disco una transacción a medias. [La guía de actualización de CloudPanel](/es/actualizar-cloudpanel-seguro/) también hace la instantánea primero.
+
+Ejecuta la comprobación en cada host con RHEL 7 y 8 esta semana y guarda la lista de paquetes a su lado. El primer nivel de reparación tardó segundos en el laboratorio, y la lista es lo que hace posible el tercero.
+
+## Preguntas frecuentes
+
+<Accordion label="¿Es seguro borrar los archivos __db en /var/lib/rpm?" group="faq">
+Sí, siempre que no se esté ejecutando ningún proceso de rpm, yum o dnf. rpm.org y el KCS 3330211 de Red Hat usan `rm /var/lib/rpm/__db*` como primer arreglo. Deja en paz `Packages` y los archivos con nombre de etiqueta RPM, porque esos contienen los datos.
+</Accordion>
+
+<Accordion label="¿Por qué yum imprime rpmdb open failed y rpm dice que ningún paquete está instalado?" group="faq">
+Porque la base de datos nunca se abre. `rpm -q bash` imprime `package bash is not installed` mientras el error está presente, aunque todos los paquetes están en disco. Arregla primero la base de datos; no hay nada que reinstalar.
+</Accordion>
+
+<Accordion label="¿Un reinicio arregla el error DB_RUNRECOVERY?" group="faq">
+El KCS 3330211 de Red Hat dice que sí, porque un reinicio elimina los archivos de entorno. El paquete rpm incluye `/usr/lib/tmpfiles.d/rpm.conf` con la línea `r /var/lib/rpm/__db.*`, y `systemd-tmpfiles-setup.service` la ejecuta en cada arranque. El error vuelve en cuanto otro proceso muere dentro de una llamada a la base de datos, así que busca después al culpable.
+</Accordion>
+
+<Accordion label="¿Cuánto tarda rpm --rebuilddb?" group="faq">
+Terminó en menos de un segundo en el laboratorio, para 148 paquetes y un archivo `Packages` de 19 MB. No imprime nada cuando tiene éxito, así que complétalo con `rpm -qa | wc -l` y `package-cleanup --problems`.
+</Accordion>
+
+<Accordion label="¿Debo usar rpmdb_verify o db_verify?" group="faq">
+Usa `/usr/lib/rpm/rpmdb_verify`, que viene con el paquete `rpm` y siempre está ahí. `/usr/bin/db_verify` viene de `libdb-utils`, el mismo código Berkeley DB en un paquete distinto, y `libdb-utils` no forma parte del grupo `core` en CentOS 7. El artículo 3763 de Red Hat documenta `cd /var/lib/rpm` seguido de `/usr/lib/rpm/rpmdb_verify Packages` para RHEL 8 y anteriores.
+</Accordion>
+
+<Accordion label="¿Forma parte del arreglo yum clean all?" group="faq">
+No. Vacía la caché de `/var/cache/yum`, y en el laboratorio yum volvió a descargar sus metadatos justo después. El arreglo es `rm -f /var/lib/rpm/__db.*` seguido de `rpm --rebuilddb`.
+</Accordion>
+
+<Accordion label="¿Ocurre DB_RUNRECOVERY en RHEL 9, Rocky 9 o AlmaLinux 9?" group="faq">
+No. RHEL 9, sus clones y Amazon Linux 2023 guardan la base de datos en `/var/lib/rpm/rpmdb.sqlite`, y no hay archivos de entorno que envejezcan. Allí el daño imprime `database disk image is malformed`, y `rpm --rebuilddb` lo repara descartando las cabeceras ilegibles, así que compara después el número de paquetes.
+</Accordion>
+
+<Accordion label="rpm --rebuilddb no pudo reemplazar la base de datos antigua. ¿Y ahora qué?" group="faq">
+La base de datos antigua no se ha tocado, y rpm imprime el directorio que contiene la nueva, por ejemplo `/var/lib/rpmrebuilddb.15`. Copia esos archivos en `/var/lib/rpm` sobre los antiguos. En el laboratorio esto ocurrió dentro de un contenedor con Rocky 9.9 y el comando tuvo éxito en cuanto `/var/lib/rpm` fue un directorio nuevo en la capa de escritura.
+</Accordion>

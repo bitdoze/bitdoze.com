@@ -1,69 +1,387 @@
 ---
 date: 2023-08-03T6:00:00Z
-title: "Fix - SSH Too Many Authentication Failures"
-description: "Fix Too Many Authentication Failures in SSH with our guide. Learn to activate SSH agent, use options, and modify settings"
+lastmod: 2026-11-27T00:00:00Z
+title: "SSH too many authentication failures: why and how to fix"
+meta_title: "SSH too many authentication failures: why and how to fix"
+description: "Fix SSH too many authentication failures with ssh -i key -o IdentitiesOnly=yes, then make it permanent in ~/.ssh/config or raise MaxAuthTries on your server."
 image: "../../assets/images/23/08/too_many_authentication_failures.jpeg"
 categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["linux", "ssh"]
 canonical: https://www.bitdoze.com/fix-ssh-too-many-authentication-failures/
-quickAnswer: "ssh -o IdentitiesOnly=yes user@host — or move stray keys out of the SSH agent."
+quickAnswer: "ssh -i ~/.ssh/id_ed25519_server -o IdentitiesOnly=yes user@host. Each key the agent offers counts against MaxAuthTries (default 6), so name one key or clean the agent."
 ---
 
-Let's face it, the world of servers and hosting can be as exciting as it is frustrating. Just when you think you have everything running smoothly, an error like "Received disconnect from UNKNOWN port 65535:2: Too Many Authentication Failures" pops up and you're left scratching your head. This usually happens for me because I need to switch between servers with different keys and SSH configs.
+import Accordion from "@components/widgets/Accordion.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-Sound familiar? Don't fret! We've all been there. And I'm here to walk you through a solution, that can help you fix the error, they helped me.
-
-## What's the Issue?
-
-This particular error is often linked to SSH (Secure Shell) connections. SSH is a network protocol that allows users to manage their servers remotely, and it's a powerful tool that many of us rely on daily. However, it can occasionally throw a curveball like this one.
-
-The error message essentially means that there have been too many failed attempts to authenticate the SSH connection. The server gets suspicious and shuts down the connection for security reasons. Makes sense, right? But what's the fix?
-
-## The Fixes
-
-### **1. Activate SSH Agent**
-
-The first thing to do is to activate the SSH agent. This is like a manager for your SSH keys, and it can help streamline the authentication process. Just run:
+To fix SSH too many authentication failures, name one key and stop the agent from offering the rest:
 
 ```bash
-eval `ssh-agent`
+ssh -i ~/.ssh/id_ed25519_server -o IdentitiesOnly=yes deploy@10.0.0.5
 ```
 
-This command will initialize the SSH agent in the background, and you're good to go.
+The error means the client offered six keys and sshd rejected all six. The connection ends before a password prompt or the key that works. Each key ssh-agent offers counts as one attempt against sshd's `MaxAuthTries`, which defaults to 6.
 
-### **2. Use the -o IdentitiesOnly=yes Option (if not using an SSH key)**
+Every output below is real. The client is OpenSSH 9.6p1 on Ubuntu 24.04. The server is OpenSSH 10.0p2 in a throwaway Debian 13 container, reached as `labuser@127.0.0.1` on port 2241, with `MaxAuthTries` left at 6. Read that as your user, host and port 22. The agent holds seven test keys under `/tmp/bitdoze-refresh-ssh/keys`, `labkey1` to `labkey7`, and only `labkey7` is in the server's `authorized_keys`. For me this error shows up when I switch between servers that use different keys, so that is the situation the lab copies.
 
-If you're not using an SSH key, then this option can be a lifesaver. It tells the SSH client to only use the authentication identity files that are configured in the SSH configuration files or passed on the command line. Run:
+| Your case | Command or setting | Trade-off |
+|---|---|---|
+| You have the right key | `ssh -i ~/.ssh/id_ed25519_server -o IdentitiesOnly=yes user@host` | You type the key path each time |
+| You want the password prompt | `ssh -o PubkeyAuthentication=no user@host` | You type the password on every login |
+| You reach the same host daily | `IdentityFile` and `IdentitiesOnly yes` in a `Host` block of `~/.ssh/config` | One block per host to maintain |
+| The agent holds old keys | `ssh-add -d ~/.ssh/id_ed25519_old`, or `ssh-add -D` for all | `ssh-add -D` empties the agent for every host |
+| You run the server and the clients cannot change | `MaxAuthTries 10` in `/etc/ssh/sshd_config.d/` | One more password guess per connection for each extra attempt |
+
+## Why does ssh fail with too many authentication failures?
+
+The client offers every key in ssh-agent, one per attempt, and sshd counts each rejection against `MaxAuthTries`. That limit defaults to 6, so with the right key seventh in the list, sshd disconnects after the sixth rejection.
+
+`MaxAuthTries` in [sshd_config(5)](https://man.openbsd.org/sshd_config) is "the maximum number of authentication attempts permitted per connection". The client tries the agent's keys in the order the agent holds them, then the default key files in `~/.ssh`.
+
+The same login in the lab:
 
 ```bash
-ssh -o IdentitiesOnly=yes user@host
+ssh -p 2241 labuser@127.0.0.1 id -un
 ```
 
-This way, you're narrowing down the authentication methods, and that can clear up the issue.
-
-### **3. Increase MaxAuthTries in /etc/ssh/sshd_config**
-
-Sometimes, the issue is that the server's threshold for failed attempts is just too low. You can fix this by increasing the MaxAuthTries value in the SSH daemon configuration file. Here's how:
-
-```bash
-sudo nano /etc/ssh/sshd_config
+```text
+Received disconnect from 127.0.0.1 port 2241:2: Too many authentication failures
+Disconnected from 127.0.0.1 port 2241
 ```
 
-Find the line that says MaxAuthTries and increase the value. If it doesn't exist, add:
+With `-v` you can watch the loop. The agent returns seven keys, the client offers them in order, and the disconnect arrives after the sixth offer:
 
 ```bash
+ssh -v -p 2241 labuser@127.0.0.1 id -un 2>&1 | grep -E "agent returned|Will attempt key: labkey|Offering public key|disconnect"
+```
+
+```text
+debug1: get_agent_identities: agent returned 7 keys
+debug1: Will attempt key: labkey1 ED25519 SHA256:+s9qp5Ts1Ha52dmM9x71mWvxKM5QYo2GwKexdXBvsWI agent
+debug1: Will attempt key: labkey2 ED25519 SHA256:rW2mdZpo7uz0JgNDZCtgXBjpeuCXn1vx83vzBn9FXHw agent
+debug1: Will attempt key: labkey3 ED25519 SHA256:gFUx6gM/jFDkSUa6YwPeTq3Ip+37sDuG5GtQW2LVIvM agent
+debug1: Will attempt key: labkey4 ED25519 SHA256:DK/L8AVGzAPGpmslXtTzsO7OYgtJ+olgBUTSG+jMmwk agent
+debug1: Will attempt key: labkey5 ED25519 SHA256:P0Yfsw2cVEaaw17eO22z4vpE8T+9KdI/nonwGNCdYbE agent
+debug1: Will attempt key: labkey6 ED25519 SHA256:FrUUiUOhWOHKRN9RHaJewc1IfGrwi9tWLhqvWEeEP+U agent
+debug1: Will attempt key: labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y agent
+debug1: Offering public key: labkey1 ED25519 SHA256:+s9qp5Ts1Ha52dmM9x71mWvxKM5QYo2GwKexdXBvsWI agent
+debug1: Offering public key: labkey2 ED25519 SHA256:rW2mdZpo7uz0JgNDZCtgXBjpeuCXn1vx83vzBn9FXHw agent
+debug1: Offering public key: labkey3 ED25519 SHA256:gFUx6gM/jFDkSUa6YwPeTq3Ip+37sDuG5GtQW2LVIvM agent
+debug1: Offering public key: labkey4 ED25519 SHA256:DK/L8AVGzAPGpmslXtTzsO7OYgtJ+olgBUTSG+jMmwk agent
+debug1: Offering public key: labkey5 ED25519 SHA256:P0Yfsw2cVEaaw17eO22z4vpE8T+9KdI/nonwGNCdYbE agent
+debug1: Offering public key: labkey6 ED25519 SHA256:FrUUiUOhWOHKRN9RHaJewc1IfGrwi9tWLhqvWEeEP+U agent
+Received disconnect from 127.0.0.1 port 2241:2: Too many authentication failures
+```
+
+sshd logs the same connection in two lines at the default `LogLevel`. On Ubuntu and Debian sshd runs as the `ssh` unit, so read them with `sudo journalctl -u ssh -n 50`; `journalctl` is also in the [Linux commands reference](/linux-commands/).
+
+```text
+maximum authentication attempts exceeded for labuser from 172.17.0.1 port 46434 ssh2 [preauth]
+Disconnecting authenticating user labuser 172.17.0.1 port 46434: Too many authentication failures [preauth]
+```
+
+With `LogLevel VERBOSE` in sshd_config, sshd writes one line per rejected key first, with its fingerprint:
+
+```text
+Failed publickey for labuser from 172.17.0.1 port 55570 ssh2: ED25519 SHA256:+s9qp5Ts1Ha52dmM9x71mWvxKM5QYo2GwKexdXBvsWI
+```
+
+`172.17.0.1` is the Docker bridge address the container saw as the client.
+
+## How do I fix SSH too many authentication failures?
+
+Add `-o IdentitiesOnly=yes` and name the key with `-i`. The client then offers that one key instead of everything in the agent.
+
+```bash
+ssh -i /tmp/bitdoze-refresh-ssh/keys/labkey7 -o IdentitiesOnly=yes -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+labuser
+```
+
+The agent still holds seven keys. With `-v`, the lines that matter:
+
+```text
+debug1: get_agent_identities: agent returned 7 keys
+debug1: Will attempt key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit agent
+debug1: Offering public key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit agent
+debug1: Server accepts key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit agent
+Authenticated to 127.0.0.1 ([127.0.0.1]:2241) using "publickey".
+```
+
+The word `explicit` marks a key you named.
+
+`IdentitiesOnly` is a public key option and nothing else. With it, ssh_config(5) says, ssh uses only the identities in the config files, the default files and the command line, even when ssh-agent offers more. It does not switch key authentication off, and it does nothing for passwords. For the password prompt, use [PubkeyAuthentication=no](#how-do-i-get-the-password-prompt-instead-of-a-key) instead.
+
+Keep `IdentitiesOnly=yes` on even when `-i` seems enough. A named key that is in the agent goes first. A named key that is not goes last, after every agent key. Here the lab removed `labkey7` from the agent, six keys stayed, and `-i` alone failed:
+
+```bash
+ssh-add -d /tmp/bitdoze-refresh-ssh/keys/labkey7
+ssh -i /tmp/bitdoze-refresh-ssh/keys/labkey7 -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+Identity removed: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 (labkey7)
+Received disconnect from 127.0.0.1 port 2241:2: Too many authentication failures
+Disconnected from 127.0.0.1 port 2241
+```
+
+The same login with `-o IdentitiesOnly=yes` reads the key from its file and offers nothing else:
+
+```text
+debug1: get_agent_identities: agent returned 6 keys
+debug1: Will attempt key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit
+debug1: Offering public key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit
+debug1: Server accepts key: /tmp/bitdoze-refresh-ssh/keys/labkey7 ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit
+Authenticated to 127.0.0.1 ([127.0.0.1]:2241) using "publickey".
+```
+
+If the key lives only in the agent and no private key file exists on disk, name its public key file: `ssh -i ~/.ssh/id_ed25519_work.pub -o IdentitiesOnly=yes`. ssh(1) then takes the matching private key from the agent, as in the lab run with the private file moved away:
+
+```text
+debug1: Will attempt key: /tmp/bitdoze-refresh-ssh/keys/labkey7.pub ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit agent
+debug1: Server accepts key: /tmp/bitdoze-refresh-ssh/keys/labkey7.pub ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y explicit agent
+```
+
+When the key you name is wrong, the client makes one rejected offer and then moves to the password method. With password attempts turned off, it refuses at once:
+
+```bash
+ssh -i /tmp/bitdoze-refresh-ssh/keys/labkey1 -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+labuser@127.0.0.1: Permission denied (publickey,password).
+```
+
+## How do I make IdentitiesOnly permanent for one host?
+
+Put `IdentityFile` and `IdentitiesOnly yes` in a `Host` block in `~/.ssh/config`. A plain `ssh web1` then offers only that key:
+
+```ini
+Host web1
+    HostName 10.0.0.5
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519_server
+    IdentitiesOnly yes
+```
+
+The lab block got in on the first offer. Do it per host. A global `Host *` block with `IdentitiesOnly yes` and no `IdentityFile` does not switch keys off. In the lab it offered one key, the default `id_rsa` file on the workstation, and nothing that lives only in the agent. The same block can hold a port or a jump host, and the [SSH tunneling guide](/ssh-tunneling-linux/) shows tunnel settings in `Host` blocks.
+
+## How do I remove keys from the ssh agent?
+
+List the keys with `ssh-add -l`. Remove one with `ssh-add -d` and its key file, or all of them with `ssh-add -D`.
+
+```bash
+ssh-add -l
+```
+
+```text
+256 SHA256:+s9qp5Ts1Ha52dmM9x71mWvxKM5QYo2GwKexdXBvsWI labkey1 (ED25519)
+...
+256 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y labkey7 (ED25519)
+```
+
+In the lab:
+
+```bash
+ssh-add -d /tmp/bitdoze-refresh-ssh/keys/labkey1
+ssh-add -D
+ssh-add -l
+ssh-add /tmp/bitdoze-refresh-ssh/keys/labkey7
+ssh -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+Identity removed: /tmp/bitdoze-refresh-ssh/keys/labkey1 ED25519 (labkey1)
+All identities removed.
+The agent has no identities.
+Identity added: /tmp/bitdoze-refresh-ssh/keys/labkey7 (labkey7)
+labuser
+```
+
+The agent keeps keys in the order you load them, and the client offers them in that order. When several must stay loaded, load the one you need first. `ssh-add` talks to the agent named in `SSH_AUTH_SOCK` (ssh-agent(1)). Inside an SSH session with agent forwarding, that socket leads back to the agent you forwarded, so `ssh-add -D` there empties your own. `AddKeysToAgent` adds every key that ssh reads from a file to the agent (ssh_config(5)), so the list can grow without `ssh-add`. To create the key first, see the [SSH key setup guide](/link-github-with-ssh-maco-linux/).
+
+A second agent that holds one key keeps that key apart from the rest. Select it with `IdentityAgent`:
+
+```bash
+eval "$(ssh-agent -a ~/.ssh/agent-work -s)"
+ssh-add ~/.ssh/id_ed25519_work
+ssh -o IdentityAgent=~/.ssh/agent-work deploy@10.0.0.5
+```
+
+The lab's second agent held one key, and the login went through on the first offer. On Fish the first line is `eval (ssh-agent -c -a ~/.ssh/agent-work)`. `ssh-agent -k` kills the agent named in `SSH_AGENT_PID`.
+
+## How do I get the password prompt instead of a key?
+
+Add `-o PubkeyAuthentication=no`. The client then skips key authentication and asks for the password, even with seven keys in the agent:
+
+```bash
+ssh -o PubkeyAuthentication=no -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+debug1: Authentications that can continue: publickey,password
+debug1: Next authentication method: password
+Authenticated to 127.0.0.1 ([127.0.0.1]:2241) using "password".
+```
+
+`-o PreferredAuthentications=password` gave the same three lines in the lab. Both leave the agent alone, so other hosts keep their keys. A wrong password is a failed attempt against the same `MaxAuthTries`, and `NumberOfPasswordPrompts` gives you 3 by default (ssh_config(5)).
+
+## How do I raise MaxAuthTries on the server?
+
+Put the value in a file under `/etc/ssh/sshd_config.d/`, check it with `sudo sshd -t`, then run `sudo systemctl reload ssh`. Raise it only on a server you control, when the clients cannot change: a shared workstation with one agent, or a CI runner.
+
+I would stop there and leave the rest of sshd alone. Read the value sshd uses now:
+
+```bash
+sudo sshd -T | grep -i maxauthtries
+```
+
+```text
+maxauthtries 6
+```
+
+Ubuntu and Debian read `/etc/ssh/sshd_config.d/*.conf` before the rest of `sshd_config`, because the `Include` line sits at the top. A drop-in file therefore wins and leaves the main file untouched. The lab ran these as root inside the container; on a host they need `sudo`:
+
+```bash
+echo "MaxAuthTries 10" | sudo tee /etc/ssh/sshd_config.d/50-maxauthtries.conf
+sudo sshd -t
+sudo systemctl reload ssh
+sudo sshd -T | grep -i maxauthtries
+```
+
+```text
 MaxAuthTries 10
+maxauthtries 10
 ```
 
-Don't forget to restart the SSH service:
+`sshd -t` checks the whole config and prints nothing when it is fine. The `ssh` unit's two `ExecReload` lines are `/usr/sbin/sshd -t` and `/bin/kill -HUP $MAINPID`, so a config that fails the test never loads. On the RHEL family the unit is `sshd`, so the command is `sudo systemctl reload sshd`. `sshd.service` works on Ubuntu and Debian too, as an alias of `ssh.service`.
+
+The container has no systemd, so the lab sent the same signal by hand, `kill -HUP` to the sshd PID. The log shows sshd restarting with the new config:
+
+```text
+Received SIGHUP; restarting.
+Server listening on 0.0.0.0 port 22.
+Server listening on :: port 22.
+```
+
+The login that failed before, same client and same seven keys, then got through on the seventh offer. Six `Failed publickey` lines sit above this one in the log:
+
+```text
+labuser
+```
+
+```text
+Accepted key ED25519 SHA256:iW9WkycuYQSdrl22anJrNA0J1itbOyir0Wkh5PuGi+Y found at /home/labuser/.ssh/authorized_keys:1
+```
+
+<Notice type="warning" title="Keep a second session open">
+Keep one root shell open on the server while you change sshd, and run `sudo sshd -t` before every reload. A config that fails the test never loads, but a valid one that locks you out (a wrong `AllowUsers`, a changed port) does. Rollback for this change is `sudo rm /etc/ssh/sshd_config.d/50-maxauthtries.conf` and the same reload.
+</Notice>
+
+A broken drop-in looks like this, and `sshd -t` exits with 255:
+
+```text
+/etc/ssh/sshd_config.d/50-maxauthtries.conf line 1: MaxAuthTries integer value invalid.
+```
+
+If the setting already exists somewhere else, know which one wins. sshd_config(5) keeps "the first obtained value" for each keyword. sshd processes `Include` files in lexical order, and the `Include` line sits above the main file's own lines. In the lab a `MaxAuthTries 4` appended to `sshd_config` lost to the `10` in `50-maxauthtries.conf`, and a new `10-early.conf` with `MaxAuthTries 8` beat both. Only the `sudo sshd -T | grep -i maxauthtries` output shows the value in use. Check the directory before you add a file; an Ubuntu machine can already have a `50-cloud-init.conf` in it.
+
+What does it cost? Every extra attempt is one more password guess per connection for someone who has a valid username. `10` leaves room for three keys beyond the seven in this lab. If the goal is to keep brute force out, [CrowdSec](/crowdsec-secure-server/) does that without touching `MaxAuthTries`; the rest of the knobs are in the [SSH hardening guide](/secure-ssh-server-linux/).
+
+## Why is the right key refused after the error on OpenSSH 9.8 or later?
+
+`PerSourcePenalties` adds 5 seconds per failed login for your address, and sshd drops new connections from it once more than 15 seconds remain. Four failed logins within a second are enough, and the right key does not help until the penalty expires.
+
+OpenSSH 9.8 (released 2024-07-01) introduced the option, on by default; `sshd -T` on the lab server lists `authfail:5s`, `min:15` and `max:600`. One failed login changes nothing, since 5 seconds stay under the threshold. From the server log after the first failed login:
+
+```text
+srclimit_penalise: ipv4: new 172.17.0.1/32 deferred penalty of 5 seconds for penalty: failed authentication
+```
+
+The second and third failed logins added their 5 seconds without a log line. The fourth crossed the threshold, and sshd dropped the next connection:
+
+```text
+srclimit_penalise: 172.17.0.1/32: activating ipv4 penalty of 20 seconds for penalty: failed authentication
+drop connection #0 from [172.17.0.1]:37852 on [172.17.0.4]:22 penalty: failed authentication
+```
+
+That next connection carried the right key, and sshd refused it anyway:
+
+```text
+debug1: kex_exchange_identification: banner line 0: Not allowed at this time
+kex_exchange_identification: Connection closed by remote host
+Connection closed by 127.0.0.1 port 2241
+```
+
+Twenty-five seconds later the same command logged in. A retry loop behind this error turns a wrong key into a short lockout of a whole address. A CI job or a retrying script is such a loop. The second symptom looks nothing like the first. The client shows a closed connection before the banner and no "Too many" line.
+
+To see whether your server has the feature:
 
 ```bash
-sudo systemctl restart sshd
+sudo sshd -T | grep -i persourcepenalties
 ```
 
-## Conclusion
+On the Debian 13 server it prints a line; on Debian 12 (OpenSSH 9.2) `grep -c` prints `0`. To keep a bastion or a runner out of the penalty table, list its address in a drop-in with `PerSourcePenaltyExemptList 203.0.113.10`. sshd_config(5) accepts a comma-separated list of addresses there (not run in this lab). sshd tracks the penalty per single IPv4 address (`PerSourceNetBlockSize 32:128`), so everyone behind one NAT address shares it. The [9.8 release notes](https://www.openssh.com/txt/release-9.8) warn about servers that take connections from addresses behind NAT or proxies. A [VPS set up for coding agents](/vps-ai-coding-setup/) has the same shape. Every job on it leaves through one address, so one failing job locks out the rest.
 
-These steps should help you tackle the "Received disconnect from UNKNOWN port 65535:2: Too Many Authentication Failures" error.It's all about understanding what's happening under the hood and applying the right solution.
+| Setting | What it limits | Default | What the client sees |
+|---|---|---|---|
+| `MaxAuthTries` | Authentication attempts per connection | 6 | `Too many authentication failures` |
+| `PerSourcePenalties` (9.8 and later) | New connections from an address after failures | `authfail:5s`, enforced past `min:15`, up to `max:10m` | `Connection closed by host port 22`, before the banner |
+| `MaxStartups` | Concurrent unauthenticated connections | `10:30:100` | sshd drops the connection while it is busy with unauthenticated clients (sshd_config(5), not reproduced here) |
+| `LoginGraceTime` | Seconds a connection may take to log in | 120 | sshd disconnects after that time if the login is not done (sshd_config(5), not reproduced here) |
 
-Remember, servers can be quirky, but they don't have to be a mystery. Happy hosting!
+The last two have nothing to do with this error. If you raise `MaxAuthTries`, leave them alone.
+
+## Why does the message say UNKNOWN port 65535?
+
+The client's connection runs through a `ProxyCommand` or [jump host](/ssh-proxyjump-jumphost/) pipe instead of a socket, so it has no peer address to print. OpenSSH's `packet.c` fills in `UNKNOWN` and port `65535` for that case.
+
+A direct connection prints the server address, as above. The lab went through a `ProxyCommand` with the same seven keys:
+
+```bash
+ssh -o "ProxyCommand=nc %h %p" -p 2241 labuser@127.0.0.1 id -un
+```
+
+```text
+Received disconnect from UNKNOWN port 65535:2: Too many authentication failures
+Disconnected from UNKNOWN port 65535
+```
+
+A `ProxyJump` login printed the same first line when the jump hop authenticated with the right key and the final hop offered all seven. Same error, same fix.
+
+## FAQ
+
+<Accordion label="How many keys can fail before ssh gives up?" group="faq">
+Six by default: `MaxAuthTries 6` in sshd_config(5). Every rejected key is one attempt, so the client never offers the seventh key in your agent. The key you need has to be among the first six the client tries. Raise the number on the server or offer fewer keys.
+</Accordion>
+
+<Accordion label="Is ssh -i with a key file enough on its own?" group="faq">
+Not always. The client offers a named key that is in the agent first. A named key that exists only on disk comes after every agent key, and six of those end the connection. Add `-o IdentitiesOnly=yes` so the named key is the only one offered.
+</Accordion>
+
+<Accordion label="Does IdentitiesOnly yes help when I log in with a password?" group="faq">
+No. It limits public key authentication, and the client still offers the default key files in `~/.ssh`. For the password prompt use `ssh -o PubkeyAuthentication=no user@host`, or `PreferredAuthentications=password`, which leaves the agent untouched for other hosts.
+</Accordion>
+
+<Accordion label="What does raising MaxAuthTries cost?" group="faq">
+Each extra attempt is one more password guess per connection. Raise it only on servers you control, when the clients cannot change. Put the value in `/etc/ssh/sshd_config.d/50-maxauthtries.conf`, run `sudo sshd -t`, then `sudo systemctl reload ssh` (`sshd` on the RHEL family), and confirm with `sudo sshd -T | grep -i maxauthtries`.
+</Accordion>
+
+<Accordion label="Why does ssh print Connection closed by remote host after failed logins?" group="faq">
+On OpenSSH 9.8 and later, `PerSourcePenalties` adds 5 seconds per failed login for your address. Once more than 15 seconds remain, sshd drops new connections for up to 10 minutes, before the client offers any key. Wait it out, or exempt the address with `PerSourcePenaltyExemptList`.
+</Accordion>
+
+<Accordion label="Is UNKNOWN port 65535 a different error?" group="faq">
+No. The client's connection is a pipe to a `ProxyCommand` or `ProxyJump` hop, not a socket, so it has no peer address to print and substitutes `UNKNOWN` and port `65535`. A direct connection prints the server's address and port. The cause and the fix are the same.
+</Accordion>
+
+<Accordion label="Which keys does ssh try first?" group="faq">
+The client offers keys named with `-i` or `IdentityFile` that are also in the agent first. Then come the other agent keys, in the order the agent holds them. Keys that exist only as files, named or default in `~/.ssh`, come after those. `ssh -v` prints the order as `Will attempt key` lines before the first offer, so you can count the keys ahead of the one you need.
+</Accordion>
+
+<Accordion label="Do I restart or reload sshd after changing the config?" group="faq">
+Reload. Run `sudo sshd -t` first, then `sudo systemctl reload ssh` (`sudo systemctl reload sshd` on the RHEL family). The unit sends SIGHUP, sshd re-reads the config and running sessions stay open. Keep a second session open while you do it.
+</Accordion>
