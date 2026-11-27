@@ -1,84 +1,411 @@
 ---
 date: 2025-06-27T0:00:00Z
+lastmod: 2026-11-27T00:00:00Z
 translationKey: "fix-rpm-transaction-lock-waiting"
-title: "Arreglar el aviso «Waiting for Transaction Lock on /var/lib/rpm/.rpm.lock»"
-meta_title: "Arreglar el aviso Waiting for Transaction Lock"
-description: "Aprende a resolver el error de bloqueo de transacciones de RPM que impide instalar y gestionar paquetes en sistemas Linux."
+title: "RPM esperando el bloqueo de transacción: busca quién lo tiene"
+meta_title: "Bloqueo de transacción de RPM: busca quién lo tiene y espera"
+description: "El aviso waiting for transaction lock de rpm indica que un dnf, yum o rpm activo tiene el bloqueo. Busca su PID con fuser o lsof y espera o detén ese PID."
 image: "@assets/images/24/12/fix-rpm-transaction-lock-waiting.webp"
-lastmod: 2026-11-13T00:00:00Z
-categories: ["self-hosting"]
+categories: ["linux"]
 authors: ["Dragos"]
-tags: ["linux"]
+tags: ["rpm", "dnf", "yum"]
 canonical: https://www.bitdoze.com/es/arreglar-bloqueo-transaccion-rpm/
-quickAnswer: "Mata el proceso rpm/yum bloqueado y ejecuta rm -f /var/lib/rpm/.rpm.lock."
+quickAnswer: "Ejecuta sudo fuser -v /var/lib/rpm/.rpm.lock o sudo lsof /var/lib/rpm/.rpm.lock para obtener el PID del proceso dnf, yum, rpm o PackageKit en ejecución que tiene el bloqueo. Espera a que termine, o detén solo ese PID con kill -TERM. Nunca borres el archivo de bloqueo."
 ---
 
-¿Ves este error al ejecutar `yum` o `dnf`?
+import Accordion from "@components/widgets/Accordion.astro";
+import ListCheck from "@components/widgets/ListCheck.astro";
+import Notice from "@components/widgets/Notice.astro";
 
-```sh
+Otro proceso tiene el bloqueo ahora mismo. `sudo fuser -v /var/lib/rpm/.rpm.lock` muestra su PID. Espera a que ese proceso termine, o detén solo ese PID con `kill -TERM`. El archivo de bloqueo no es el problema, así que déjalo donde está.
+
+El aviso se ve así:
+
+```text
 warning: waiting for transaction lock on /var/lib/rpm/.rpm.lock
 ```
 
-Hay otro proceso de paquetes en ejecución, o uno anterior falló y dejó atrás un archivo de bloqueo. Así se soluciona.
+Todas las salidas de abajo son reales y provienen de contenedores desechables ejecutados el 2026-11-27:
 
-## Causas del problema
+| Sistema | rpm | dnf y yum | Base de datos de paquetes |
+|---|---|---|---|
+| Rocky Linux 9.9 | 4.16.1.3 | 4.14.0 | sqlite en `/var/lib/rpm` |
+| Rocky Linux 8.10 | 4.14.3 | 4.7.0 | Berkeley DB en `/var/lib/rpm` |
+| CentOS Linux 7.9.2009 | 4.11.3 | yum 3.4.3, sin dnf | Berkeley DB en `/var/lib/rpm` |
+| Rocky Linux 10.3 | 4.19.1.1 | 4.20.0 | sqlite en `/usr/lib/sysimage/rpm` |
 
-1. **Operaciones simultáneas** - Varios comandos `yum`/`dnf` ejecutándose a la vez
-2. **Procesos interrumpidos** - Una instalación o actualización anterior se interrumpió
-3. **Bloqueos residuales** - Un fallo del sistema dejó archivos de bloqueo atrás
+En Rocky 10 el aviso nombra `/usr/lib/sysimage/rpm/.rpm.lock`, porque allí `/var/lib/rpm` es un enlace simbólico a ese directorio. Las rutas de abajo son las de Rocky 9.
 
-## La solución
+## ¿Por qué rpm espera el bloqueo de transacción?
 
-### Paso 1: Terminar los procesos atascados
+Otro proceso es dueño del bloqueo de escritura de ese archivo, y rpm no deja que dos transacciones cambien a la vez la base de datos de rpm. El titular es una transacción de dnf, yum, rpm o PackageKit en curso, no un archivo sobrante.
+
+rpm abre el archivo con `O_RDWR|O_CREAT` y lo bloquea con `fcntl`, en `lib/rpmlock.c` del código fuente de rpm. El primer intento no espera. Cuando falla, rpm imprime `waiting for %s lock on %s` y llama a `fcntl` otra vez con `F_SETLKW`, que sí espera. El archivo tiene 0 bytes y existe antes de que se ejecute cualquier transacción. `ls -li` en los cuatro contenedores mostró:
+
+| Sistema | Inodo | Fecha en el listado |
+|---|---|---|
+| Rocky Linux 9.9 | 5244673 | Nov 13 00:29 |
+| Rocky Linux 8.10 | 5253638 | May 28 2024 |
+| CentOS Linux 7.9.2009 | 5268324 | Nov 13 2020 |
+| Rocky Linux 10.3 | 5290907 | Nov 13 01:28 |
+
+Las fechas son anteriores a los contenedores. Cada contenedor había ejecutado una transacción antes del listado, y ninguno de ellos cambió el archivo. El bloqueo pertenece al descriptor de archivo abierto, y el kernel lo libera cuando el proceso sale, salga como salga. Un dnf que falla no puede dejar este bloqueo atrás. Sí puede dejar dañada la base de datos, y ese daño llega con otro error, `BDB0087 DB_RUNRECOVERY`.
+
+Estos procesos toman el bloqueo:
+
+| Titular | Lo que muestra `ps` | Cómo terminarlo |
+|---|---|---|
+| `dnf install`, `dnf update`, `yum` en EL8 y posteriores | `/usr/bin/python3.9 /usr/bin/dnf -y install ...` en EL9, `/usr/libexec/platform-python /usr/bin/dnf ...` en EL8 | Esperar, o `kill -TERM` a ese PID |
+| `rpm -U`, `rpm -i`, `rpm -e` | `rpm -Uvh --replacepkgs ...` | Esperar, o `kill -TERM` a ese PID |
+| PackageKit, que la página Software Updates de Cockpit usa para aplicar actualizaciones | `packagekitd` (no ejecutado en el laboratorio) | Esperar, o `sudo systemctl stop packagekit`; la unidad es `packagekit.service` |
+| `dnf-automatic` bajo su temporizador | `dnf-automatic` (no ejecutado en el laboratorio) | Esperar. Solo instala con `apply_updates = True` en `/etc/dnf/automatic.conf`, y el valor por defecto es False |
+| Tareas `dnf` y `yum` de Ansible | el proceso `dnf` o `yum` que inició la tarea (no ejecutado en el laboratorio) | Esperar. El `lock_timeout` del módulo `dnf`, 30 por defecto, es el tiempo de espera del archivo de bloqueo de dnf |
+
+## ¿Cómo encuentro el proceso que tiene el bloqueo de transacción de rpm?
+
+`sudo fuser -v /var/lib/rpm/.rpm.lock` lista todos los PID que tienen el archivo abierto, y `sudo lsof /var/lib/rpm/.rpm.lock` muestra cuál de ellos tiene el bloqueo. `ps -p PID -o etime,args` te dice después qué es y cuánto tiempo lleva en ejecución.
+
+La captura de abajo es de Rocky 9.9. El titular, el proceso dueño del bloqueo, es `rpm -Uvh --replacepkgs` de dos paquetes del kernel, que ejecuta depmod y dracut en sus scriptlets. El proceso en espera, el comando que imprime el aviso, es `rpm -Uv --replacepkgs` de tcpdump en otra terminal. Imprimió el aviso a las 18:10:04, un segundo después de que el titular tomara el bloqueo:
+
 ```bash
-sudo pkill -9 -f 'dnf|yum|rpm'
+ps -eo pid,ppid,tty,stat,etime,args | grep -E '[/ ]rpm '
 ```
 
-### Paso 2: Eliminar los archivos de bloqueo
-```bash
-sudo rm -f /var/lib/rpm/.rpm.lock
-sudo rm -f /var/cache/dnf/metadata_lock.pid
+```text
+  69363   69353 ?        Rs         00:03 rpm -Uvh --replacepkgs /lab/rpms/kernel-modules-core-5.14.0-741.27.1.el9_9.x86_64.rpm /lab/rpms/kernel-modules-5.14.0-741.27.1.el9_9.x86_64.rpm
+  69382   69378 pts/0    Ss+        00:02 rpm -Uv --replacepkgs /lab/rpms/tcpdump-4.99.0-9.el9.x86_64.rpm
 ```
 
-### Paso 3: Reconstruir la base de datos RPM (si es necesario)
-```bash
-mkdir /var/lib/rpm/backup
-cp -a /var/lib/rpm/__db* /var/lib/rpm/backup/
-rm -f /var/lib/rpm/__db.[0-9][0-9]*
-rpm --rebuilddb
-yum clean all
-```
-
-## Solución rápida (sin reconstruir la base de datos)
-
-Si solo necesitas liberar el bloqueo:
-```bash
-sudo pkill -9 -f 'dnf|yum|rpm'
-sudo rm -f /var/lib/rpm/.rpm.lock
-sudo rm -f /var/cache/dnf/metadata_lock.pid
-```
-
-## Comprueba que funcionó
+El listado deja fuera un proceso auxiliar de la captura. Titular y proceso en espera tienen el archivo de bloqueo abierto, así que `fuser` nombra a los dos:
 
 ```bash
-rpm -qa | head -5
-sudo yum update
+sudo fuser -v /var/lib/rpm/.rpm.lock
 ```
 
-## Prevención
+```text
+                     USER        PID ACCESS COMMAND
+/var/lib/rpm/.rpm.lock: 69363 69382
+                     root      F.... rpm
+                     root      F.... rpm
+```
 
-1. No ejecutes varios comandos de paquetes a la vez
-2. Comprueba qué se está ejecutando antes de empezar:
-   ```bash
-   ps aux | grep -E 'yum|dnf|rpm'
-   ```
-3. Usa `Ctrl+C` para detener procesos en lugar de `kill -9`
-4. Evita que los scripts automatizados se solapen
+`F` en la columna ACCESS significa "open file for writing" (fuser(1)). `lsof` distingue al titular del proceso en espera:
 
-## ¿Sigue sin funcionar?
-
-Revisa los registros:
 ```bash
-sudo journalctl -xe | grep -E 'yum|dnf|rpm'
-ls -la /var/lib/rpm/
+sudo lsof /var/lib/rpm/.rpm.lock
 ```
+
+```text
+COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF    NODE NAME
+rpm     69363 root    3uW  REG   0,90        0 5307123 /var/lib/rpm/.rpm.lock
+rpm     69382 root    3u   REG   0,90        0 5307123 /var/lib/rpm/.rpm.lock
+```
+
+`3uW` es el descriptor 3, abierto para lectura y escritura, con un bloqueo de escritura sobre todo el archivo (lsof(8)). El proceso en espera tiene `3u` y ningún bloqueo. El kernel mantiene la misma tabla en `/proc/locks`, donde `5307123` es el inodo que devuelve `ls -i`:
+
+```bash
+grep :5307123 /proc/locks
+```
+
+```text
+3: POSIX  ADVISORY  WRITE 69363 00:5a:5307123 0 EOF
+3: -> POSIX  ADVISORY  WRITE 69382 00:5a:5307123 0 EOF
+```
+
+La línea que empieza con `->` es la petición que espera al bloqueo de arriba. El titular terminó a las 18:10:50, y el proceso en espera continuó en el mismo segundo:
+
+```text
+warning: waiting for transaction lock on /var/lib/rpm/.rpm.lock
+Verifying packages...
+Preparing packages...
+tcpdump-14:4.99.0-9.el9.x86_64
+tcpdump-14:4.99.0-9.el9.x86_64
+```
+
+`ps`, `fuser` y `lsof` también están en la [referencia de comandos de Linux](/es/comandos-linux/).
+
+![El proceso A tiene el bloqueo de escritura sobre /var/lib/rpm/.rpm.lock mientras el proceso B espera, y después B se ejecuta cuando A termina; una segunda fila muestra la comprobación con fuser y lsof y qué hacer cuando se lista un PID vivo o ninguno](@assets/images/24/12/fix-rpm-transaction-lock-waiting-contention.webp)
+
+## ¿Cuánto espera rpm el bloqueo de transacción?
+
+Mientras viva el titular. `F_SETLKW` no tiene timeout, así que el proceso en espera se queda ahí hasta que el bloqueo queda libre o lo detienes con Ctrl+C.
+
+Ctrl+C termina con el proceso en espera, no con el titular. Un informe de 2017 de CentOS 6.8 en [Stack Overflow](https://stackoverflow.com/questions/44759376/cant-create-transaction-lock-on-var-lib-rpm-rpm-lock) muestra a rpm respondiendo al Ctrl+C con `error: can't create transaction lock on /var/lib/rpm/.rpm.lock (Interrupted system call)`. El laboratorio no repitió ese caso.
+
+En una ejecución de laboratorio el titular fue `rpm -Uvh --replacepkgs` de tres paquetes del kernel con sus scriptlets. El proceso en espera imprimió el aviso a las 17:26:15 y continuó a las 17:31:30, una espera de 5 min 15 s. El titular pasó la mayor parte de ese tiempo en depmod y dracut. Era lento, no atascado.
+
+Para ver qué hace el titular, comprueba su antigüedad y su estado, y después sus procesos hijos:
+
+```bash
+ps -o pid,stat,etime,args -p PID
+ps --ppid PID -o pid,stat,etime,args
+```
+
+`ps --ppid` muestra un proceso hijo mientras se ejecuta un scriptlet, por ejemplo `/bin/sh /var/tmp/rpm-tmp.lpqyLA 1`. El estado `D` es suspensión ininterrumpible, normalmente por E/S (ps(1)). Si el titular va lento sin un motivo visible, la [guía de uso de swap](/es/uso-swap-linux/) muestra cómo comprobar el swap.
+
+## ¿Por qué la espera sigue a Ctrl+C, a una terminal cerrada o a un timeout?
+
+Porque el titular sigue ejecutándose. Ctrl+C, una terminal cerrada y el timeout de un job envían cada uno una señal, y una señal que llega durante la transacción no detiene la transacción.
+
+El titular de abajo es una reinstalación del kernel. El laboratorio envió cada señal 3 s después de que el titular tomara el bloqueo:
+
+| Sistema | Señal enviada durante la transacción | El titular salió después de | Código de salida |
+|---|---|---|---|
+| Rocky Linux 9.9, dnf 4.14.0 | SIGINT (Ctrl+C) | 51 s, paquetes instalados | 0 |
+| Rocky Linux 9.9, dnf 4.14.0 | SIGTERM | 51 s | 143 |
+| Rocky Linux 9.9, dnf 4.14.0 | SIGHUP (terminal cerrada) | 52 s | 129 |
+| CentOS Linux 7.9, yum 3.4.3 | SIGINT (Ctrl+C) | 23 s, paquete instalado | 0 |
+| CentOS Linux 7.9, yum 3.4.3 | SIGTERM | 21 s | 1 |
+| CentOS Linux 7.9, yum 3.4.3 | SIGHUP (terminal cerrada) | 23 s | 1 |
+
+Todas las ejecuciones terminaron su transacción antes de que el proceso saliera. En Rocky 9 `/proc/PID/status` mostró por qué:
+
+```text
+SigBlk:	fffffffe7ff3fa17
+```
+
+rpm bloquea las señales de interrupción durante la transacción de escritura, así que SIGINT, SIGTERM y SIGHUP quedan pendientes hasta que termina. `dnf history` registra cómo terminó la ejecución interrumpida. Esta es la ejecución de SIGTERM, con el ID que da `sudo dnf history list`:
+
+```bash
+sudo dnf history info 16
+```
+
+```text
+Begin time     : Fri Nov 27 18:04:08 2026
+End time       : Thu Jan  1 00:00:00 1970 (-1795802648 seconds)
+Return-Code    : Failure: 1
+```
+
+Los paquetes están instalados y el registro no tiene hora de fin.
+
+Esta es la espera que sigue a una interrupción. Pulsas Ctrl+C, no parece pasar nada, abres una segunda terminal y ejecutas el siguiente dnf, y ese siguiente dnf pasa a ser el proceso en espera. Con automatización lo mismo ocurre un paso más tarde. El job agota su timeout, el runner lo marca como fallido, y dnf en el host termina la transacción sin él. El reintento da con el bloqueo.
+
+El [KCS 3330211](https://access.redhat.com/solutions/3330211) de Red Hat señala el timeout como la razón habitual de los problemas de rpm. En sus palabras: "The most common reason being an automation tool timed out and abruptly ends the process without letting rpm clear the lock files." Ese artículo trata de procesos que mueren y de una base de datos que se rompe. SIGTERM y SIGHUP dejaron la transacción intacta en la tabla de arriba. SIGKILL no, mira la sección siguiente.
+
+Inicia las actualizaciones largas dentro de tmux, para que una sesión SSH cortada no cambie nada, y elige uno en la [comparativa de multiplexores de terminal](/es/mejores-multiplexores-terminal/). En CI, dale al paso de paquetes más tiempo del que necesita su transacción, como a cualquier otro job en un [montaje de Forgejo y Woodpecker](/es/forgejo-woodpecker-ci-cicd/).
+
+## ¿Cómo detengo al titular sin romper la base de datos de rpm?
+
+Detén solo ese PID con `kill -TERM`, y después espera a que desaparezca.
+
+No ejecutes `pkill -9 -f 'dnf|yum|rpm'`. Mata todos los procesos que coinciden en el host, la actualización sana incluida, y una transacción cortada por SIGKILL puede llevarse la base de datos con ella.
+
+<ListCheck>
+<ul>
+<li>Encuentra el PID con `sudo fuser -v /var/lib/rpm/.rpm.lock`. En `lsof`, la fila con `W` es la del titular.</li>
+<li>Compruébalo con `ps -o pid,stat,etime,args -p PID`. A un dnf o yum que corre con normalidad es mejor dejarlo en paz.</li>
+<li>Detenlo con `kill -TERM PID`. La transacción en curso termina primero, y después el proceso sale.</li>
+<li>Confírmalo con `ps -p PID`, que imprime solo la cabecera. El proceso en espera continúa por sí solo.</li>
+</ul>
+</ListCheck>
+
+Un titular detenido deja atrás un archivo de PID. Después de la ejecución con SIGTERM de arriba, `/var/lib/dnf/rpmdb_lock.pid` todavía contenía el PID muerto, y el siguiente dnf lo reemplazó sin ningún mensaje y eliminó el archivo al salir. En CentOS Linux 7 un yum detenido con SIGTERM deja `/var/run/yum.pid`, y la siguiente ejecución imprime esto:
+
+```text
+There are unfinished transactions remaining. You might consider running yum-complete-transaction, or "yum-complete-transaction --cleanup-only" and "yum history redo last", first to finish them. If those don't work you'll have to try removing/installing packages by hand (maybe package-cleanup can help).
+```
+
+Usa SIGKILL solo cuando el PID ignora SIGTERM y no sale. El kernel libera el bloqueo de inmediato y el proceso en espera continúa. En Rocky Linux 9.9, un `kill -9` a un titular a las 17:36:40 dejó `/proc/locks` vacío para ese archivo 3 s después, y el proceso en espera ya había instalado su paquete. En Rocky Linux 8.10, con Berkeley DB, un solo `kill -9` unos 2 s después de iniciar una transacción bastó:
+
+```text
+error: rpmdb: BDB0113 Thread/process 1073/132559685642112 failed: BDB1507 Thread died in Berkeley DB library
+error: db5 error(-30973) from dbenv->failchk: BDB0087 DB_RUNRECOVERY: Fatal error, run database recovery
+error: cannot open Packages index using db5 -  (-30973)
+error: cannot open Packages database in /var/lib/rpm
+```
+
+Todos los comandos rpm posteriores imprimieron esas cuatro líneas, y kernel-core había desaparecido de la base de datos. Ese error necesita una reconstrucción, no un arreglo del bloqueo. Los pasos están en [cómo recuperar la base de datos de rpm desde DB_RUNRECOVERY](/es/arreglar-error-rpmdb-bdb0087/).
+
+## ¿Es seguro borrar /var/lib/rpm/.rpm.lock?
+
+No. El archivo nunca queda obsoleto, borrarlo no libera ningún bloqueo, y deja entrar un tercer comando mientras el titular sigue en ejecución.
+
+La ejecución de laboratorio en Rocky 9.9 tenía un titular (pid 20862) con el bloqueo de escritura y un proceso en espera (pid 20884) bloqueado en él. Luego `rm -f /var/lib/rpm/.rpm.lock` a las 17:40:08, y un tercer comando, `rpm -Uvh`, arrancó un segundo después. Recreó el archivo de bloqueo con un inodo nuevo, porque rpm lo abre con `O_CREAT`:
+
+```bash
+ls -li /var/lib/rpm/.rpm.lock
+```
+
+```text
+5307123 -rw-r--r-- 1 root root 0 Nov 27 17:40 /var/lib/rpm/.rpm.lock
+```
+
+`readlink /proc/PID/fd/3` en cada proceso rpm mostró qué archivo usa cada uno:
+
+```text
+pid 20862: /var/lib/rpm/.rpm.lock (deleted)
+pid 20884: /var/lib/rpm/.rpm.lock (deleted)
+pid 20905: /var/lib/rpm/.rpm.lock
+```
+
+El titular y el proceso en espera todavía usan el inodo antiguo 5307124, que ya no tiene nombre. El archivo de bloqueo nuevo es el inodo 5307123, y el tercer comando (pid 20905) obtuvo en él un bloqueo de escritura de inmediato:
+
+```text
+45: POSIX  ADVISORY  WRITE 20862 00:5a:5307124 0 EOF
+45: -> POSIX  ADVISORY  WRITE 20884 00:5a:5307124 0 EOF
+81: POSIX  ADVISORY  WRITE 20905 00:5a:5307123 0 EOF
+```
+
+El tercer comando llegó hasta el final con el código de salida 0. El titular estuvo congelado con SIGSTOP durante la captura, y al reanudarse, su propia reinstalación falló:
+
+```text
+error: kernel-modules-5.14.0-741.27.1.el9_9.x86_64: erase failed
+error: kernel-core-5.14.0-741.27.1.el9_9.x86_64: erase failed
+error: kernel-modules-core-5.14.0-741.27.1.el9_9.x86_64: erase failed
+```
+
+El proceso en espera siguió bloqueado hasta que el titular desapareció, así que el borrado no le sirvió de nada, y la propia transacción del titular falló sin ningún beneficio.
+
+<Notice type="warning" title="Borrar el archivo de bloqueo abre la puerta">
+`rm /var/lib/rpm/.rpm.lock` durante una transacción no acorta ninguna espera. Elimina lo único que mantiene fuera al siguiente comando de paquetes, y ese comando puede entonces cambiar la base de datos por debajo del que está en ejecución.
+</Notice>
+
+## ¿Cuáles son los archivos de bloqueo de dnf y yum?
+
+`/var/lib/rpm/.rpm.lock` pertenece a rpm, y dnf y yum mantienen sus propios archivos de PID delante de él. Solo los archivos de PID pueden contener un PID muerto, y dnf y yum reemplazan por su cuenta un PID muerto.
+
+| Archivo | Propietario y uso | Cuándo desaparece | Tras matar el proceso |
+|---|---|---|---|
+| `/var/lib/rpm/.rpm.lock` | rpm, cada transacción de escritura | Nunca, se queda como archivo vacío | Nada que limpiar |
+| `/var/lib/rpm/.dbenv.lock` | rpm, sistemas con Berkeley DB (EL7, EL8) | Nunca | Nada que limpiar |
+| `/var/lib/dnf/rpmdb_lock.pid` | dnf 4, alrededor de la comprobación y ejecución de la transacción | Al salir, y al arrancar | Un PID muerto, reemplazado por el siguiente dnf |
+| `/var/cache/dnf/metadata_lock.pid` | dnf 4, descarga de metadatos | Al salir, y al arrancar | Un PID muerto, reemplazado por el siguiente dnf |
+| `/var/cache/dnf/download_lock.pid` | dnf 4, descarga de paquetes | Al salir, y al arrancar | Un PID muerto, reemplazado por el siguiente dnf |
+| `/var/log/log_lock.pid` | dnf 4, archivo de log | Al salir, y al arrancar | Un PID muerto, reemplazado por el siguiente dnf |
+| `/var/run/yum.pid` | yum 3 en EL7 | Al salir | Un PID muerto, reemplazado por el siguiente yum |
+
+dnf escribe su PID en el archivo y comprueba `/proc/PID/stat` del PID que encuentra allí. "Al arrancar" viene de `/usr/lib/tmpfiles.d/dnf.conf`, que elimina los cuatro archivos de dnf en cada arranque. Solo un archivo que contiene algo distinto de un número detiene a dnf. Imprime "Malformed lock file found" y el consejo de eliminar el archivo a mano o ejecutar `systemd-tmpfiles --remove dnf.conf`. Hazlo solo después de que hayan terminado todos los demás procesos de dnf y yum.
+
+El bloqueo propio de dnf va antes que el de rpm, así que un segundo dnf espera allí y nunca llega al aviso de rpm. Dos comandos dnf corrieron a la vez en Rocky Linux 9.9, y el proceso en espera aguardó 54 s:
+
+```text
+Running transaction check
+Waiting for process with pid 1599 to finish.
+```
+
+yum 3 en CentOS Linux 7 imprime por sí mismo quién tiene el bloqueo, cada 2 s hasta que queda libre:
+
+```text
+Another app is currently holding the yum lock; waiting for it to exit...
+  The other application is: yum
+    Memory : 103 M RSS (319 MB VSZ)
+    Started: Fri Nov 27 17:50:37 2026 - 00:13 ago
+    State  : Sleeping, pid: 10787
+```
+
+## ¿Por qué los scripts reciben "can't create transaction lock" en lugar de un aviso?
+
+Porque su entrada estándar no es una terminal. En rpm 4.14 y posteriores, el código de `rpmlockAcquire` espera e imprime el aviso solo cuando `isatty(STDIN_FILENO)` es verdadero, con el comentario "dont wait within scriptlets".
+
+Un job de cron, una tarea de Ansible o un paso de CI recibe un error en su lugar, y un comando rpm simple sale entonces con el código 1.
+
+Contra un titular `rpm -Uvh`, `dnf -y reinstall tcpdump` con `/dev/null` en stdin, en Rocky Linux 9.9:
+
+```text
+Running transaction
+RPM: error: can't create transaction lock on /var/lib/rpm/.rpm.lock (Resource temporarily unavailable)
+The downloaded packages were saved in cache until the next successful transaction.
+You can remove cached packages by executing 'dnf clean packages'.
+Error: Could not run transaction.
+```
+
+Las mismas líneas aparecieron en Rocky Linux 8.10 con dnf 4.7.0. Un comando rpm simple imprime solo el error:
+
+```text
+error: can't create transaction lock on /var/lib/rpm/.rpm.lock (Resource temporarily unavailable)
+```
+
+CentOS Linux 7 tiene rpm 4.11.3, que no comprueba la terminal. Allí un comando rpm con `/dev/null` en stdin esperó 6 s en el laboratorio, imprimió el aviso y terminó con el código de salida 0.
+
+Para que un job de dnf falle de inmediato en lugar de esperar a otro dnf, define `exit_on_lock`. dnf.conf(5) lo documenta como "Should the dnf client exit immediately when something else has the lock. Default is False.":
+
+```bash
+dnf --setopt=exit_on_lock=True -y reinstall tcpdump < /dev/null
+```
+
+```text
+Running transaction check
+The downloaded packages were saved in cache until the next successful transaction.
+You can remove cached packages by executing 'dnf clean packages'.
+RPMDB already locked by 77524
+  The application with PID 77524 is: dnf
+    Memory :  91 M RSS (106 MB VSZ)
+    Started: Fri Nov 27 18:11:39 2026 - 00:05 ago
+    State  : Running
+```
+
+`State` es el estado del titular según `ps`. El titular era `dnf -y reinstall kernel-core kernel-modules kernel-modules-core`, 4 s después de iniciar su transacción.
+
+En yum 3 la misma opción es `--setopt=exit_on_lock=1`:
+
+```text
+Existing lock /var/run/yum.pid: another copy is running as pid 17922.
+Another app is currently holding the yum lock; exiting as configured by exit_on_lock
+```
+
+La opción cubre solo los archivos de PID de dnf y yum. Contra un titular rpm, el mismo comando dnf seguía llegando al bloqueo de rpm e imprimía el aviso.
+
+## ¿Cómo evito que dos jobs de paquetes choquen?
+
+Ejecuta un solo job de paquetes por host, y haz que un segundo arranque salga en vez de ponerse en cola. `flock` hace eso para scripts y cron:
+
+```bash
+flock -n /var/lock/dnf-job.lock dnf -y update
+```
+
+Una segunda llamada a `flock -n` en el laboratorio salió con el código 1 mientras la primera ejecución tenía el archivo, y pasó 6 s después. Rocky Linux 9.9 también incluye `dnf-makecache.timer`, que ejecuta `dnf makecache --timer` más o menos cada hora, con hasta una hora de retraso aleatorio. `dnf-automatic` solo instala con `apply_updates = True`, así que aleja tu propia automatización de su temporizador cuando configures eso. Un job que espera para siempre parece un job colgado, así que vigila el resultado. La [guía de monitorización de servidores](/es/monitorizar-servidor/) cubre las alertas.
+
+## ¿Cómo compruebo la base de datos de rpm después de la espera?
+
+Ejecuta dos comandos de lectura cuando el titular ya no esté, y después lee el historial:
+
+```bash
+rpm -qa | wc -l
+rpm -q tcpdump kernel-core kernel-modules kernel-modules-core
+```
+
+```text
+210
+tcpdump-4.99.0-9.el9.x86_64
+kernel-core-5.14.0-741.27.1.el9_9.x86_64
+kernel-modules-5.14.0-741.27.1.el9_9.x86_64
+kernel-modules-core-5.14.0-741.27.1.el9_9.x86_64
+```
+
+El número debería coincidir con el último que tenías, y los paquetes de la ejecución interrumpida deberían estar ahí. `sudo dnf history list` da el ID de la última transacción, y `sudo dnf history info N` su hora de fin y su código de retorno.
+
+Si `rpm -qa` imprime `BDB0087 DB_RUNRECOVERY` en lugar de un número, la base de datos está dañada y el bloqueo no es tu problema. Sigue la [guía de recuperación de DB_RUNRECOVERY](/es/arreglar-error-rpmdb-bdb0087/).
+
+## Preguntas frecuentes
+
+<Accordion label="¿Arreglará la espera borrar /var/lib/rpm/.rpm.lock?" group="faq">
+No. El archivo es un ancla vacía para un bloqueo del kernel que tiene un proceso en ejecución, y borrarlo no libera nada. En el laboratorio un tercer comando corrió entonces junto al titular, y el titular falló con "erase failed". Busca el PID con `sudo fuser -v /var/lib/rpm/.rpm.lock` y espera a que termine.
+</Accordion>
+
+<Accordion label="¿Expira alguna vez el bloqueo de transacción de rpm?" group="faq">
+No. rpm espera mientras viva el titular, porque la llamada que espera es `F_SETLKW` y no tiene timeout. Una espera de laboratorio duró 5 min 15 s mientras el titular ejecutaba scriptlets del kernel. Ctrl+C detiene al proceso en espera, y el titular sigue corriendo.
+</Accordion>
+
+<Accordion label="¿Por qué un script falla con can't create transaction lock?" group="faq">
+Porque su entrada estándar no es una terminal. rpm 4.14 y posteriores esperan e imprimen el aviso solo en una terminal. Los scripts y los pasos de CI reciben "can't create transaction lock on /var/lib/rpm/.rpm.lock (Resource temporarily unavailable)" y el código de salida 1 en su lugar.
+</Accordion>
+
+<Accordion label="¿Qué significa Waiting for process with pid to finish?" group="faq">
+Un segundo dnf encuentra el PID del primer dnf en `/var/lib/dnf/rpmdb_lock.pid` y espera allí, antes de llegar al bloqueo de rpm. Ese segundo dnf esperó 54 s en Rocky Linux 9.9. El PID del mensaje es el dnf al que hay que esperar o que hay que detener.
+</Accordion>
+
+<Accordion label="¿Qué más tiene el bloqueo además de dnf y yum?" group="faq">
+Cualquier proceso que ejecuta una transacción de escritura de rpm: `rpm -U`, `rpm -i` y `rpm -e`, y PackageKit, que usa la página Software Updates de Cockpit. `dnf-automatic` lo hace cuando `apply_updates = True`, y también el proceso dnf o yum que inició una tarea de Ansible. `sudo lsof /var/lib/rpm/.rpm.lock` muestra al titular con una `W` en la columna FD.
+</Accordion>
+
+<Accordion label="¿Libera kill -9 el bloqueo de transacción de rpm?" group="faq">
+Sí, de inmediato. El bloqueo pertenece al descriptor de archivo abierto, y el kernel lo libera cuando el proceso muere, así que el proceso en espera continúa justo después. La transacción que se cortó sigue cortada: en Rocky Linux 8.10 un kill así dejó todos los comandos rpm fallando con `BDB0087 DB_RUNRECOVERY`. Envía SIGTERM primero y deja que la transacción termine.
+</Accordion>
+
+<Accordion label="¿Dónde guarda dnf sus archivos de bloqueo de PID?" group="faq">
+dnf 4 usa `/var/lib/dnf/rpmdb_lock.pid` para la transacción y `/var/cache/dnf/metadata_lock.pid` y `/var/cache/dnf/download_lock.pid` para las descargas, más `/var/log/log_lock.pid`. Cada archivo contiene un PID, desaparece cuando dnf sale, y `/usr/lib/tmpfiles.d/dnf.conf` lo elimina al arrancar. El siguiente dnf reemplaza un PID muerto que contenga.
+</Accordion>
+
+<Accordion label="¿Qué significa 3uW en la salida de lsof?" group="faq">
+El descriptor de archivo 3, abierto para lectura y escritura, con un bloqueo de escritura sobre todo el archivo. Esa fila es la del titular. Un proceso en espera muestra `3u`, el mismo descriptor sin bloqueo, y `/proc/locks` lo lista en una línea que empieza con `->`.
+</Accordion>
