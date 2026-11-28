@@ -1,13 +1,14 @@
 ---
 date: 2026-06-16T00:00:00Z
+lastmod: 2026-11-28T00:00:00Z
 translationKey: "s3-bucket-filesystem-vps"
-title: "Montar un Bucket S3 como Sistema de Archivos en un VPS con ZeroFS y JuiceFS"
-meta_title: "Montar un Bucket S3 como Sistema de Archivos en un VPS con"
-description: "Convierte un bucket S3 de Bunny.net en un sistema de archivos POSIX real en tu VPS."
+meta_title: "Bucket S3 como sistema de archivos en un VPS: guía"
+title: "Bucket S3 como sistema de archivos en un VPS: ZeroFS vs JuiceFS"
+description: "Monta un bucket S3 como sistema de archivos en un VPS con ZeroFS o JuiceFS en Bunny Storage: configuración, caché, unidades systemd y resultados."
 image: "@assets/images/26/06/s3-bucket-filesystem-vps.webp"
 categories: ["hosting"]
 authors: ["Dragos"]
-tags: ["self-hosted", "cdn"]
+tags: ["juicefs", "zerofs", "object-storage"]
 ---
 
 import Button from "@components/widgets/Button.astro";
@@ -16,70 +17,95 @@ import ListCheck from "@components/widgets/ListCheck.astro";
 import Accordion from "@components/widgets/Accordion.astro";
 import Tabs from "@components/widgets/Tabs.astro";
 import Tab from "@components/widgets/Tab.astro";
+import YouTubeEmbed from "@components/widgets/YouTubeEmbed.astro";
 
 *Divulgación: esta guía contiene enlaces de referido. Si compras a través de ellos, puedo recibir una comisión sin coste adicional para ti.*
 
-El almacenamiento de objetos es barato. Un VPS con un disco local grande no lo es. Así que el movimiento obvio es guardar el grueso de tus datos en un bucket S3 y pagar solo por el almacenamiento que realmente usas, mientras tu servidor se mantiene pequeño y rápido. El problema es que S3 habla HTTP, no POSIX, así que la mayoría de las aplicaciones no pueden escribir en él como en una carpeta normal.
+ZeroFS y JuiceFS montan un bucket S3 como sistema de archivos POSIX en un VPS. En Bunny Storage eso significa JuiceFS, porque la API S3 de Bunny [no devuelve ningún ETag en el PUT](https://bunny.net/docs/storage/s3) y ZeroFS falla al arrancar sin uno.
 
-Esa brecha es la que resuelven las capas de sistema de archivos. Se sitúan entre tus aplicaciones y el bucket, presentando un punto de montaje normal como `/mnt/data` mientras mueven los bytes hacia y desde el almacenamiento de objetos por detrás. Llevo un tiempo usando esta configuración en varios servidores, y que Bunny.net haya añadido una [API compatible con S3 a su almacenamiento](https://docs.bunny.net/storage/s3) lo hizo mucho más atractivo, sobre todo porque su almacenamiento cuesta $0,01/GB sin tarifas de egress a través de su CDN.
+El almacenamiento de objetos es barato. Un VPS con un disco local grande no lo es. Así que la jugada obvia es guardar el grueso de tus datos en un bucket S3 y pagar solo por el almacenamiento que usas, mientras tu servidor se mantiene pequeño y rápido. El problema es que S3 habla HTTP, no POSIX, así que la mayoría de las aplicaciones no pueden escribir en él como en una carpeta normal.
 
-Esta guía recorre dos herramientas que hacen bien el trabajo: **ZeroFS** y **JuiceFS**. Ambas convierten un bucket S3 en un sistema de archivos montable en un VPS, pero llegan ahí por caminos muy distintos. Te mostraré cómo configurar cada una contra un bucket de Bunny.net y luego te ayudaré a elegir.
+Esa brecha es la que resuelven las capas de sistema de archivos. Se sitúan entre tus aplicaciones y el bucket. Para una aplicación, la capa parece un punto de montaje normal como `/mnt/data`, y en segundo plano mueve bytes hacia y desde el almacenamiento de objetos. Llevo un tiempo usando esta configuración en varios servidores. Que Bunny.net haya añadido una [API compatible con S3 a su almacenamiento](https://docs.bunny.net/storage/s3) lo hizo mucho más atractivo, sobre todo porque su almacenamiento cuesta $0.01/GB sin tarifas de egress a través de su CDN. La API está en [vista previa pública](https://bunny.net/docs/changelog) desde el 9 de julio de 2026, y el 28 de noviembre de 2026 su matriz de compatibilidad seguía sin listar un ETag en la respuesta de PutObject.
+
+Te mostraré cómo configurar cada herramienta, con un bucket de Bunny.net como ejemplo, y luego te ayudaré a elegir.
 
 <Notice type="success" title="Prueba Bunny.net gratis durante 14 días">
   Necesitarás un bucket compatible con S3 para esta guía. [Regístrate en Bunny.net](https://go.bitdoze.com/bunny) sin tarjeta de crédito y obtén una prueba de 14 días. Mi [reseña completa de Bunny.net](/es/resena-bunny-net/) cubre el resto de la plataforma.
 </Notice>
 
-## Por qué montar S3 como sistema de archivos
 
-Antes del cómo, aquí va el por qué. Apuntar un sistema de archivos al almacenamiento de objetos te da unas cuantas cosas que un disco de VPS normal no puede:
+<YouTubeEmbed
+  url="https://www.youtube.com/embed/P_ZoBPAFsOc"
+  label="¿A tu VPS le falta espacio? Usa S3 como disco"
+/>
+
+
+
+## Por qué montar un bucket S3 como sistema de archivos
+
+Un montaje convierte el bucket en una ruta, así que las herramientas que no hablan S3 pueden escribir igualmente en almacenamiento de objetos barato. Apuntar un sistema de archivos al almacenamiento de objetos te da unas cuantas cosas que un disco de VPS normal no puede:
 
 <ListCheck>
 - **Capacidad barata y elástica**: Pagas por GB en lugar de redimensionar un volumen cada vez que te quedas corto
-- **Durabilidad fuera del servidor**: Los archivos viven en almacenamiento de objetos replicado, no en un único disco que puede fallar
+- **Durabilidad fuera del servidor**: Los archivos viven en almacenamiento de objetos, fuera del disco del VPS, que puede morir
 - **Almacenamiento compartido**: Varios servidores pueden leer del mismo montaje respaldado por el bucket
-- **Sin cambios en las apps**: El software escribe en una ruta, no en un SDK, así que tus herramientas actuales simplemente funcionan
-- **Copias de seguridad y medios sencillos**: Ideal para bibliotecas multimedia, backups, archivos y activos estáticos
+- **Sin cambios en las apps**: El software escribe en una ruta, no en un SDK, así que tus herramientas actuales siguen funcionando
+- **Una ruta para muchos usos**: Bibliotecas multimedia, copias de seguridad, archivos y activos estáticos viven bajo un mismo montaje
 </ListCheck>
 
-Eso sí, no es magia. Los viajes de ida y vuelta a S3 tardan entre 50 y 300 ms, así que sin caché local un montaje básico se siente dolorosamente lento con archivos pequeños. Ambas herramientas de abajo lo resuelven con una caché local, que es la razón principal para usarlas en lugar de algo más simple como `s3fs`.
+Cada bloque que no está en caché es una petición HTTPS a la región. En el laboratorio, el 28 de noviembre de 2026, con MinIO en el mismo host, `juicefs bench` midió unos 20 ms por petición de objeto. Una región lejana añade su tiempo de ida y vuelta encima. Ambas herramientas guardan bloques en caché en el disco local, así que las lecturas repetidas se saltan el bucket.
 
-## Las dos opciones comparadas
+Si las copias de seguridad son el motivo del montaje, dos front ends de restic cubiertos en este sitio aceptan una ruta local como repositorio: [Zerobyte restic GUI](/es/zerobyte-interfaz-grafica-restic/) y [Pluton backup planner](/es/pluton-backup-autoalojado/).
 
-ZeroFS y JuiceFS llegan al mismo destino con arquitecturas diferentes. Esto importa para la configuración y para qué cargas de trabajo maneja bien cada una.
+## ¿Cuál es la diferencia entre ZeroFS y JuiceFS?
+
+ZeroFS guarda los metadatos de los archivos dentro del bucket y permite que un servidor escriba a la vez. JuiceFS guarda los metadatos en un motor aparte como Redis o SQLite y permite que muchos servidores escriban a la vez.
+
+![Diagrama de JuiceFS y ZeroFS lado a lado: app, punto de montaje, cliente con caché local, Redis y el bucket S3](@assets/images/26/06/s3-bucket-filesystem-vps-architecture.webp)
+
+*JuiceFS guarda los metadatos en un motor aparte. ZeroFS los guarda en el bucket y usa Redis solo para los puts condicionales.*
 
 | | **ZeroFS** | **JuiceFS** |
 |---|---|---|
 | Lenguaje | Rust | Go |
-| Metadatos | Guardados en el bucket (árbol LSM) | Base de datos aparte (Redis, etc.) |
-| Servicios extra | Ninguno necesario | Necesita un motor de metadatos |
+| Última versión | [v2.3.7](https://github.com/Barre/zerofs/releases/tag/v2.3.7), 14 de noviembre de 2026 | [v1.4.2](https://github.com/juicedata/juicefs/releases/tag/v1.4.2), 22 de octubre de 2026 |
+| Metadatos | Guardados en el bucket (árbol LSM) | Motor aparte (Redis, SQLite, MySQL y más) |
+| Servicios extra | Ninguno, o Redis para `conditional_put` | Un motor de metadatos; SQLite es solo un archivo |
 | Protocolos | NFS, 9P, NBD | Montaje FUSE, gateway S3 |
-| Cifrado | Siempre activo (XChaCha20) | Opcional |
-| Compresión | zstd / LZ4 | LZ4 / zstd |
+| Varios servidores | Un escritor más réplicas de solo lectura | Muchos clientes de lectura y escritura |
+| Cifrado | Siempre activo (XChaCha20) | Opcional (clave RSA que se pasa a `format`) |
+| Compresión | zstd o LZ4 | zstd o LZ4 |
 | Dispositivos de bloque | Sí (NBD, corre ZFS) | No |
 | Esfuerzo de configuración | Bajo (un solo binario) | Medio (binario + base de datos) |
 | Mejor para | Montajes simples de un nodo, almacenamiento de bloques | Compartido/multicliente, gran escala |
 | Licencia | AGPL-3.0 / comercial | Apache 2.0 |
 
-La versión corta: **ZeroFS** es más simple porque guarda todo (incluidos los metadatos) en el bucket, así que no hay base de datos que ejecutar. **JuiceFS** está más probado a escala y permite que muchos clientes compartan un mismo sistema de archivos, pero necesita un motor de metadatos como Redis junto al almacenamiento de objetos.
+En corto, **ZeroFS** es más simple porque guarda todo (incluidos los metadatos) en el bucket, así que no hay base de datos que ejecutar. Con **JuiceFS**, muchos clientes comparten un sistema de archivos, pero necesita un motor de metadatos como Redis junto al almacenamiento de objetos. SQLite cuenta como ese motor y es un archivo en el disco del VPS, lo que elimina el servicio aparte en un solo servidor.
 
 <Notice type="info" title="Una nota sobre los metadatos">
-  JuiceFS guarda los metadatos de los archivos (nombres, tamaños, estructura de directorios) en una base de datos aparte por velocidad y consistencia. Esa base de datos es crítica: si la pierdes, pierdes el mapa de tus datos. ZeroFS evita esto manteniendo los metadatos en el propio bucket como un árbol log-structured merge.
+  JuiceFS guarda los metadatos de los archivos (nombres, tamaños, estructura de directorios) en una base de datos aparte, así que cada cliente ve el mismo árbol de archivos. Esa base de datos es crítica: si la pierdes, pierdes el mapa de tus datos. ZeroFS evita esto guardando los metadatos en el propio bucket como un árbol de fusión estructurado en registro (log-structured merge tree).
 </Notice>
 
 ## Paso 1: Crear un bucket S3 en Bunny.net
 
-Ambas herramientas necesitan un bucket compatible con S3. Así se crea uno en Bunny.net.
+Ambas herramientas necesitan un bucket compatible con S3. Los pasos de abajo siguen la [documentación S3 de Bunny](https://bunny.net/docs/storage/s3).
+
+![Página de documentación S3 de Bunny con los pasos para crear la zona de almacenamiento, el formato de la URL del endpoint y los ocho códigos de región](@assets/images/26/06/s3-bucket-filesystem-vps-bunny-s3-docs.webp)
+
+*La documentación S3 de Bunny: los pasos para crear la zona, el patrón del endpoint y los códigos de región, capturada el 28 de noviembre de 2026.*
 
 <Notice type="warning" title="La compatibilidad con S3 se fija al crear">
-  La API de S3 de Bunny todavía está en beta y debe activarse al crear la storage zone. No puedes activarla en una zona existente, así que crea una nueva para esto.
+  La API S3 de Bunny está en [vista previa pública](https://bunny.net/docs/changelog) desde el 9 de julio de 2026 y debe activarse al crear la zona de almacenamiento. No puedes activarla en una zona existente, así que crea una nueva para esto.
 </Notice>
 
 1. En el panel de Bunny, ve a **Storage** → **Add Storage Zone**
-2. Dale un nombre (mínimo 4 caracteres, solo letras, números y guiones). Este nombre será tu nombre de bucket y tu access key
+2. Dale un nombre (4 o más caracteres, solo letras, números y guiones). Este nombre será tu nombre de bucket y tu access key
 3. Activa la opción **S3 Compatibility**
 4. Elige un nivel de almacenamiento y una región cercana a tu VPS
 5. Activa la replicación en al menos una región extra (recomendado por durabilidad)
 6. Confirma y añade la zona
+
+Bunny factura la replicación por región. El nivel Standard cuesta $0.01/GB por región hasta dos regiones, así que esta zona empieza en $0.02/GB. Hay un mínimo mensual de $1 y ninguna tarifa por petición a la API ([precios de Bunny Storage](https://bunny.net/pricing/storage/), comprobado el 28 de noviembre de 2026).
 
 Una vez creada, abre la pestaña **Access** y consigue tus credenciales. Las mapearás a los valores estándar de S3 así:
 
@@ -88,14 +114,14 @@ Una vez creada, abre la pestaña **Access** y consigue tus credenciales. Las map
 | Access Key ID | El nombre de tu storage zone |
 | Secret Access Key | La contraseña de tu storage zone |
 | Endpoint | `https://[region]-s3.storage.bunnycdn.com` |
-| Región | `de`, `ny`, `sg`, `uk`, `se`, `la` o `jh` |
+| Región | `de`, `ny`, `sg`, `uk`, `se`, `la`, `jh` o `syd` |
 
-La compatibilidad con S3 funciona actualmente en Frankfurt (`de`), Nueva York (`ny`), Singapur (`sg`), Londres (`uk`), Estocolmo (`se`), Los Ángeles (`la`) y Johannesburgo (`jh`). Bunny solo admite **URLs de tipo path** (`endpoint/nombre-bucket/clave`), algo que ambas herramientas manejan sin problema.
+La compatibilidad con S3 funciona en Frankfurt (`de`), Nueva York (`ny`), Singapur (`sg`), Londres (`uk`), Estocolmo (`se`), Los Ángeles (`la`), Johannesburgo (`jh`) y Sídney (`syd`). Bunny acepta tanto **URLs de tipo path** (`endpoint/nombre-bucket/clave`) como URLs de tipo virtual-hosted, un cambio anunciado en el [changelog del 14 de agosto de 2026](https://bunny.net/docs/changelog). Los ejemplos de abajo usan el estilo path, que ambas herramientas manejan bien.
 
 Puedes probar las credenciales con la AWS CLI antes de seguir:
 
 ```sh
-aws s3 ls s3://nombre-de-tu-zona/ \
+aws s3 ls s3://your-zone-name/ \
   --endpoint-url https://de-s3.storage.bunnycdn.com
 ```
 
@@ -103,22 +129,25 @@ Si quieres ver con más detalle cómo se compara Bunny Storage en precio, escrib
 
 ## Requisitos previos
 
-Para cualquiera de las dos herramientas necesitarás:
+Para cualquiera de las dos herramientas querrás:
 
 - Un VPS Linux (Ubuntu/Debian va muy bien aquí)
 - Acceso root o `sudo`
-- Un SSD local con algo de espacio libre para la caché (10 GB o más es un buen comienzo)
+- Un SSD local para la caché (la plantilla de ZeroFS asigna 10 GB, JuiceFS 100 GiB)
 - Las credenciales S3 de Bunny de arriba
+- Para el montaje NFS de ZeroFS: `nfs-common` en Debian/Ubuntu (`sudo apt install nfs-common`)
 
 <Button link="https://go.bitdoze.com/hetzner" text="Hetzner VPS" />
 <Button link="https://go.bitdoze.com/hostinger-vps" text="Hostinger VPS" />
-<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Gratis" />
+<Button link="https://go.bitdoze.com/do" text="DigitalOcean $100 Free" />
 
-Si eres nuevo ejecutando servicios en un VPS, mi [guía de Docker en Ubuntu](/es/instalar-docker-ubuntu-arm/) cubre lo básico sobre almacenamiento y autoalojamiento.
+_Los precios de los VPS subieron en general en 2026. Si estás replanteándote un servidor alquilado, mira [qué cambió y cuándo gana un mini PC](/es/subidas-precios-vps/)._
+
+Si eres nuevo ejecutando servicios en un VPS, mi [guía de Docker en Ubuntu](/es/instalar-docker-ubuntu-arm/) y [añadir un disco nuevo con LVM](/es/anadir-disco-lvm/) cubren lo básico sobre almacenamiento y autoalojamiento.
 
 ## Opción A: ZeroFS
 
-[ZeroFS](https://github.com/Barre/zerofs) es una herramienta en Rust que sirve un bucket S3 como sistema de archivos POSIX por NFS y 9P, o como dispositivo de bloque crudo por NBD. Todo corre en un único proceso en espacio de usuario, y los datos siempre se comprimen y cifran antes de salir de tu servidor. No hay base de datos aparte, lo que la hace la más sencilla de poner en marcha.
+[ZeroFS](https://github.com/Barre/zerofs) es una herramienta en Rust que sirve un bucket S3 como sistema de archivos POSIX por NFS y 9P, o como dispositivo de bloque en bruto por NBD. Todo corre en un único proceso en espacio de usuario. ZeroFS comprime y cifra cada extent de 32 KiB antes de subirlo, y guarda los metadatos en el bucket, así que no hay base de datos que ejecutar.
 
 ### Instalar ZeroFS
 
@@ -128,14 +157,16 @@ El script de instalación descarga el binario precompilado adecuado para tu plat
 curl -sSfL https://sh.zerofs.net | sh
 ```
 
+La versión actual es [v2.3.7](https://github.com/Barre/zerofs/releases/tag/v2.3.7) (14 de noviembre de 2026). Los usuarios de Debian y Ubuntu también pueden instalar el paquete firmado desde `pkgs.zerofs.net`, que incluye un `zerofs.service` desactivado y un esqueleto de configuración en `/etc/zerofs/` (mira el [inicio rápido del README](https://github.com/Barre/zerofs#quick-start)).
+
 Para fijar una versión e instalar sin root:
 
 ```sh
-curl -sSfL https://sh.zerofs.net | VERSION=v1.2.6 INSTALL_DIR=$HOME/.local/bin sh
+curl -sSfL https://sh.zerofs.net | VERSION=v2.3.7 INSTALL_DIR=$HOME/.local/bin sh
 ```
 
-<Notice type="warning" title="Requisito de CPU">
-  El binario precompilado de Linux amd64 necesita una CPU con AVX2 (Intel Haswell 2013+ o AMD Excavator 2015+). En hardware más antiguo el binario falla con un error de instrucción ilegal, y tendrás que compilarlo desde el código fuente para un objetivo x86-64 base.
+<Notice type="warning" title="CPUs antiguas y el binario precompilado">
+  Hasta la v1.2.x el pipeline de versiones compilaba los binarios para x86-64-v3, y fallaban con una instrucción ilegal en CPUs sin AVX2 (anteriores a Intel Haswell o AMD Excavator). El [PR #473](https://github.com/Barre/ZeroFS/pull/473) eliminó ese objetivo de compilación el 27 de junio de 2026, y el flujo de versiones ya no fija ningún `target-cpu`. El binario v2.3.7 todavía contiene código AVX2, así que esto no está probado en esas CPUs. Si aun así muere con `Illegal instruction`, compílalo desde el código fuente con `cargo build --release` dentro del directorio `zerofs/`.
 </Notice>
 
 ### Configurar ZeroFS
@@ -143,10 +174,10 @@ curl -sSfL https://sh.zerofs.net | VERSION=v1.2.6 INSTALL_DIR=$HOME/.local/bin s
 Genera una configuración inicial y edítala:
 
 ```sh
-zerofs init   # escribe zerofs.toml
+zerofs init   # writes zerofs.toml
 ```
 
-Aquí tienes un `zerofs.toml` funcional para un bucket de Bunny.net. Fíjate en la línea `conditional_put`, que explico más abajo:
+Esta es la forma de `zerofs.toml` para un bucket de Bunny.net. Lee el aviso de abajo antes de usarlo en Bunny. Fíjate en la línea `conditional_put`, que explico más abajo:
 
 ```toml
 [cache]
@@ -155,7 +186,7 @@ disk_size_gb = 10.0
 memory_size_gb = 1.0
 
 [storage]
-url = "s3://nombre-de-tu-zona/zerofs-data"
+url = "s3://your-zone-name/zerofs-data"
 encryption_password = "${ZEROFS_PASSWORD}"
 
 [filesystem]
@@ -172,42 +203,84 @@ default_region = "de"
 conditional_put = "redis://localhost:6379"
 ```
 
+Estas son las claves que `zerofs init` genera en v2.3.7. Una clave mal escrita fuera de `[aws]` aborta el arranque con un error de parseo que la nombra. Dentro de `[aws]`, ZeroFS la descarta en silencio, y el error reaparece como un inicio de sesión fallido (mira la [guía de configuración](https://www.zerofs.net/docs/configuration)).
+
 <Notice type="info" title="Por qué la línea de Redis">
-  ZeroFS necesita escrituras condicionales (put-if-not-exists) para protegerse contra la corrupción. AWS S3 lo admite de forma nativa, pero muchos almacenes compatibles con S3 aún no lo exponen. Apuntar `conditional_put` a una URL de Redis deja que ZeroFS coordine esas escrituras a través de Redis. Instala Redis con `sudo apt install redis-server` y mantenlo en localhost. Si confirmas que tu zona de Bunny soporta puts condicionales, puedes quitar esta línea.
+  ZeroFS necesita escrituras condicionales (put-if-not-exists) para protegerse contra la corrupción. AWS S3 lo soporta de forma nativa, pero algunos almacenes compatibles con S3 no lo exponen. Poner `conditional_put` con una URL de Redis permite a ZeroFS coordinar esas escrituras a través de Redis. Instala Redis con `sudo apt install redis-server` y mantenlo en localhost. Si confirmas que tu zona de Bunny maneja puts condicionales, puedes quitar esta línea. El servidor ejecuta esta comprobación al arrancar y se niega a abrir el sistema de archivos en modo lectura-escritura cuando falla.
 </Notice>
 
-<Notice type="warning" title="Problema de compatibilidad de Bunny.net S3 con ZeroFS">
-  A mediados de 2026, la API de S3 de Bunny (todavía en vista previa cerrada) no devuelve un encabezado ETag en las respuestas de PUT. ZeroFS requiere ETags para verificar las escrituras, así que el arranque falla con un error `MissingEtag` incluso con `conditional_put` configurado. Es una limitación del lado de Bunny que probablemente corrijan a medida que madure la API. Hasta entonces, usa JuiceFS (Opción B) con Bunny, o combina ZeroFS con un proveedor S3 distinto como Cloudflare R2 o AWS S3.
+<Notice type="warning" title="La S3 de Bunny.net y ZeroFS todavía no funcionan juntos">
+  La API S3 de Bunny no devuelve una cabecera ETag en las respuestas de PUT, y ZeroFS necesita ETags para verificar las escrituras. Por eso ZeroFS falla al arrancar con un error `MissingEtag` incluso con `conditional_put` configurado. La documentación pública seguía reflejando ese cuadro el 28 de noviembre de 2026. La [matriz de compatibilidad](https://bunny.net/docs/storage/s3) no lista ningún ETag en la respuesta de PutObject, y el [changelog](https://bunny.net/docs/changelog) añadió soporte de ETag solo a HeadObject y GetObject (14 de agosto de 2026). Hasta que Bunny cambie esto, usa JuiceFS (Opción B) con Bunny, o empareja ZeroFS con un almacén que devuelva ETags, como AWS S3 o Cloudflare R2. Para crear el bucket R2, el token de API y el endpoint, sigue la [guía de copias de seguridad de Dokploy con Cloudflare R2](/es/backups-dokploy-cloudflare-r2/).
 </Notice>
 
-El `encryption_password` no es opcional, ZeroFS no tiene modo sin cifrado. Guárdalo a buen recaudo, porque perderlo significa perder el acceso a todo lo que hay en el bucket.
+Bunny puede cambiar esto después de publicar esta guía. Compruébalo tú mismo con la sonda que sugiere el mantenedor de ZeroFS en el [issue #517](https://github.com/Barre/ZeroFS/issues/517), recortada al PUT:
+
+```sh
+export AWS_ACCESS_KEY_ID="your-zone-name"
+export AWS_SECRET_ACCESS_KEY="your-storage-password"
+
+aws --endpoint-url https://de-s3.storage.bunnycdn.com s3api put-object \
+  --bucket your-zone-name --key etag-probe.txt --body /etc/hostname \
+  --query ETag --output text
+```
+
+Si no imprime nada o imprime `None`, el endpoint sigue sin el ETag y ZeroFS queda descartado para esa zona. Un hash entre comillas significa que la advertencia desapareció.
+
+`encryption_password` no es opcional. ZeroFS no tiene modo sin cifrar. Guárdala bien, porque perderla significa perder el acceso a todo lo que hay en el bucket.
 
 ### Ejecutar ZeroFS
 
 Exporta tus secretos y arranca el servidor:
 
 ```sh
-export AWS_ACCESS_KEY_ID="nombre-de-tu-zona"
-export AWS_SECRET_ACCESS_KEY="contraseña-de-tu-storage"
-export ZEROFS_PASSWORD="una-frase-larga-y-aleatoria"
+export AWS_ACCESS_KEY_ID="your-zone-name"
+export AWS_SECRET_ACCESS_KEY="your-storage-password"
+export ZEROFS_PASSWORD="a-long-random-passphrase"
 
 zerofs run -c zerofs.toml
 ```
 
-### Montar el sistema de archivos
+Cuando el almacén S3 pasa esa comprobación, las primeras líneas del log son así (ejecución de laboratorio contra MinIO, sin marcas de tiempo):
 
-ZeroFS ya está sirviendo NFS en `127.0.0.1:2049`. Móntalo como cualquier recurso NFS:
-
-```sh
-sudo mkdir -p /mnt/data
-sudo mount -t nfs -o nolock,vers=3 127.0.0.1:/ /mnt/data
+```text
+INFO zerofs::cli::server: ZeroFS v2.3.7
+INFO zerofs::storage_compatibility: Checking storage provider compatibility...
+INFO zerofs::storage_compatibility: Storage provider compatibility check passed
 ```
 
-Eso es todo. Cualquier cosa que escribas en `/mnt/data` se comprime, se cifra y se envía a tu bucket de Bunny, con las lecturas calientes servidas desde la caché local en microsegundos.
+### Montar el sistema de archivos
+
+ZeroFS ya está sirviendo NFSv3 en `127.0.0.1:2049`. Debian y Ubuntu necesitan `nfs-common` para `mount.nfs`. Apunta tanto NFS como el protocolo de montaje al puerto 2049, como hace la [guía NFS de ZeroFS](https://www.zerofs.net/docs/nfs-access):
+
+```sh
+sudo apt install nfs-common
+sudo mkdir -p /mnt/data
+sudo mount -t nfs -o vers=3,nolock,tcp,port=2049,mountport=2049 127.0.0.1:/ /mnt/data
+```
+
+Para un montaje que sobreviva a los reinicios, añade esta línea a `/etc/fstab`:
+
+```text
+127.0.0.1:/ /mnt/data nfs vers=3,nolock,tcp,port=2049,mountport=2049,_netdev 0 0
+```
+
+ZeroFS comprime, cifra y sube al bucket todo lo que escribes en `/mnt/data`, y sirve las lecturas repetidas desde la caché local.
+
+Dos límites de NFS importan para las copias de seguridad. NFS deja que `fsync` devuelva antes de que los datos lleguen al bucket, y ZeroFS no implementa bloqueo de archivos NFS. Donde importe cualquiera de los dos, monta por 9P. `zerofs mount 127.0.0.1:5564 /mnt/zerofs` ejecuta el cliente FUSE incluido como el usuario actual. El cliente del kernel también funciona, con `9p` y `9pnet_fd` cargados:
+
+```sh
+sudo modprobe 9p
+sudo modprobe 9pnet_fd
+sudo mount -t 9p -o trans=tcp,port=5564,version=9p2000.L,access=user 127.0.0.1 /mnt/zerofs
+```
+
+Por 9P, `fsync` solo devuelve después de que los datos se almacenen ([guía de acceso 9P](https://www.zerofs.net/docs/9p-access)).
+
+En el laboratorio, ZeroFS 2.3.7 pasó su comprobación de arranque contra MinIO sin Redis, y `zerofs mount` por el socket de Unix funcionó como un usuario normal. Un `cp` de 50 MB tardó 0.23 s, y 200 archivos pequeños tardaron 0.44 s en crearse y 0.32 s en borrarse.
 
 ### Ejecutarlo como servicio
 
-Para cualquier cosa más allá de pruebas, ejecuta ZeroFS bajo systemd para que sobreviva a los reinicios. Crea `/etc/systemd/system/zerofs.service`:
+Para algo más allá de las pruebas, ejecuta ZeroFS bajo systemd para que sobreviva a los reinicios. Crea `/etc/systemd/system/zerofs.service`:
 
 ```ini
 [Unit]
@@ -216,9 +289,9 @@ After=network-online.target redis-server.service
 Wants=network-online.target
 
 [Service]
-Environment=AWS_ACCESS_KEY_ID=nombre-de-tu-zona
-Environment=AWS_SECRET_ACCESS_KEY=contraseña-de-tu-storage
-Environment=ZEROFS_PASSWORD=una-frase-larga-y-aleatoria
+Environment=AWS_ACCESS_KEY_ID=your-zone-name
+Environment=AWS_SECRET_ACCESS_KEY=your-storage-password
+Environment=ZEROFS_PASSWORD=a-long-random-passphrase
 ExecStart=/usr/local/bin/zerofs run -c /etc/zerofs/zerofs.toml
 Restart=on-failure
 
@@ -226,7 +299,7 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-Luego actívalo:
+Después actívalo:
 
 ```sh
 sudo systemctl daemon-reload
@@ -234,18 +307,18 @@ sudo systemctl enable --now zerofs
 ```
 
 <Notice type="warning" title="Mantén los secretos fuera del archivo de unidad">
-  Poner las credenciales directamente en una unidad de systemd está bien para un arranque rápido, pero en producción muévelas a un `EnvironmentFile=` con permisos `600`, o usa un gestor de secretos. Nunca los subas a git.
+  Poner credenciales directamente en una unidad de systemd vale para un arranque rápido, pero en producción muévelas a un `EnvironmentFile=` con permisos `600`, o usa un gestor de secretos. Nunca los subas a git.
 </Notice>
 
-ZeroFS también puede exponer el bucket como un dispositivo de bloque crudo por NBD, que es lo que hace posibles las demos de "correr ZFS sobre S3". Eso va más allá de un montaje básico, pero está ahí si lo necesitas.
+ZeroFS también puede exponer el bucket como dispositivos de bloque en bruto por NBD. Su CI ejecuta un pool ZFS encima de ellos, que es en lo que se apoyan las demos de "ejecutar ZFS sobre S3". Eso va más allá de un montaje básico, pero ahí está si lo necesitas.
 
 ## Opción B: JuiceFS
 
-[JuiceFS](https://github.com/juicedata/juicefs) es un sistema de archivos distribuido maduro y ampliamente desplegado, construido sobre almacenamiento de objetos más un motor de metadatos aparte. Es totalmente compatible con POSIX, soporta miles de clientes concurrentes y se usa en producción para cargas de big data y machine learning. El compromiso es que ejecutas una base de datos de metadatos junto a él.
+[JuiceFS](https://github.com/juicedata/juicefs) es un sistema de archivos en Go. Corta cada archivo en bloques de 4 MiB, sube los bloques como objetos y guarda el árbol de archivos en un motor de metadatos aparte como Redis o SQLite. El README lista 8,813 casos de pjdfstest superados y miles de máquinas ejecutándolo en producción. El coste es que ejecutas una base de datos de metadatos a su lado.
 
 ### Instalar Redis para los metadatos
 
-JuiceFS guarda los metadatos de los archivos en un motor como Redis, MySQL o SQLite. Para un solo VPS, Redis es la opción fácil. Puedes instalarlo directamente en el host o ejecutarlo en Docker, lo que encaje mejor con cómo gestionas la máquina.
+JuiceFS guarda los metadatos de los archivos en un motor como Redis, MySQL o SQLite. Para un solo VPS, Redis es la opción fácil. Puedes instalarlo directamente en el host o ejecutarlo en Docker, según cómo gestiones el servidor.
 
 <Tabs>
   <Tab name="Paquete del sistema">
@@ -260,7 +333,7 @@ sudo systemctl enable --now redis-server
 
   <Tab name="Docker">
 
-Si ya usas Docker (o simplemente prefieres mantener los servicios en contenedores), un pequeño `compose.yaml` hace el trabajo. Esto también sirve para el Redis de `conditional_put` de ZeroFS de la Opción A, el mismo contenedor vale para ambos.
+Si ya usas Docker (o simplemente prefieres mantener los servicios en contenedores), un `compose.yaml` pequeño hace el trabajo. Esto también sirve para el Redis de `conditional_put` de la Opción A, el mismo contenedor vale para ambos.
 
 ```yaml
 services:
@@ -281,18 +354,18 @@ Levántalo:
 docker compose up -d
 ```
 
-La opción `--appendonly yes` activa la persistencia AOF para que tus metadatos sobrevivan al reinicio de un contenedor, y enlazarlo a `127.0.0.1` mantiene Redis fuera de internet público. El volumen guarda los datos en el host. Si gestionas tus stacks con una interfaz, mi [guía de instalación de Dockge](/es/instalar-dockge/) hace que desplegar esto sea cuestión de un par de clics.
+El flag `--appendonly yes` activa la persistencia AOF para que tus metadatos sobrevivan a un reinicio del contenedor, y enlazarlo a `127.0.0.1` mantiene Redis fuera de internet. El volumen deja los datos en el host. Si gestionas stacks con una interfaz, mi [guía de instalación de Dockge](/es/instalar-dockge/) cubre el lado compose de Dockge.
 
   </Tab>
 </Tabs>
 
 <Notice type="warning" title="Protege tu motor de metadatos">
-  La base de datos Redis es el índice de todo tu sistema de archivos. Haz copias de seguridad con regularidad (activa la persistencia RDB/AOF) y nunca la expongas a internet público. Si pierdes los metadatos, los bloques de datos de tu bucket quedan inservibles.
+  La base de datos Redis es el índice de todo tu sistema de archivos. Haz copias de seguridad con regularidad (activa la persistencia RDB/AOF) y nunca la expongas a internet. Si pierdes los metadatos, los bloques de datos de tu bucket quedan inutilizables. JuiceFS necesita Redis 4.0 o más nuevo y `maxmemory-policy noeviction`; fija la política él mismo al arrancar y registra un aviso cuando no puede ([motores de metadatos](https://juicefs.com/docs/community/databases_for_metadata)).
 </Notice>
 
 ### Instalar JuiceFS
 
-Un solo comando descarga el cliente más reciente:
+Un comando descarga el último cliente:
 
 ```sh
 curl -sSL https://d.juicefs.com/install | sh -
@@ -304,36 +377,55 @@ Comprueba que se instaló:
 juicefs version
 ```
 
+El script resuelve la última versión desde `d.juicefs.com` (v1.4.2, publicada el 22 de octubre de 2026) y verifica la suma SHA-256 antes de mover el binario a `/usr/local/bin`. Esa versión imprime `juicefs version 1.4.2+2026-10-22.46af7af`. Los usuarios de Ubuntu también pueden tomar el cliente del [PPA de JuiceFS](https://juicefs.com/docs/community/installation).
+
 ### Formatear el sistema de archivos
 
-El comando `format` inicializa el sistema de archivos, enlazando tu motor de metadatos con el bucket de Bunny. Ejecútalo una vez:
+El comando `format` inicializa el sistema de archivos. Enlaza tu motor de metadatos con el bucket de Bunny. Ejecútalo una vez:
 
 ```sh
 juicefs format \
   --storage s3 \
-  --bucket https://de-s3.storage.bunnycdn.com/nombre-de-tu-zona \
-  --access-key nombre-de-tu-zona \
-  --secret-key contraseña-de-tu-storage \
+  --bucket https://de-s3.storage.bunnycdn.com/your-zone-name \
+  --access-key your-zone-name \
+  --secret-key your-storage-password \
   redis://localhost:6379/1 \
   myjfs
 ```
 
 Algunas notas sobre los flags:
 
-- `--bucket` usa la URL de tipo path que exige Bunny, con el nombre de tu zona como último segmento de la ruta
+- `--bucket` usa una URL de tipo path, con el nombre de tu zona como último segmento de la ruta. Bunny también acepta URLs de tipo virtual-hosted. JuiceFS guarda cada objeto bajo el nombre del volumen, así que el bucket muestra `your-zone-name/myjfs/chunks/...`
 - `redis://localhost:6379/1` es el motor de metadatos (base de datos 1 del Redis local)
-- `myjfs` es el nombre del volumen, usado en comandos posteriores
+- `myjfs` es el nombre del volumen, que se usa en los comandos posteriores
+
+`format` guarda las credenciales en el motor de metadatos, así que `juicefs mount` no necesita flags de claves más adelante.
+
+¿No tienes Redis en el servidor? SQLite funciona como motor de metadatos y es un archivo en el disco del VPS:
+
+```sh
+sudo mkdir -p /var/lib/juicefs
+sudo juicefs format \
+  --storage s3 \
+  --bucket https://de-s3.storage.bunnycdn.com/your-zone-name \
+  --access-key your-zone-name \
+  --secret-key your-storage-password \
+  sqlite3:///var/lib/juicefs/myjfs.db \
+  myjfs
+```
+
+Usa la misma URL `sqlite3:///var/lib/juicefs/myjfs.db` en lugar de la URL de Redis en cada comando posterior. El 28 de noviembre de 2026, JuiceFS 1.4.2 formateó, montó y leyó un archivo de 50 MB de esta forma, y el archivo de base de datos llegó a 147 KB. Ese archivo es el mapa de los datos, así que pertenece a las copias de seguridad.
 
 ### Montar el sistema de archivos
 
-Ahora móntalo, apuntando a la misma URL de Redis:
+Ahora móntalo con la misma URL de Redis:
 
 ```sh
 sudo mkdir -p /mnt/data
 juicefs mount redis://localhost:6379/1 /mnt/data --background
 ```
 
-JuiceFS mantiene una caché local (por defecto en `/var/jfsCache`) para que las lecturas repetidas sigan siendo rápidas. Puedes ajustar el tamaño de la caché al montar:
+JuiceFS mantiene una caché local (por defecto en `/var/jfsCache`) para que las lecturas repetidas se salten el bucket. Puedes ajustar el tamaño de la caché al montar:
 
 ```sh
 juicefs mount redis://localhost:6379/1 /mnt/data \
@@ -341,11 +433,24 @@ juicefs mount redis://localhost:6379/1 /mnt/data \
   --background
 ```
 
-`--cache-size` está en MB, así que `10240` te da una caché local de 10 GB.
+`--cache-size` va en MiB y su valor por defecto es `102400` (100 GiB), así que `10240` limita la caché a 10 GiB. Un usuario normal no puede escribir en `/var/jfsCache`. Monta con `--cache-dir ~/jfscache`, o la caché recurre a `~/.juicefs/cache` (la [guía de caché](https://juicefs.com/docs/community/guide/cache) lista los valores por defecto).
+
+### Verificar el montaje
+
+Ejecuta `df -h` en el punto de montaje y luego lee un archivo dos veces. La primera lectura viene del bucket, la segunda de la caché local.
+
+![Terminal con un montaje de JuiceFS, df -h mostrando 1.0P, y una lectura en frío y otra en caliente del mismo archivo de 50 MB](@assets/images/26/06/s3-bucket-filesystem-vps-terminal-mount.webp)
+
+*Una ejecución de laboratorio contra un bucket MinIO local: el montaje, `df -h`, y luego una lectura en frío y otra en caliente del mismo archivo de 50 MB.*
+
+```sh
+df -h /mnt/data
+dd if=/mnt/data/your-file.bin of=/dev/null bs=1M
+```
 
 ### Ejecutarlo como servicio
 
-JuiceFS puede generar un montaje compatible con systemd, pero el enfoque duradero más simple es un archivo de unidad en `/etc/systemd/system/juicefs.service`:
+JuiceFS puede generar un montaje apto para systemd, pero la forma más simple y duradera es un archivo de unidad en `/etc/systemd/system/juicefs.service`:
 
 ```ini
 [Unit]
@@ -370,109 +475,176 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now juicefs
 ```
 
-### Revisar el sistema de archivos
+`juicefs mount --update-fstab` escribe la entrada de `/etc/fstab` por ti, una función añadida en v1.1.0 ([montar al arrancar](https://juicefs.com/docs/community/mount_juicefs_at_boot_time)).
 
-JuiceFS incluye comandos útiles de inspección:
+### Comprobar el sistema de archivos
+
+JuiceFS trae comandos de inspección:
 
 ```sh
-juicefs status redis://localhost:6379/1   # muestra info del volumen
-juicefs bench /mnt/data                   # ejecuta un benchmark rápido
+juicefs status redis://localhost:6379/1   # show volume info
+juicefs bench /mnt/data                   # run a quick benchmark
 ```
 
-## Rendimiento y caché
+El 28 de noviembre de 2026, el camino de JuiceFS corrió contra un bucket MinIO local y un contenedor Redis en un host (JuiceFS 1.4.2, 8 núcleos, un disco), sin sudo. Las cifras muestran la sobrecarga del cliente, no la red de Bunny.
 
-Ninguna herramienta puede vencer a la física, la latencia de S3 es la que es, así que la caché local es lo que hace usable la experiencia. Unas cuantas cosas que conviene saber:
+| Comprobación | Resultado |
+|---|---|
+| `juicefs format` | 0.11 s |
+| `juicefs mount --background` | 0.61 s hasta `OK, myjfs is ready` |
+| `df -h` | 1.0P de tamaño, 0 usados (la capacidad por defecto) |
+| Archivo aleatorio de 50 MB, `cp` | 0.16 s |
+| Segunda copia, `dd` con `conv=fsync` | 0.12 s (462 MB/s) |
+| Lectura de 50 MB justo después de la escritura | 0.06 s (998 MB/s) |
+| Primera lectura de 50 MB con la caché vacía | 0.08 s a 0.10 s, desde MinIO en el mismo host |
+| El mismo archivo, segunda lectura | 0.007 s a 0.01 s, desde la caché local |
+| 200 archivos pequeños: crear, listar, borrar | 1.89 s, 0.01 s, 0.50 s |
+| `juicefs bench`, archivo de 1 GiB | escritura 608 MiB/s, lectura 1042 MiB/s |
+| `juicefs bench`, archivos de 128 KiB | escritura 81.7 archivos/s, lectura 424.3 archivos/s |
+
+`juicefs bench` terminó en 8.9 s y `juicefs umount` tardó 9 s.
+
+### Qué contiene el bucket
+
+JuiceFS no guarda archivos que puedas abrir desde la consola S3. Cada bloque de 4 MiB se convierte en un objeto bajo `<volume>/chunks/`, y el nombre, tamaño y lista de bloques del archivo viven en Redis. `juicefs info /mnt/data/backup.tar` imprime la clave del objeto detrás de cada bloque, y `juicefs status` imprime el UUID, el bucket y los ajustes del volumen.
+
+![Navegador de objetos de MinIO listando los objetos chunk de JuiceFS de un bucket, cada uno de 4 MiB, bajo myjfs/chunks/0/0](@assets/images/26/06/s3-bucket-filesystem-vps-minio-objects.webp)
+
+*El bucket del laboratorio en el navegador de objetos de MinIO: objetos chunk numerados, nada que puedas abrir directamente.*
+
+El bucket contiene los datos y el motor de metadatos contiene el mapa. Ninguno de los dos sirve sin el otro.
+
+## ¿Qué tan rápido es un sistema de archivos sobre S3?
+
+Cada bloque fuera de caché cuesta una petición HTTPS a la región. Una ejecución de laboratorio del 28 de noviembre de 2026 contra MinIO local escribió un archivo de 50 MB en 0.16 s y lo leyó en 0.08 s en frío y 0.007 s en caliente.
+
+![Diagrama de los cinco pasos de escritura de JuiceFS, desde la escritura de la app hasta el commit de metadatos en Redis, con dónde corre cada uno](@assets/images/26/06/s3-bucket-filesystem-vps-write-path.webp)
+
+*El camino de escritura por defecto de JuiceFS. Con `--writeback` los dos últimos pasos se intercambian y la subida ocurre más tarde.*
 
 <ListCheck>
-- **Dimensiona la caché para tu conjunto caliente**: Dale a la caché espacio suficiente para los archivos que lees a menudo. Una caché de 10 GB en un VPS pequeño cubre la mayoría de cargas multimedia y web
-- **Usa un disco de caché rápido**: Pon la caché en NVMe local, no en un volumen de red, o pierdes el sentido
-- **Las escrituras son asíncronas**: Ambas herramientas agrupan y suben en segundo plano, así que el rendimiento de escritura se siente local hasta que la caché se llena
-- **Elige una región cercana**: Haz coincidir tu región de Bunny con la ubicación de tu VPS para reducir el tiempo de ida y vuelta
-- **Cuidado con cargas de archivos pequeños**: Millones de archivos diminutos estresan más los metadatos que el ancho de banda, y ahí el motor dedicado de JuiceFS tiene ventaja
+- **El tamaño de caché tiene un valor por defecto**: JuiceFS limita su caché a 100 GiB (`--cache-size 102400`) y la plantilla de ZeroFS asigna 10 GB en disco. Sube o baja el límite para retener los archivos que lees a menudo
+- **Usa un disco de caché rápido**: Pon la caché en NVMe local, no en un volumen de red, o fracasa el propósito
+- **Las escrituras esperan al bucket**: JuiceFS sube cada bloque cuando su chunk está lleno o en `close()`, y confirma los metadatos solo después de la subida. ZeroFS reconoce las escrituras desde memoria y vuelca al bucket cada 30 segundos, o con fsync por 9P
+- **Elige una región cercana**: Haz que tu región de Bunny coincida con la ubicación de tu VPS para recortar el tiempo de ida y vuelta
+- **Vigila el límite de peticiones de Bunny**: La API S3 admite 500 peticiones por segundo, subida y descarga combinadas, y 1 Gbps de rendimiento ([documentación S3](https://bunny.net/docs/storage/s3))
+- **Los archivos pequeños cuestan llamadas de metadatos**: 200 creaciones le tomaron a JuiceFS 1.89 s (9.4 ms cada una) y a ZeroFS 0.44 s (2.2 ms cada una) en la ejecución de laboratorio del 28 de noviembre de 2026
 </ListCheck>
 
-Para cargas que son sobre todo lecturas y escrituras secuenciales grandes (medios, backups, archivos), ambas herramientas vuelan una vez que la caché está caliente. Para acceso aleatorio a archivos pequeños, el rendimiento depende mucho del ratio de aciertos de caché.
+Las lecturas secuenciales grandes salen de la caché tras la primera pasada. En esa ejecución, la segunda lectura del archivo de 50 MB tardó 0.007 s frente a 0.08 s de la primera.
 
-## ¿Cuál deberías elegir?
+## ¿Cuál elegir, ZeroFS o JuiceFS?
 
-Después de usar las dos, esta es mi regla general:
+En Bunny Storage, elige JuiceFS, porque ZeroFS se detiene en el ETag que falta. En cualquier otro almacén, elige ZeroFS para un servidor y JuiceFS cuando varios servidores escriben en el mismo volumen.
 
-**Elige ZeroFS si** quieres la configuración más simple, estás en un solo nodo, te gusta que el cifrado sea obligatorio, o necesitas funciones de dispositivo de bloque como correr ZFS sobre S3. No tener una base de datos extra que cuidar es una ventaja real en un VPS pequeño. Combínalo con Cloudflare R2 o AWS S3 (la API de S3 de Bunny actualmente no devuelve ETags, que ZeroFS necesita).
+![Diagrama de flujo con cuatro preguntas de sí o no que terminan en JuiceFS o ZeroFS, empezando por si el bucket está en Bunny](@assets/images/26/06/s3-bucket-filesystem-vps-decision.webp)
 
-**Elige JuiceFS si** necesitas varios servidores compartiendo un sistema de archivos, operas a mayor escala, quieres la opción más probada con la comunidad más amplia, ya ejecutas Redis, o usas el S3 de Bunny.net (JuiceFS funciona sin problemas con la API de S3 de Bunny). El motor de metadatos es trabajo extra, pero te da una consistencia y concurrencia que una herramienta de un solo nodo no puede igualar.
+*Empieza arriba y sigue el primer sí. La rama de Bunny se mantiene mientras su PutObject no devuelva ETag.*
 
-Para un servidor doméstico o un único VPS con una biblioteca multimedia o backups, me inclino por ZeroFS por la simplicidad. Para cualquier cosa compartida entre máquinas o que apunte a escala seria, JuiceFS es la apuesta más segura.
+Tras ejecutar ambos, esta es mi regla práctica:
+
+**Elige ZeroFS si** quieres la configuración más simple en un solo nodo. También encaja cuando el cifrado debe ser obligatorio, o cuando necesitas dispositivos de bloque para ejecutar ZFS sobre S3. No tener una base de datos extra que vigilar es una ventaja real para un VPS pequeño. Emparéjalo con Cloudflare R2 o AWS S3 (la API S3 de Bunny actualmente no devuelve ETags, que ZeroFS necesita).
+
+**Elige JuiceFS si** varios servidores deben compartir un sistema de archivos. También es la elección cuando ya ejecutas Redis, o cuando el bucket está en Bunny.net S3 (JuiceFS funciona bien con la API S3 de Bunny). El motor de metadatos es trabajo extra, y es lo que permite que muchos clientes escriban a la vez.
+
+Para un servidor casero o un solo VPS que guarda una biblioteca multimedia o copias de seguridad, me inclino por ZeroFS por su simplicidad. Para cualquier cosa compartida entre máquinas, JuiceFS es la elección.
 
 ## Solución de problemas
 
-<Accordion label="El montaje es extremadamente lento con archivos pequeños" group="troubleshoot" expanded="true">
+<Accordion label="El montaje va extremadamente lento con archivos pequeños" group="troubleshoot" expanded="true">
 
-Casi siempre es una caché fría o demasiado pequeña. Comprueba que tu directorio de caché está en NVMe local (no en un disco de red) y aumenta el tamaño de la caché para que quepan tus archivos de acceso frecuente. Confirma también que tu región de Bunny coincide con la ubicación de tu VPS, un bucket en Frankfurt servido a un VPS en Singapur añade latencia a cada fallo de caché.
+Revisa primero la caché. Una caché fría o demasiado pequeña convierte cada lectura pequeña en una petición HTTPS. Mantén el directorio de caché en NVMe local (no en un disco de red) y sube el tamaño de la caché para que retenga los archivos que usas a menudo. Confirma también que tu región de Bunny coincide con la ubicación de tu VPS. Un bucket en Frankfurt que sirve a un VPS en Singapur añade latencia a cada fallo de caché.
 
 </Accordion>
 
 <Accordion label="ZeroFS da errores sobre puts condicionales o fencing" group="troubleshoot">
 
-ZeroFS necesita soporte de put-if-not-exists, que muchos almacenes compatibles con S3 no exponen. Pon `conditional_put = "redis://localhost:6379"` en la sección `[aws]` de tu `zerofs.toml` y asegúrate de que Redis esté corriendo en local. Esto deja que ZeroFS coordine esas escrituras a través de Redis en lugar del bucket.
+ZeroFS necesita soporte de put-if-not-exists, que muchos almacenes compatibles con S3 no exponen. Pon `conditional_put = "redis://localhost:6379"` en la sección `[aws]` de tu `zerofs.toml` y asegúrate de que Redis esté corriendo en local. Esto deja a ZeroFS coordinar esas escrituras a través de Redis en lugar del bucket.
 
 </Accordion>
 
-<Accordion label="El montaje de JuiceFS falla o se queda colgado" group="troubleshoot">
+<Accordion label="El montaje de JuiceFS falla o se cuelga" group="troubleshoot">
 
-Comprueba que Redis es accesible (`redis-cli ping` debería devolver `PONG`) y que usas exactamente la misma URL de Redis con la que formateaste. Un número de base de datos distinto (el `/1` del final) apunta JuiceFS a un almacén de metadatos vacío. Verifica también que la URL del bucket es de tipo path, con el nombre de tu zona como último segmento.
+Comprueba que Redis es accesible (`redis-cli ping` debe devolver `PONG`) y que usas exactamente la misma URL de Redis con la que formateaste. Un número de base de datos distinto (el `/1` del final) apunta JuiceFS a un almacén de metadatos vacío. Verifica también que la URL del bucket sea de tipo path, con el nombre de tu zona como último segmento.
 
 </Accordion>
 
 <Accordion label="Permiso denegado al escribir en el montaje" group="troubleshoot">
 
-Los montajes NFS y FUSE mapean los UID/GID desde el proceso del servidor. Para ZeroFS por NFS, monta con `nolock` y revisa la propiedad de `/mnt/data`. Para JuiceFS, ejecuta el montaje como el usuario que necesita acceso de escritura, o ajusta los permisos del directorio tras montar.
+Los montajes NFS y FUSE mapean los UID/GID desde el proceso del servidor. Para ZeroFS por NFS, monta con `nolock` y revisa el propietario de `/mnt/data`. Para JuiceFS, ejecuta el montaje como el usuario que necesita acceso de escritura, o ajusta los permisos del directorio después de montar.
 
 </Accordion>
+
+## Para cerrar
+
+Antes de estos dos, la respuesta habitual era `s3fs`. En el propio benchmark fio del proyecto JuiceFS, JuiceFS alcanzó unas 10 veces el rendimiento secuencial de `s3fs` ([README](https://github.com/juicedata/juicefs#performance-benchmark)). ZeroFS y JuiceFS guardan bloques en caché en el disco local, así que las lecturas repetidas se saltan el bucket y el almacenamiento de objetos funciona como sistema de archivos en un VPS.
+
+Emparéjalos con el almacenamiento de Bunny.net a $0.01/GB por región y el montaje crece con la factura, no con un disco de VPS redimensionado. En Bunny eso significa hoy JuiceFS. ZeroFS necesita un almacén que devuelva ETags. Empieza con ZeroFS si quieres las menos piezas móviles. Recurre a JuiceFS cuando necesites almacenamiento compartido.
+
+<Button text="Prueba Bunny.net gratis durante 14 días" link="https://go.bitdoze.com/bunny" variant="solid" color="blue" size="lg" />
+
+## Artículos relacionados
+
+- [Reseña de Bunny.net](/es/resena-bunny-net/): la plataforma completa tras un año en producción
+- [Bunny Storage vs S3 vs Backblaze](/es/bunny-storage-vs-s3-vs-backblaze/): precios de almacenamiento en la nube comparados
+- [Copias de seguridad de Dokploy con Cloudflare R2](/es/backups-dokploy-cloudflare-r2/): crea el bucket R2, el token de API y el endpoint que ZeroFS necesita
+- [Zerobyte restic GUI](/es/zerobyte-interfaz-grafica-restic/): copias de seguridad restic programadas que pueden apuntar a este montaje
+- [Pluton self-hosted backups](/es/pluton-backup-autoalojado/): planes de restic y rclone con un destino en una ruta local
+- [TanStack Start + Bunny Database + Drizzle](/es/tanstack-start-bunny-database-drizzle/): construye una app full-stack con tipos seguros sobre Bunny
+- [Despliega un sitio Astro en Bunny.net](/es/desplegar-astro-bunny-net/): hosting estático en el almacenamiento y CDN de Bunny
+- [Guía de Bunny Stream](/es/guia-bunny-stream/): hosting de vídeo en Bunny
+- [Añade un disco nuevo con LVM](/es/anadir-disco-lvm/): ampliar el almacenamiento local en un VPS
+- [Autoalojar RustFS](/es/rustfs-autoalojado/): un servidor S3 que puedes ejecutar tú mismo
+- [Instalar Dockge](/es/instalar-dockge/): gestiona stacks de Docker compose con volúmenes respaldados por el bucket
+- [Instalar Docker en Ubuntu](/es/instalar-docker-ubuntu-arm/): configuración de Docker y Compose
+- [Los mejores contenedores Docker para un servidor casero](/es/contenedores-docker-servidor-casa/): qué ejecutar con tu nuevo almacenamiento
 
 ## Preguntas frecuentes
 
-<Accordion label="¿Es más rápido que usar el disco de mi VPS sin más?" group="faq">
+<Accordion label="¿Es esto más rápido que usar el disco de mi VPS?" group="faq">
 
-No, el disco local siempre es más rápido para los datos que caben en él. El sentido de un sistema de archivos respaldado por S3 es la capacidad barata, elástica y fuera del servidor para datos que no necesitan velocidad de disco: medios, backups, archivos y almacenamiento compartido. La caché local reduce la diferencia para los archivos calientes, pero es una herramienta distinta para un trabajo distinto.
-
-</Accordion>
-
-<Accordion label="¿Puedo usar esto con contenedores Docker?" group="faq">
-
-Sí. Una vez que el sistema de archivos está montado en una ruta como `/mnt/data`, puedes hacer bind-mount de esa ruta dentro de los contenedores como un volumen. Funciona bien para servidores multimedia o contenedores de backup. Si gestionas tus stacks con una interfaz, mi [guía de instalación de Dockge](/es/instalar-dockge/) muestra cómo apuntar los volúmenes de compose a cualquier ruta del host.
+No. Cada bloque fuera de caché es una petición HTTPS a la región, así que el disco local gana para los datos que caben en él. Un sistema de archivos sobre S3 añade capacidad barata, elástica y fuera del servidor: multimedia, copias de seguridad, archivos y almacenamiento compartido. En una ejecución de laboratorio del 28 de noviembre de 2026, la segunda lectura de un archivo de 50 MB tardó 0.007 s frente a 0.08 s de la primera.
 
 </Accordion>
 
-<Accordion label="¿Bunny.net cobra por las solicitudes que hacen estas herramientas?" group="faq">
+<Accordion label="¿Puedo usarlo con contenedores Docker?" group="faq">
 
-Bunny Storage no cobra por solicitud de API, lo cual es una ventaja real aquí ya que ambas herramientas hacen muchas llamadas pequeñas. Pagas por almacenamiento ($0,01/GB en una sola región) y por ancho de banda de entrega si sirves a través de la CDN. No hay tarifas de egress al entregar por la CDN de Bunny. Consulta mi [reseña de Bunny.net](/es/resena-bunny-net/) para el panorama completo de precios.
+Sí. Una vez montado el sistema de archivos en una ruta como `/mnt/data`, puedes montar esa ruta en los contenedores como volumen. Si gestionas stacks con una interfaz, mi [guía de instalación de Dockge](/es/instalar-dockge/) muestra cómo apuntar los volúmenes de compose a cualquier ruta del host.
 
 </Accordion>
 
-<Accordion label="¿Perderé datos si se pierden los metadatos?" group="faq">
+<Accordion label="¿Cobra Bunny.net por las peticiones que hacen estas herramientas?" group="faq">
 
-Para JuiceFS, sí, el motor de metadatos Redis es el mapa de tus bloques de datos, así que haz copias de seguridad y nunca lo ejecutes sin persistencia. Para ZeroFS, los metadatos viven en el bucket junto a los datos, así que no hay base de datos aparte que perder, pero la contraseña de cifrado es igual de crítica: si la pierdes, los datos son irrecuperables.
+Bunny Storage no cobra por petición a la API. Eso importa porque JuiceFS sube un objeto por cada bloque de 4 MiB, así que un archivo de 1 GiB son 256 peticiones PUT. Pagas por almacenamiento ($0.01/GB en una sola región, $0.02/GB con replicación, mínimo mensual de $1, mira los [precios de Bunny Storage](https://bunny.net/pricing/storage/)) y por la entrega por CDN, sin tarifas de egress. Mira mi [reseña de Bunny.net](/es/resena-bunny-net/) para el cuadro completo de precios.
+
+</Accordion>
+
+<Accordion label="¿Pierdo datos si se pierden los metadatos?" group="faq">
+
+Con JuiceFS, sí. El motor de metadatos Redis es el mapa de tus bloques de datos, así que hazle copias de seguridad y nunca lo ejecutes sin persistencia. Con ZeroFS, los metadatos viven en el bucket junto a los datos, así que no hay una base de datos aparte que perder. La contraseña de cifrado es igual de crítica, porque perderla deja los datos irrecuperables.
 
 </Accordion>
 
 <Accordion label="¿Puedo usar otro proveedor S3 en lugar de Bunny?" group="faq">
 
-Por supuesto. Ambas herramientas funcionan con AWS S3, Cloudflare R2, Backblaze B2, MinIO y cualquier almacén compatible con S3. Solo cambia el endpoint y las credenciales. Me centré en Bunny por el precio plano de $0,01/GB y la ausencia de tarifas por solicitud, que encajan con el patrón de acceso parlanchín de una capa de sistema de archivos.
+Sí. ZeroFS lista AWS S3, Cloudflare R2 y cualquier almacén compatible con S3 como backends, y JuiceFS documenta Amazon S3 y otros servicios compatibles con S3. Para otro almacén, cambia el endpoint y las credenciales. ZeroFS tiene dos necesidades extra: un ETag en el PUT y puts condicionales, a menos que pongas `conditional_put` con una URL de Redis. El 28 de noviembre de 2026, JuiceFS 1.4.2 y ZeroFS 2.3.7 arrancaron los dos contra un MinIO local con los ajustes de esta guía. Ese día la imagen oficial `minio/minio` también se negó a descargarse desde Docker Hub (`pull access denied`). Fija una imagen que ya tengas, o sigue la [guía de autoalojar RustFS](/es/rustfs-autoalojado/) para ejecutar otro servidor S3. Me centré en Bunny aquí por su precio plano de $0.01/GB y la ausencia de tarifas por petición, que encajan con el patrón de acceso hablador de una capa de sistema de archivos.
 
 </Accordion>
 
-## Para terminar
+<Accordion label="¿Por qué df -h muestra 1.0P en un montaje de JuiceFS?" group="faq">
 
-Montar un bucket S3 como sistema de archivos solía significar pelearse con `s3fs` y aceptar un rendimiento pésimo con archivos pequeños. ZeroFS y JuiceFS lo arreglan con una caché local inteligente, y hacen que el almacenamiento de objetos sea de verdad usable como sistema de archivos de trabajo en un VPS.
+JuiceFS informa de la capacidad fijada con `--capacity` (en GiB) al formatear, y sin límite fijado `df` muestra un 1.0P constante, como ocurrió en el laboratorio. ZeroFS muestra 16 EiB a menos que `max_size_gb` en `[filesystem]` fije una cuota. El uso real vive en `juicefs status redis://localhost:6379/1`. En el laboratorio informó de 105,689,088 bytes y 205 inodos tras dos archivos de 50 MB y 200 archivos pequeños.
 
-Combina cualquiera de los dos con el almacenamiento de tarifa plana y sin egress de Bunny.net y obtienes capacidad elástica que cuesta una fracción de redimensionar el disco de tu servidor. Empieza con ZeroFS si quieres las menos piezas móviles, recurre a JuiceFS cuando necesites almacenamiento compartido o a gran escala.
+</Accordion>
 
-<Button text="Prueba Bunny.net Gratis 14 Días" link="https://go.bitdoze.com/bunny" variant="solid" color="blue" size="lg" />
+<Accordion label="¿Los archivos borrados liberan espacio en el bucket de inmediato?" group="faq">
 
-## Artículos relacionados
+No con JuiceFS. Los archivos borrados van a la papelera durante un día por defecto (`TrashDays: 1` en la salida de `juicefs status`), y sus bloques permanecen en el bucket hasta entonces. En el laboratorio, el bucket seguía listando los 200 objetos de archivos pequeños unos segundos después de que `rm` los eliminara. ZeroFS recupera espacio borrando los objetos de segmentos muertos y reempaquetando los fragmentados, un trabajo que su servidor ejecuta en segundo plano.
 
-- [Reseña de Bunny.net](/es/resena-bunny-net/) - la plataforma completa tras un año en producción
-- [Bunny Storage vs S3 vs Backblaze](/es/bunny-storage-vs-s3-vs-backblaze/) - precios de almacenamiento en la nube comparados
-- [Guía de Bunny Stream](/es/guia-bunny-stream/) - alojamiento de vídeo en Bunny
-- [Instalar Dockge](/es/instalar-dockge/) - gestiona stacks de Docker compose con volúmenes respaldados por bucket
-- [Instalar Docker en Ubuntu](/es/instalar-docker-ubuntu-arm/) - configuración de Docker y Compose
+</Accordion>
+
+<Accordion label="¿Montar necesita root?" group="faq">
+
+No, al menos para los montajes FUSE. En el laboratorio monté JuiceFS como un usuario normal, y la caché recurrió a `~/.juicefs/cache` porque `/var/jfsCache` pertenece a root. ZeroFS incluye `zerofs mount`, un cliente FUSE que corre como el usuario actual contra el socket 9P, así que `zerofs mount 127.0.0.1:5564 /mnt/zerofs` tampoco necesita sudo. El montaje NFS de arriba sí necesita root, como cualquier `mount -t nfs`.
+
+</Accordion>

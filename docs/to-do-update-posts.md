@@ -269,28 +269,28 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 17 | [How to Choose a Domain Name and Register It the Right Way](../src/content/posts/choose-domain-name.mdx) | 2026-02-26 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 18 | [CloudPanel Varnish Cache for WordPress: Setup Guide](../src/content/posts/cloudpanel-varnish-cache.mdx) | 2026-02-26 | 2026-11-23 | updated | 2026-11-23 | n/a |
 | 19 | [Pangolin self-hosted: a Cloudflare Tunnels alternative](../src/content/posts/pangolin-cloudflare-tunnels-alternative.mdx) | 2026-05-20 | 2026-11-27 | updated | 2026-11-27 | n/a |
-| 20 | [Coolify vs Dokploy vs Kamal 2: Picking the Right Self-Hosted PaaS](../src/content/posts/coolify-vs-dokploy-vs-kamal-2.mdx) | 2026-05-25 | 2026-05-25 | not updated | 2026-11-13 | n/a |
+| 20 | [Coolify vs Dokploy vs Kamal 2: Pick Your Self-Hosted PaaS](../src/content/posts/coolify-vs-dokploy-vs-kamal-2.mdx) | 2026-05-25 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 21 | [Cheapest AI Models for Hermes Agent in 2026 (Under $1/M Tokens)](../src/content/posts/best-cheap-models-hermes-agent.mdx) | 2026-04-30 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
-| 22 | [How to Use the Codex App with Any Model: GLM 5.2, MiniMax M3, MiMo V2.5 Pro, OpenCode Go](../src/content/posts/codex-app-any-model.mdx) | 2026-06-12 | 2026-06-12 | not updated | not updated (file 2026-10-19) | n/a |
+| 22 | [Codex App With Any Model: GLM, MiniMax, MiMo and Go](../src/content/posts/codex-app-any-model.mdx) | 2026-06-12 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 23 | [Hermes Agent Dashboard Setup: SSH, Caddy, Docker & Security (2026)](../src/content/posts/hermes-dashboard-guide.mdx) | 2026-04-14 | 2026-11-27 | updated | 2026-11-27 | 2026-11-27 |
-| 24 | [Mount an S3 Bucket as a Filesystem on a VPS with ZeroFS & JuiceFS](../src/content/posts/s3-bucket-filesystem-vps.mdx) | 2026-06-16 | 2026-06-16 | not updated | not updated (file 2026-06-16) | n/a |
-| 25 | [Manifest V3 Broke Your Ad Blocker? Block Ads Everywhere with NextDNS](../src/content/posts/block-ads-manifest-v3-nextdns.mdx) | 2026-06-17 | 2026-06-17 | not updated | not updated (file 2026-10-19) | n/a |
-| 26 | [Build a Todo App with TanStack Start, Bunny Database & Drizzle ORM](../src/content/posts/tanstack-start-bunny-database-drizzle.mdx) | 2026-06-18 | 2026-06-18 | not updated | not updated (file 2026-10-19) | n/a |
+| 24 | [S3 bucket as a filesystem on a VPS: ZeroFS vs JuiceFS](../src/content/posts/s3-bucket-filesystem-vps.mdx) | 2026-06-16 | 2026-11-28 | updated | 2026-11-28 | n/a |
+| 25 | [Block ads in every browser after Manifest V3 with NextDNS](../src/content/posts/block-ads-manifest-v3-nextdns.mdx) | 2026-06-17 | 2026-11-28 | updated | 2026-11-28 | n/a |
+| 26 | [TanStack Start Todo App with Bunny Database and Drizzle](../src/content/posts/tanstack-start-bunny-database-drizzle.mdx) | 2026-06-18 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 27 | [Astro DB with Bunny Database: Local-First Dev, libSQL in Production](../src/content/posts/astro-db-bunny-database.mdx) | 2026-06-18 | 2026-06-19 | updated | not updated (file 2026-10-19) | n/a |
-| 28 | [Build Your First Durable AI Agent with Vercel Eve (Beginner's Guide)](../src/content/posts/vercel-eve-ai-agent.mdx) | 2026-06-19 | 2026-06-19 | not updated | not updated (file 2026-10-19) | n/a |
+| 28 | [Vercel Eve Tutorial: Build a Durable AI Agent in Files](../src/content/posts/vercel-eve-ai-agent.mdx) | 2026-06-19 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 29 | [Monitor CPU Usage and Send Email Alerts in Linux](../src/content/posts/monitor-cpu-usage-and-send-email-alerts-in-linux.mdx) | 2022-09-14 | 2026-06-26 | updated | 2026-06-26 | n/a |
 | 30 | [How to Install Node.js using NVM on MacOS and Ubuntu](../src/content/posts/install-nodejs-using-nvm-macos-ubuntu.mdx) | 2022-10-07 | 2026-06-27 | updated | 2026-06-27 | n/a |
 | 31 | [TinyFish: The Best Free Firecrawl Alternative for AI Agents in 2026](../src/content/posts/tinyfish-free-firecrawl-alternative.mdx) | 2026-06-27 | 2026-11-27 | updated | 2026-11-27 | n/a |
 | 32 | [Best Astro.js Online Courses/Tutorials](../src/content/posts/best-astrojs-online-courses.mdx) | 2022-10-12 | 2026-06-28 | updated | 2026-06-28 | n/a |
 | 33 | [How To Deploy An Astro.JS Blog On Cloudflare](../src/content/posts/deploy-astrojs-cloudflare.mdx) | 2022-10-18 | 2026-06-28 | updated | 2026-06-28 | n/a |
 | 34 | [Link GitHub with A SSH Key to MacOS or Linux](../src/content/posts/link-github-with-ssh-maco-linux.mdx) | 2022-10-07 | 2026-06-28 | updated | 2026-06-28 | n/a |
-| 35 | [Astro 7 Benchmark: Build Times Cut in Half on a 743-Page Site](../src/content/posts/astro-7-faster-builds.mdx) | 2026-07-01 | 2026-07-01 | not updated | not updated (file 2026-10-19) | n/a |
-| 36 | [Cognee vs Hindsight: Which Agent Memory System Should You Self-Host?](../src/content/posts/cognee-vs-hindsight.mdx) | 2026-07-03 | 2026-07-03 | not updated | not updated (file 2026-10-19) | n/a |
+| 35 | [Astro 7 benchmark: build time cut in half on 743 pages](../src/content/posts/astro-7-faster-builds.mdx) | 2026-07-01 | 2026-11-28 | updated | 2026-11-28 | n/a |
+| 36 | [Cognee vs Hindsight: Which Agent Memory to Self-Host?](../src/content/posts/cognee-vs-hindsight.mdx) | 2026-07-03 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 37 | [Upgrade Your Carrd.co Website With A Cookie Notice in Minutes](../src/content/posts/add-cookie-notice-carrd.mdx) | 2023-05-30 | 2026-07-08 | updated | 2026-07-08 | 2026-07-08 |
 | 38 | [How To Add a Sticky Header to Carrd (CSS Tutorial)](../src/content/posts/add-stickey-header-carrd.mdx) | 2023-05-30 | 2026-07-09 | updated | 2026-07-09 | 2026-07-09 |
-| 39 | [Astro vs Next.js vs TanStack Start: Which Wins in 2026?](../src/content/posts/astro-vs-nextjs-vs-tanstack-start-which-wins.mdx) | 2026-07-10 | 2026-07-10 | not updated | not updated (file 2026-10-19) | n/a |
+| 39 | [Astro vs Next.js vs TanStack Start: Which wins in 2026?](../src/content/posts/astro-vs-nextjs-vs-tanstack-start-which-wins.mdx) | 2026-07-10 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 40 | [Pi Coding Agent Setup Guide: Install, Configure Models, and Best Extensions](../src/content/posts/pi-coding-agent-setup-guide.mdx) | 2026-04-30 | 2026-07-10 | updated | not updated (file 2026-04-30) | n/a |
-| 41 | [Chatto Self-Hosted: The Privacy Answer to EU Chat Control](../src/content/posts/chatto-self-hosted.mdx) | 2026-07-11 | 2026-07-11 | not updated | not updated (file 2026-10-19) | n/a |
+| 41 | [Chatto self-hosted: the privacy answer to EU Chat Control](../src/content/posts/chatto-self-hosted.mdx) | 2026-07-11 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 42 | [How to Enable Command Autocomplete in ZSH](../src/content/posts/enable-command-autocomplete-in-zsh.mdx) | 2023-11-16 | 2026-07-11 | updated | 2026-07-11 | n/a |
 | 43 | [How to Build a One Page Website on a Budget](../src/content/posts/build-one-page-website-budget.mdx) | 2023-11-22 | 2026-07-12 | updated | 2026-07-12 | n/a |
 | 44 | [How to Check Remote Ports Using the nc Command in Linux](../src/content/posts/check-remote-port-in-linux-nc.mdx) | 2023-11-22 | 2026-07-12 | updated | 2026-07-12 | n/a |
@@ -305,7 +305,7 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 53 | [How to Update All Node.js Dependencies to Latest Version](../src/content/posts/nodejs-update-dependencies.mdx) | 2023-12-06 | 2026-07-14 | updated | 2026-07-14 | n/a |
 | 54 | [Add a Contact Form to Any Static Website](../src/content/posts/add-contact-form-static-websites.mdx) | 2024-01-10 | 2026-07-15 | updated | 2026-07-15 | n/a |
 | 55 | [How to Add a Custom Domain to Carrd (Step-by-Step Guide)](../src/content/posts/carrd-add-domain.mdx) | 2024-01-16 | 2026-07-15 | updated | 2026-07-15 | 2026-07-15 |
-| 56 | [Mastra vs Eve: Best TypeScript AI Agent Framework in 2026](../src/content/posts/mastra-vs-eve-typescript-ai-agents.mdx) | 2026-07-16 | 2026-07-16 | not updated | not updated (file 2026-10-19) | n/a |
+| 56 | [Mastra vs Eve: Best TypeScript AI agent framework in 2026](../src/content/posts/mastra-vs-eve-typescript-ai-agents.mdx) | 2026-07-16 | 2026-11-28 | updated | 2026-11-28 | n/a |
 | 57 | [Meetily Review: Self-Hosted AI Meeting Assistant Guide](../src/content/posts/meetily-self-hosted-ai-meeting-assistant.mdx) | 2026-07-16 | 2026-07-16 | not updated | 2026-11-05 | n/a |
 | 58 | [Deploy Slash Link Shortener with Docker and Dockge](../src/content/posts/slash-docker-deploy.mdx) | 2024-01-17 | 2026-07-16 | updated | 2026-07-16 | n/a |
 | 59 | [Deploy Streamlit on a VPS and Proxy to Cloudflare Tunnels](../src/content/posts/streamlit-deploy-vps-cloudflare.mdx) | 2024-01-18 | 2026-07-16 | updated | 2026-07-16 | n/a |
