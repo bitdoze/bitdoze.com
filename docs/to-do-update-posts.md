@@ -687,3 +687,4 @@ Not fixed here, only listed. Each one makes the post look newer or older than it
 | 435 | [Best Open-Source TTS Engines in 2026 for Self-Hosting](../src/content/posts/best-open-source-tts.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
 | 436 | [Pterodactyl vs Pelican Panel: Which Game Panel in 2026?](../src/content/posts/pterodactyl-vs-pelican.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
 | 437 | [Pterodactyl Panel Docker Install: Panel, Wings, First Server](../src/content/posts/pterodactyl-docker-install.mdx) | 2026-11-26 | 2026-11-26 | updated | 2026-11-26 | 2026-11-26 |
+| 438 | [Best Speech-to-Speech Models in 2027: Paid and Open Source](../src/content/posts/best-speech-to-speech-models.mdx) | 2026-11-28 | 2026-11-28 | updated | 2026-11-28 | 2026-11-28 |
