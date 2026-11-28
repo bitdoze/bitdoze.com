@@ -11,6 +11,7 @@ export function formatDate(date: Date, locale: SupportedLocale = "en"): string {
     year: "numeric",
     month: "long",
     day: "numeric",
+    timeZone: "UTC",
   }).format(date);
 }
 
@@ -20,5 +21,16 @@ export function formatDateShort(date: Date, locale: SupportedLocale = "en"): str
     year: "numeric",
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   }).format(date);
+}
+
+/** Calendar day in UTC ("YYYY-MM-DD") for timezone-independent comparisons. */
+export function toUtcDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/** True when `lastmod` is on a later UTC calendar day than `date`. */
+export function isUpdatedDate(date?: Date, lastmod?: Date): lastmod is Date {
+  return Boolean(lastmod && (!date || toUtcDay(lastmod) > toUtcDay(date)));
 }

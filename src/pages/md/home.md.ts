@@ -24,10 +24,10 @@ export const GET: APIRoute = async () => {
     ``,
     `## All articles (${sorted.length})`,
     ``,
-    ...sorted.map(
-      (p) =>
-        `- [${p.data.title}](${siteConfig.url}${getEntryHref(p)})${p.data.date ? ` — ${new Date(p.data.date).toISOString().slice(0, 10)}` : ""}`
-    ),
+    ...sorted.map((p) => {
+      const d = p.data.lastmod ?? p.data.date;
+      return `- [${p.data.title}](${siteConfig.url}${getEntryHref(p)})${d ? ` — ${new Date(d).toISOString().slice(0, 10)}` : ""}`;
+    }),
     ``,
     `## Topics`,
     ``,

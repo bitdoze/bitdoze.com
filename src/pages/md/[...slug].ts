@@ -10,6 +10,7 @@ export async function getStaticPaths() {
       title: post.data.title,
       description: post.data.description,
       date: post.data.date,
+      lastmod: post.data.lastmod,
       categories: post.data.categories,
       tags: post.data.tags,
       body: post.body,
@@ -22,6 +23,7 @@ export async function getStaticPaths() {
       title: d.data.title,
       description: d.data.description,
       date: d.data.date,
+      lastmod: undefined,
       categories: [],
       tags: [],
       body: d.body,
@@ -88,13 +90,16 @@ function mdxToMarkdown(body: string): string {
 }
 
 export const GET: APIRoute = async ({ props }) => {
-  const { title, description, date, categories, tags, body } = props;
+  const { title, description, date, lastmod, categories, tags, body } = props;
+  const dateIso = date ? new Date(date).toISOString().split("T")[0] : "";
+  const lastmodIso = lastmod ? new Date(lastmod).toISOString().split("T")[0] : "";
 
   const frontmatter = [
     `---`,
     `title: ${JSON.stringify(title)}`,
     `description: ${JSON.stringify(description || "")}`,
-    `date: ${date ? new Date(date).toISOString().split("T")[0] : ""}`,
+    `date: ${dateIso}`,
+    ...(lastmodIso && lastmodIso > dateIso ? [`lastmod: ${lastmodIso}`] : []),
     `categories: ${JSON.stringify(categories || [])}`,
     `tags: ${JSON.stringify(tags || [])}`,
     `---`,

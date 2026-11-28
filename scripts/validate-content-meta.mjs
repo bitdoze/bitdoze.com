@@ -5,7 +5,7 @@
  *   - a 4-digit year in `title` or `meta_title` that is LOWER than the year
  *     in `lastmod ?? date` — a stale "2025" in a title on a page last touched
  *     in 2026. Slugs in scripts/title-year-allowlist.json are exempt.
- *
+ *   - `lastmod` earlier than `date` (inverted dates break updated badges and schema).
  * Warnings (never fail; one summary line per locale):
  *   - `meta_title ?? title` over 65 characters (SERP truncation)
  *   - `description` over 160 characters (SERP truncation)
@@ -31,6 +31,13 @@ function field(fm, key) {
     : v;
 }
 
+function parseDate(raw) {
+  if (!raw) return null;
+  const normalized = raw.replace(/T(\d):/, "T0$1:");
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 const errors = [];
 const warnings = { longTitles: {}, longDescriptions: {} };
 
@@ -51,8 +58,20 @@ for (const locale of ["", "es", "de"]) {
     const fm = m ? m[1] : "";
     const file = `src/content/posts/${locale ? locale + "/" : ""}${entry.name}`;
 
-    const touched = field(fm, "lastmod") ?? field(fm, "date");
-    const touchedYear = touched ? new Date(touched).getFullYear() : null;
+    const dateStr = field(fm, "date");
+    const lastmodStr = field(fm, "lastmod");
+    const parsedDate = parseDate(dateStr);
+    const parsedLastmod = parseDate(lastmodStr);
+    if (
+      parsedDate &&
+      parsedLastmod &&
+      parsedLastmod.toISOString().slice(0, 10) < parsedDate.toISOString().slice(0, 10)
+    ) {
+      errors.push(`${file}: lastmod (${lastmodStr}) is earlier than date (${dateStr})`);
+    }
+
+    const touched = parsedLastmod ?? parsedDate;
+    const touchedYear = touched ? touched.getUTCFullYear() : null;
     if (touchedYear && !allowlist.has(slug)) {
       for (const key of ["title", "meta_title"]) {
         const text = field(fm, key);
@@ -89,9 +108,9 @@ for (const [locale, items] of Object.entries(warnings.longDescriptions)) {
 }
 
 if (errors.length) {
-  console.error(`validate-content-meta: ${errors.length} stale title year(s):`);
+  console.error(`validate-content-meta: ${errors.length} error(s):`);
   for (const line of errors.slice(0, 50)) console.error(`  ${line}`);
   if (errors.length > 50) console.error(`  … and ${errors.length - 50} more`);
   process.exit(1);
 }
-console.log("Validated post meta (title years, lengths).");
+console.log("Validated post meta (dates, title years, lengths).");
